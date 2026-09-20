@@ -1,5 +1,7 @@
 #pragma once
 
+#include "render/pipeline.hpp"
+
 namespace encke
 {
     class VulkanDevice;
@@ -40,6 +42,8 @@ namespace encke
         static constexpr u32 kFramesInFlight = 2;
 
         VulkanDevice const* device_ = nullptr;
+
+        GraphicsPipeline triangle_;
 
         VkCommandPool command_pool_ = VK_NULL_HANDLE;
 

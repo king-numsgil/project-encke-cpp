@@ -28,6 +28,12 @@ Banned outright:
   crucial, vital, landscape, realm, testament to, dive into, unpack.
 - Rule-of-three triads when two items or four would be honest.
 - Announcing structure: "Two things:", "A few notes:", "Three takeaways".
+- **Measured performance numbers in this file.** No fps, no timings, no
+  throughput comparisons. This machine has heavy run-to-run variance and is in
+  use while Claude works, so any figure recorded here is a lie by the time it is
+  read, and stale again an hour later as features land. Say what is fast or slow
+  and why; measure in the moment when it matters. Deterministic facts —
+  `sizeof`, alignment, colour values, versions — are not this and belong here.
 
 Constrained, not banned:
 
@@ -48,9 +54,10 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer. It clears the swapchain to a colour and presents,
-survives resize, and reports throughput. There is no `VkPipeline`, no shaders
-and no geometry yet — a clear needs none of them.
+`encke` is a Vulkan renderer. It draws a gouraud-shaded triangle from a Slang
+shader, survives resize, and reports throughput. There are no vertex buffers,
+descriptors, textures or depth yet — the triangle's positions come from
+`SV_VertexID`.
 
 ```
 src/
@@ -67,7 +74,10 @@ src/
     device.{hpp,cpp}  physical device selection, logical device, queues
     swapchain.{hpp,cpp}  swapchain, images, views, recreation
   render/
+    pipeline.{hpp,cpp}   shader module loading, VkPipeline construction
     renderer.{hpp,cpp}   command pool, per-frame sync, record and present
+shaders/
+  triangle.slang         compiled to SPIR-V at build time by slangc
 ```
 
 **Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
@@ -86,8 +96,17 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
 - **Dynamic rendering, not `VkRenderPass`.** Core in Vulkan 1.3. There is no
   `VkRenderPass` or `VkFramebuffer` anywhere, and there should not be.
 - **synchronization2** for barriers and submits (`vkCmdPipelineBarrier2`,
-  `vkQueueSubmit2`). Device selection *requires* both features and rejects any
-  GPU lacking them, so neither needs a fallback path.
+  `vkQueueSubmit2`). Device selection *requires* both features, plus
+  `shaderDrawParameters`, and rejects any GPU lacking them, so none of them
+  needs a fallback path.
+- **Viewport and scissor are dynamic state**, so a resize does not invalidate
+  the pipeline. The colour format does, since dynamic rendering bakes it in.
+- **The Y flip lives in the viewport**, via `flipped_viewport()` — negative
+  height, set per frame. Projection matrices stay conventional.
+- **Face culling is off and the winding convention is undecided.** A negative
+  viewport height reverses apparent winding, so `frontFace` has to be settled
+  against real geometry rather than guessed. `VK_CULL_MODE_NONE` keeps that out
+  of the way until there is geometry to test with.
 - **Two frames in flight.** `image_available` semaphores and fences are
   per-frame; `render_finished` semaphores are **per swapchain image**, because
   a frame index maps to a different image over time and signalling a semaphore
@@ -100,8 +119,8 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
 - The swapchain is only rebuilt when the window size actually differs, since a
   resize event also fires once at startup for the initial size.
 
-Expect ~3000 fps clearing a 1280x720 window on a GTX 1070. A sharp drop means
-something changed, not that the number was ever meaningful.
+The frame loop reports throughput once a second. Treat it as a relative signal
+within a single session, never as a figure worth recording.
 
 ## Renderer architecture — decided, not yet built
 
@@ -152,15 +171,30 @@ for now, not from ignorance:
 
 ## Shaders
 
-**Slang**, compiled offline. `slangc.exe` ships with the Vulkan SDK
-(`%VULKAN_SDK%\Bin`, 2026.13.1 alongside SDK 1.4.357.0), so it costs no new
-dependency, and `slangd.exe` gives CLion a language server over LSP. Compile to
-`.spv` with a CMake custom command; nothing links against Slang at runtime.
+**Slang**, compiled to SPIR-V at build time. `slangc` ships with the Vulkan SDK,
+so it adds no dependency to fetch, and `slangd.exe` gives CLion a language
+server over LSP. Nothing links against Slang at runtime.
 
-Open question, to settle when shaders land: this makes the build depend on the
-Vulkan SDK, whereas today a fresh clone needs only the vcpkg manifest. Either
-accept it and fail loudly at configure time, or fetch a pinned Slang release in
-CMake to stay hermetic.
+`encke_add_shader()` in `CMakeLists.txt` drives it. **The build now requires the
+Vulkan SDK** — `find_program` fails loudly at configure time rather than leaving
+something cryptic for link time. That was the open question and this is the
+answer: accepted, not worked around. The SDK is needed for validation layers and
+`spirv-val` regardless.
+
+- **One `.slang` file produces one `.spv` holding every `[shader(...)]` entry
+  point in it.** `-fvk-use-entrypoint-name` keeps their names; without it they
+  all become `main` and the pipeline cannot distinguish them.
+- **`.spv` lands in `shaders/` beside the executable**, and the runtime resolves
+  it against `SDL_GetBasePath()`.
+- **`SV_VertexID` requires `shaderDrawParameters`.** Slang lowers it to
+  `gl_VertexIndex` and emits the SPIR-V `DrawParameters` capability. Device
+  creation enables the feature and selection requires it; without it
+  `vkCreateShaderModule` is a spec violation that drivers accept silently and
+  validation rejects.
+- **Shader colour output is LINEAR.** The swapchain is `_SRGB` so the hardware
+  encodes on write, and values written look considerably lighter than the
+  numbers suggest. Convert intended sRGB colours to linear at authoring time —
+  `triangle.slang` records both forms in a comment.
 
 
 ## Allocator
@@ -222,27 +256,21 @@ Do not remove the `if(MINGW)` block that applies it.
 This also puts `MI_SECURE`, `MI_GUARDED` and arena tuning within reach if they
 ever matter.
 
-### What it is worth: not measurable yet
+### What it is worth: unmeasured, and that is fine
 
-**No throughput claim survives measurement on the current workload.** An earlier
-note here reported mimalloc ~40% ahead; that was sequential A/B sampling
-contaminated by drift, and a later run reversed the ordering.
+No throughput claim here survives scrutiny on the current workload, and an
+earlier attempt to record one had to be retracted. The renderer performs
+essentially no per-frame allocation and the loop is bound by present throughput,
+so there is nothing for an allocator to win yet.
 
-The numbers behind that: five launches of one unchanged binary within a few
-minutes span 6158–6956 fps, a 1.13x spread. Identical configurations measured at
-different points in the session ranged 4100–7100. Cross-window drift is several
-times the within-window noise, so any A/B that builds one config, measures,
-rebuilds and measures again is reading drift rather than the allocator.
+mimalloc is wired in ahead of the allocation traffic a scene graph, material
+system and per-frame staging will bring, and because threading
+`VkAllocationCallbacks` through every create/destroy pair is far cheaper now
+than as a retrofit.
 
-This is the expected result rather than a disappointment. The renderer performs
-essentially no per-frame allocation, and the frame loop is bound by present
-throughput. mimalloc is wired in ahead of the allocation traffic that a scene
-graph, material system and per-frame staging buffers will bring, and because
-`VkAllocationCallbacks` threading is far cheaper to do now than to retrofit.
-
-To measure it honestly later: interleave the two configurations within one time
-window rather than running them back to back, and use a workload that actually
-allocates.
+If it ever needs measuring: interleave the configurations within one time window
+rather than building and running them back to back, and use a workload that
+allocates. Sequential A/B on this machine reads drift, not the allocator.
 
 ## Toolchain
 
@@ -291,8 +319,16 @@ Reach for the others only when there is a reason:
 | `release` | Measuring performance. `-Og` numbers are meaningless. |
 | `gcc-debug` | Before a commit that touched build flags or headers, to catch GCC-only diagnostics; or when chasing a codegen difference. |
 
-A sweep of all three belongs before a commit that changes `CMakeLists.txt`,
-preset files or `vcpkg.json` — not after every edit.
+**Build `clang-sanitize` and nothing else.** Not "usually" — always, unless the
+user asks for another preset or a row above genuinely applies. A three-preset
+sweep is minutes of the user's time for a result that is almost never different,
+and a `CMakeLists.txt` change is *not* a reason to run one. Commit on the
+strength of one preset; the others get built when someone needs them.
+
+And **do not pass `-Configure` to force it.** CMake re-runs itself when
+`CMakeLists.txt` or a preset changes, so a plain build already picks that up.
+Forcing it re-runs `vcpkg install` and turns a seconds-long build into a
+minutes-long one for nothing.
 
 `.claude/` is gitignored — the script hardcodes machine-specific MSYS2 paths, so
 it will not exist in a fresh clone. Recreate it or fall back to raw `cmake` with
@@ -306,8 +342,8 @@ tests exist: `ctest --test-dir build/gcc-debug -R <name>` for a single test.
 ### Do not force a reconfigure casually
 
 `-Configure` (and deleting a build directory) re-runs `vcpkg install`, which
-takes **~5.5 minutes** for this project's five dependencies even with a warm
-binary cache. Incremental builds need no reconfigure — CMake re-runs itself
+costs minutes even with a warm binary cache. Incremental builds need no
+reconfigure — CMake re-runs itself
 automatically when `CMakeLists.txt` or a preset file changes. Only force it when
 something is genuinely stale, and expect the wait.
 

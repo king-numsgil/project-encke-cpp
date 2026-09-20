@@ -4,6 +4,7 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "vulkan/context.hpp"
 #include "vulkan/device.hpp"
 #include "vulkan/swapchain.hpp"
 
@@ -135,6 +136,14 @@ namespace encke
             }
         }
 
+        // Dynamic rendering bakes the colour format into the pipeline, so it
+        // has to come from the swapchain rather than being chosen here.
+        if (!triangle_.init(device, "triangle.spv", "vertex_main", "fragment_main",
+                            swapchain.format()))
+        {
+            return false;
+        }
+
         return on_swapchain_changed(swapchain);
     }
 
@@ -220,6 +229,20 @@ namespace encke
 
         // Dynamic rendering: no VkRenderPass, no VkFramebuffer.
         vkCmdBeginRendering(command, &rendering);
+
+        // Negative height flips Y here rather than in every projection matrix.
+        VkViewport const viewport = flipped_viewport(static_cast<f32>(swapchain.extent().width),
+                                                     static_cast<f32>(swapchain.extent().height));
+        VkRect2D const scissor{.offset = {0, 0}, .extent = swapchain.extent()};
+
+        vkCmdSetViewport(command, 0, 1, &viewport);
+        vkCmdSetScissor(command, 0, 1, &scissor);
+
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, triangle_.handle());
+
+        // Three vertices, no buffers -- the shader builds them from SV_VertexID.
+        vkCmdDraw(command, 3, 1, 0, 0);
+
         vkCmdEndRendering(command);
 
         submit_barrier(command,
@@ -377,6 +400,8 @@ namespace encke
         }
 
         VkDevice const device = device_->handle();
+
+        triangle_.shutdown();
 
         destroy_image_semaphores();
 

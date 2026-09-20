@@ -11,6 +11,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # for allocator throughput, which is the wrong way round in a debug build.
 option(ENCKE_USE_MIMALLOC "Route allocations through mimalloc" ON)
 
+# Shaders are Slang, compiled to SPIR-V at build time. slangc ships with the
+# Vulkan SDK, so it costs no extra dependency -- but it does mean the build
+# needs the SDK, where everything else comes from the vcpkg manifest. That is a
+# deliberate trade; fail here rather than at link time with something cryptic.
+find_program(ENCKE_SLANGC
+    NAMES slangc
+    HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin"
+    DOC "Slang compiler, shipped with the Vulkan SDK"
+)
+if(NOT ENCKE_SLANGC)
+    message(FATAL_ERROR
+        "slangc not found. It ships with the Vulkan SDK -- install the SDK and make sure "
+        "VULKAN_SDK is set, or put slangc on PATH.")
+endif()
+
 find_package(Vulkan REQUIRED)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
@@ -72,6 +87,7 @@ add_executable(encke
 
     src/platform/window.cpp
 
+    src/render/pipeline.cpp
     src/render/renderer.cpp
 
     src/vulkan/context.cpp
@@ -80,6 +96,42 @@ add_executable(encke
 )
 
 target_include_directories(encke PRIVATE src)
+
+# --- shaders -----------------------------------------------------------------
+
+# Lands beside the executable; the runtime resolves SPIR-V against
+# SDL_GetBasePath() + "shaders/". A generator expression would be more precise
+# but is not allowed in a custom command's OUTPUT, and the single-config
+# generators used here put the executable directly in the binary directory.
+set(ENCKE_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+
+# One .slang file yields one .spv holding every [shader(...)] entry point in it.
+# -fvk-use-entrypoint-name keeps their names; without it they all become "main"
+# and the pipeline cannot tell them apart.
+function(encke_add_shader out_spv source)
+    get_filename_component(shader_name "${source}" NAME_WE)
+    set(spv "${ENCKE_SHADER_DIR}/${shader_name}.spv")
+
+    add_custom_command(
+        OUTPUT "${spv}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${ENCKE_SHADER_DIR}"
+        COMMAND "${ENCKE_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+                -target spirv
+                -profile spirv_1_5
+                -fvk-use-entrypoint-name
+                -o "${spv}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+        COMMENT "slangc ${source}"
+        VERBATIM
+    )
+
+    set(${out_spv} "${spv}" PARENT_SCOPE)
+endfunction()
+
+encke_add_shader(ENCKE_TRIANGLE_SPV shaders/triangle.slang)
+
+add_custom_target(encke_shaders DEPENDS "${ENCKE_TRIANGLE_SPV}")
+add_dependencies(encke encke_shaders)
 
 # volk.h, SDL3 and glm are stable and heavy; our own code is not yet either.
 target_precompile_headers(encke PRIVATE src/core/pch.hpp)

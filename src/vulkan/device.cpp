@@ -89,19 +89,29 @@ namespace encke
         // Dynamic rendering removes VkRenderPass and VkFramebuffer entirely;
         // synchronization2 gives the cleaner barrier and submit structs. Both
         // are core in 1.3 but still opt-in features.
+        //
+        // shaderDrawParameters is needed because Slang lowers SV_VertexID to
+        // gl_VertexIndex and emits the SPIR-V DrawParameters capability with
+        // it. Without the feature, vkCreateShaderModule is a spec violation
+        // even though drivers generally accept it.
         bool has_required_features(VkPhysicalDevice device)
         {
             VkPhysicalDeviceVulkan13Features features13{};
             features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 
+            VkPhysicalDeviceVulkan11Features features11{};
+            features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+            features11.pNext = &features13;
+
             VkPhysicalDeviceFeatures2 features{};
             features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            features.pNext = &features13;
+            features.pNext = &features11;
 
             vkGetPhysicalDeviceFeatures2(device, &features);
 
             return features13.dynamicRendering == VK_TRUE &&
-                   features13.synchronization2 == VK_TRUE;
+                   features13.synchronization2 == VK_TRUE &&
+                   features11.shaderDrawParameters == VK_TRUE;
         }
 
         bool supports_surface(VkPhysicalDevice device, VkSurfaceKHR surface)
@@ -200,7 +210,8 @@ namespace encke
         if (physical_ == VK_NULL_HANDLE)
         {
             log::error("no device supports Vulkan 1.3 with dynamic rendering, "
-                       "synchronization2 and a presentable swapchain queue");
+                       "synchronization2, shaderDrawParameters and a presentable "
+                       "swapchain queue");
             return false;
         }
 
@@ -241,9 +252,14 @@ namespace encke
         features13.dynamicRendering = VK_TRUE;
         features13.synchronization2 = VK_TRUE;
 
+        VkPhysicalDeviceVulkan11Features features11{};
+        features11.sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        features11.pNext                = &features13;
+        features11.shaderDrawParameters = VK_TRUE;
+
         VkPhysicalDeviceFeatures2 features{};
         features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &features13;
+        features.pNext = &features11;
 
         VkDeviceCreateInfo const device_info{
             .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
