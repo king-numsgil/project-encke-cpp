@@ -11,7 +11,14 @@ find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
-add_executable(encke main.cpp)
+add_executable(encke
+    src/main.cpp
+)
+
+target_include_directories(encke PRIVATE src)
+
+# volk.h, SDL3 and glm are stable and heavy; main.cpp is not yet either.
+target_precompile_headers(encke PRIVATE src/pch.hpp)
 
 set_target_properties(encke PROPERTIES
     POSITION_INDEPENDENT_CODE ON
@@ -19,13 +26,22 @@ set_target_properties(encke PROPERTIES
 )
 
 target_link_libraries(encke PUBLIC
-    Vulkan::Vulkan volk::volk
+    # Headers only, never Vulkan::Vulkan. The import library for vulkan-1.dll
+    # defines vkCreateInstance and friends as real symbols, and volk defines the
+    # same names as function pointers -- linking both is a multiple-definition
+    # error. volk loads the entry points at runtime instead.
+    Vulkan::Headers volk::volk
     GPUOpen::VulkanMemoryAllocator
     SDL3::SDL3
     glm::glm
 )
 
 target_compile_definitions(encke PUBLIC
+    # volk owns every Vulkan entry point. Without this, vulkan.h declares
+    # prototypes that link against the static loader and silently bypass volk,
+    # and volk.h itself hard-errors if it sees vulkan.h included without it.
+    VK_NO_PROTOTYPES
+
     GLM_FORCE_EXPLICIT_CTOR
     GLM_FORCE_SIZE_T_LENGTH
     GLM_FORCE_AVX2

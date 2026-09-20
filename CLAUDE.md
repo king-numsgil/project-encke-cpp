@@ -48,10 +48,11 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer at the scaffolding stage. `main.cpp` is still a
-hello-world; all of the graphics dependencies are wired up in CMake but nothing
-uses them yet. There is no architecture to preserve — when adding real code,
-establish the structure rather than looking for an existing one.
+`encke` is a Vulkan renderer. `src/main.cpp` currently opens an SDL3 window,
+initialises volk, creates a `VkInstance` and a surface, and runs an event loop.
+There is no device, swapchain or frame loop yet. Everything lives in one
+translation unit on purpose — the architecture has not been decided, so add
+structure when the shape is known rather than guessing at it now.
 
 ## Toolchain
 
@@ -161,10 +162,21 @@ All deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
 `sdl3`, `glm`.
 
-- **volk + Vulkan::Vulkan are both linked.** volk is a meta-loader; the usual
-  setup defines `VK_NO_PROTOTYPES` and calls `volkInitialize`/`volkLoadDevice`.
-  That define is not set yet, so Vulkan entry points currently resolve against
-  the static loader. Decide this deliberately when real Vulkan code lands.
+- **volk owns every Vulkan entry point.** `VK_NO_PROTOTYPES` is defined
+  globally and the target links `Vulkan::Headers`, never `Vulkan::Vulkan`.
+  Linking the loader's import library alongside volk is a multiple-definition
+  error at link time — both define `vkCreateInstance` and friends. Call order
+  is `volkInitialize()` → `vkCreateInstance` → `volkLoadInstance()`, and
+  `volkLoadDevice()` once a device exists.
+- **`src/pch.hpp` is the precompiled header** and must include `volk.h` before
+  anything that reaches `vulkan.h`. `SDL3/SDL_vulkan.h` declares its own Vulkan
+  handle typedefs unless `VULKAN_H_` is already defined, and volk hard-errors if
+  it sees `vulkan.h` without `VK_NO_PROTOTYPES`.
+- **sdl3 needs its `vulkan` feature explicitly.** It is not a default feature of
+  the vcpkg port, so a bare `"sdl3"` dependency builds with `SDL_VULKAN=OFF` and
+  `SDL_CreateWindow(SDL_WINDOW_VULKAN)` fails at runtime with "Vulkan support is
+  either not configured in SDL...". The manifest requests `sdl3[vulkan]`.
+  Changing this rebuilds SDL from source, once per build directory.
 - **GLM is configured strictly**: `GLM_FORCE_EXPLICIT_CTOR` (no implicit
   conversions between vector types), `GLM_FORCE_SIZE_T_LENGTH` (`.length()`
   returns `size_t`), `GLM_FORCE_AVX2`.
