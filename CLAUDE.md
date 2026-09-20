@@ -48,11 +48,40 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer. `src/main.cpp` currently opens an SDL3 window,
-initialises volk, creates a `VkInstance` and a surface, and runs an event loop.
-There is no device, swapchain or frame loop yet. Everything lives in one
-translation unit on purpose — the architecture has not been decided, so add
-structure when the shape is known rather than guessing at it now.
+`encke` is a Vulkan renderer. There is no physical device, swapchain or frame
+loop yet — the surface is as far as it goes.
+
+| File | Holds |
+| --- | --- |
+| `main.cpp` | Entry point. Constructs `App`, nothing else. |
+| `app.hpp/.cpp` | Owns the window and the Vulkan context; runs the event loop. |
+| `window.hpp/.cpp` | SDL3 init, window, and event pump. Returns `FrameEvents`. |
+| `vulkan_context.hpp/.cpp` | volk, instance, validation, surface. |
+| `log.hpp/.cpp` | Unbuffered stderr diagnostics with millisecond stamps. |
+| `pch.hpp`, `types.hpp` | Precompiled header and the global type prelude. |
+
+`App`'s members are declared window-first so they destruct Vulkan-first, which
+is the order the surface requires. Every `shutdown()` checks its handle, so a
+partially constructed `App` tears down correctly.
+
+## Known issue: 10-second exit
+
+`SDL_Quit()` takes **~10 seconds** on this machine. Measured, not guessed:
+`SDL_QuitSubSystem(SDL_INIT_VIDEO)` is 10014 ms while events and audio quit in
+under 2 ms, and a bare `SDL_Init(SDL_INIT_VIDEO)` + `SDL_Quit()` with no window
+and no Vulkan reproduces it. All Vulkan teardown finishes in ~200 ms.
+
+The cause is SDL's Windows video backend: `SDL_windowsgameinput.cpp:240` calls
+`SDL_InitGameInput` unconditionally, with no hint guarding it, and the matching
+`SDL_QuitGameInput` blocks in `IGameInput::Release()` / `FreeLibrary` on
+`gameinput.dll` (0.2309.22621.4249 here). `SDL_HINT_WINDOWS_GAMEINPUT` does not
+help — that hint only gates the *joystick* driver. Disabling the Steam implicit
+layers and every `SDL_JOYSTICK_*` hint changes nothing either.
+
+It is SDL's, not ours, and it costs nothing but wall-clock at exit. If it
+becomes intolerable during development, the blunt fix is to skip `SDL_Quit()`
+and `std::_Exit` after Vulkan teardown — at the cost of losing whatever a clean
+SDL shutdown would have reported.
 
 ## Toolchain
 

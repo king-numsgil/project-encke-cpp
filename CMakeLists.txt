@@ -13,6 +13,10 @@ find_package(glm CONFIG REQUIRED)
 
 add_executable(encke
     src/main.cpp
+    src/app.cpp
+    src/log.cpp
+    src/window.cpp
+    src/vulkan_context.cpp
 )
 
 target_include_directories(encke PRIVATE src)
