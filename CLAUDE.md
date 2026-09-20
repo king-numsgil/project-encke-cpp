@@ -103,6 +103,65 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
 Expect ~3000 fps clearing a 1280x720 window on a GTX 1070. A sharp drop means
 something changed, not that the number was ever meaningful.
 
+## Renderer architecture — decided, not yet built
+
+**Clustered deferred**, with a forward pass for transparency. Decided
+2026-09-20 after weighing it against Forward+ and the visibility buffer.
+
+The previous three iterations of Encke were all Forward+. Part of the reason
+for going deferred is to not build the same renderer a fourth time, and that is
+a legitimate reason — do not "correct" it back toward Forward+ on efficiency
+grounds. The hardware case also holds: Pascal has no hardware ray tracing, so
+screen-space techniques carry GI and reflections and those want a G-buffer, and
+Pascal's weak async compute blunts one of Forward+'s real advantages.
+
+Clustered light culling carries over from the Forward+ iterations, so the
+genuinely new work is the G-buffer and the lighting pass.
+
+### G-buffer rules
+
+- **Keep it lean.** The 1070 has ~256 GB/s and a fat G-buffer spends it. Fine
+  at 1080p, the first thing to optimise at 4K.
+- **Octahedral-pack normals into RG16.** Not RGBA32F.
+- **Motion vectors from the first version.** RG16F, previous-frame clip
+  position minus current. Committed deliberately at design time because
+  retrofitting them means touching every shader and re-deciding the layout.
+
+### Antialiasing
+
+Motion vectors exist for **TAA**, which is the intended approach: it handles
+shading aliasing (specular, normal maps) that MSAA cannot, and deferred makes
+MSAA expensive since the G-buffer would need to be sample-rate. TAA is not
+formally locked — the commitment so far is the motion vectors, which every
+candidate wants. The same buffers later feed temporal SSAO/SSR denoising and
+FSR-style upscaling.
+
+### Visibility buffer — considered, set aside
+
+Store instance + triangle ID, resolve material in a full-screen pass. Rejected
+for now, not from ignorance:
+
+- The bandwidth win scales with resolution and geometric density, and is modest
+  at 1080p with hand-authored geometry.
+- The real advantage is that no fixed G-buffer layout constrains materials.
+  That one applies at any scale, and is the reason to revisit this if the
+  material system starts fighting the layout.
+- Costs: mandatory bindless, analytic UV derivatives (hardware `ddx`/`ddy` are
+  wrong across triangle boundaries in a full-screen pass), and per-material
+  binning with indirect dispatch to avoid divergence.
+
+## Shaders
+
+**Slang**, compiled offline. `slangc.exe` ships with the Vulkan SDK
+(`%VULKAN_SDK%\Bin`, 2026.13.1 alongside SDK 1.4.357.0), so it costs no new
+dependency, and `slangd.exe` gives CLion a language server over LSP. Compile to
+`.spv` with a CMake custom command; nothing links against Slang at runtime.
+
+Open question, to settle when shaders land: this makes the build depend on the
+Vulkan SDK, whereas today a fresh clone needs only the vcpkg manifest. Either
+accept it and fail loudly at configure time, or fetch a pinned Slang release in
+CMake to stay hermetic.
+
 
 ## Toolchain
 
