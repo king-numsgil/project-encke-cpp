@@ -46,6 +46,16 @@ target_compile_definitions(encke PUBLIC
     GLM_FORCE_SIZE_T_LENGTH
     GLM_FORCE_AVX2
 
+    # Vulkan's clip space is depth 0..1. GLM defaults to OpenGL's -1..1, which
+    # silently halves the usable depth range and breaks depth testing. This is
+    # the one Vulkan-correctness flag GLM actually provides; the Y axis has no
+    # equivalent and must be handled at the projection (see CLAUDE.md).
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
+
+    # Unlocks the gtx/ extensions -- dual quaternions among them. They carry no
+    # API stability promise across GLM releases.
+    GLM_ENABLE_EXPERIMENTAL
+
     # Deliberately NOT GLM_FORCE_DEFAULT_ALIGNED_GENTYPES. It would not remove a
     # capability (packed_vec3 stays 12 bytes under it), it flips what vec3 means
     # by default -- and the mistakes are not symmetric. Aligned by default makes

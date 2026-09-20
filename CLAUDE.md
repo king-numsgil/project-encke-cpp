@@ -205,6 +205,41 @@ All deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
   `normalize` on any 3-component vector pay extra `vblendps` masking and lose
   the `vrsqrtps` path, so prefer `aligned_vec4` in hot math even when the data
   is logically 3D.
+- **`GLM_ENABLE_EXPERIMENTAL` is on**, which unlocks `gtx/`. Those extensions
+  carry no API stability promise between GLM releases, so a version bump can
+  break call sites. `dquat` (dual quaternion) is the one currently used.
+
+## GLM vs Vulkan conventions
+
+Measured against GLM 1.0.3 under this project's flags, not assumed:
+
+| Convention | Status |
+| --- | --- |
+| Depth range | Fixed by `GLM_FORCE_DEPTH_ZERO_TO_ONE`: near → `0.0`, far → `1.0` |
+| Matrix storage | Column-major already, matches the GLSL/SPIR-V default |
+| Handedness | Right-handed (GLM default); `GLM_FORCE_LEFT_HANDED` not set |
+| **Y axis** | **Wrong, and no flag fixes it** |
+
+`GLM_FORCE_DEPTH_ZERO_TO_ONE` is the only Vulkan-correctness flag GLM offers.
+Without it, `glm::perspective` emits OpenGL's `-1..1` depth, which wastes half
+the depth buffer and breaks depth testing in ways that look like Z-fighting.
+
+**The Y axis has no compile flag.** GLM's projections put +Y up; Vulkan's
+framebuffer origin is top-left with +Y down. A point above the eye projects to
+`ndc.y = +0.35` when Vulkan wants `-0.35`, so geometry renders vertically
+mirrored. Two accepted fixes, and the choice is not yet made here:
+
+- `proj[1][1] *= -1.0f` after building the projection. Simple, but every
+  projection site has to remember it.
+- A negative-height `VkViewport` (core since Vulkan 1.1). Keeps the projection
+  matrix conventional and moves the fix to one place, at the cost of a
+  viewport that reads oddly.
+
+**Quaternion component order is asymmetric.** `qua`'s constructor takes
+`(w, x, y, z)` but the default memory layout is `x, y, z, w` — `f32quat{1,2,3,4}`
+gives `w=1` and stores `2 3 4 1`. Constructing is w-first, uploading is w-last.
+`GLM_FORCE_QUAT_DATA_WXYZ` would make them agree, at the cost of a memory order
+that no longer matches a shader-side `vec4`.
 - **No GLM type is `constexpr`-constructible.** `GLM_HAS_CONSTEXPR` is forced to
   0 whenever the SIMD arch bit is set (`detail/setup.hpp:297`), which
   `GLM_FORCE_AVX2` does. `GLM_CONFIG_CONSTEXP` is `GLM_DISABLE` here. Compile-

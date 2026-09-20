@@ -17,6 +17,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/dual_quaternion.hpp>
 // Not aliased below on purpose -- glm::aligned_vec4 at the use site is meant to
 // be conspicuous. This just makes it reachable without a second include.
 #include <glm/gtc/type_aligned.hpp>
@@ -165,7 +166,18 @@ using f64mat4 = f64mat4x4;
 
 // -- quaternions -------------------------------------------------------------
 
+// Watch the asymmetry: the constructor is qua(w, x, y, z) but the default
+// memory layout is x, y, z, w. Constructing is w-first, uploading is w-last.
+// GLM_FORCE_QUAT_DATA_WXYZ would align them, at the cost of making the memory
+// order unusual on the shader side.
+
 template<class T> using quat = glm::qua<T, glm::defaultp>;
 
 using f32quat = quat<f32>;
 using f64quat = quat<f64>;
+
+// gtx, gated behind GLM_ENABLE_EXPERIMENTAL (set in CMakeLists.txt).
+template<class T> using dquat = glm::tdualquat<T, glm::defaultp>;
+
+using f32dquat = dquat<f32>;
+using f64dquat = dquat<f64>;
