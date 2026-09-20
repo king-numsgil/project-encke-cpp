@@ -3,6 +3,7 @@
 #include "vulkan/context.hpp"
 
 #include "core/log.hpp"
+#include "core/memory.hpp"
 #include "platform/window.hpp"
 
 #include <cstring>
@@ -215,7 +216,8 @@ namespace encke
             .ppEnabledExtensionNames = extensions.data(),
         };
 
-        VkResult const created = vkCreateInstance(&instance_info, nullptr, &instance_);
+        VkResult const created =
+            vkCreateInstance(&instance_info, memory::vulkan_callbacks(), &instance_);
         if (created != VK_SUCCESS)
         {
             log::vk_error("vkCreateInstance", created);
@@ -236,8 +238,8 @@ namespace encke
         }
 
         VkDebugUtilsMessengerCreateInfoEXT const info = messenger_info();
-        VkResult const created =
-            vkCreateDebugUtilsMessengerEXT(instance_, &info, nullptr, &messenger_);
+        VkResult const created = vkCreateDebugUtilsMessengerEXT(
+            instance_, &info, memory::vulkan_callbacks(), &messenger_);
 
         if (created != VK_SUCCESS)
         {
@@ -251,7 +253,8 @@ namespace encke
 
     bool VulkanContext::create_surface(Window const& window)
     {
-        if (!SDL_Vulkan_CreateSurface(window.handle(), instance_, nullptr, &surface_))
+        if (!SDL_Vulkan_CreateSurface(window.handle(), instance_, memory::vulkan_callbacks(),
+                                      &surface_))
         {
             log::sdl_error("SDL_Vulkan_CreateSurface");
             return false;
@@ -265,19 +268,19 @@ namespace encke
     {
         if (surface_ != VK_NULL_HANDLE)
         {
-            SDL_Vulkan_DestroySurface(instance_, surface_, nullptr);
+            SDL_Vulkan_DestroySurface(instance_, surface_, memory::vulkan_callbacks());
             surface_ = VK_NULL_HANDLE;
         }
 
         if (messenger_ != VK_NULL_HANDLE)
         {
-            vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
+            vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, memory::vulkan_callbacks());
             messenger_ = VK_NULL_HANDLE;
         }
 
         if (instance_ != VK_NULL_HANDLE)
         {
-            vkDestroyInstance(instance_, nullptr);
+            vkDestroyInstance(instance_, memory::vulkan_callbacks());
             instance_ = VK_NULL_HANDLE;
             volkFinalize();
         }

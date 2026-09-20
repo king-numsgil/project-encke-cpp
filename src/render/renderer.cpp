@@ -3,6 +3,7 @@
 #include "render/renderer.hpp"
 
 #include "core/log.hpp"
+#include "core/memory.hpp"
 #include "vulkan/device.hpp"
 #include "vulkan/swapchain.hpp"
 
@@ -78,8 +79,8 @@ namespace encke
             .queueFamilyIndex = *device.families().graphics,
         };
 
-        VkResult result =
-            vkCreateCommandPool(device.handle(), &pool_info, nullptr, &command_pool_);
+        VkResult result = vkCreateCommandPool(device.handle(), &pool_info,
+                                              memory::vulkan_callbacks(), &command_pool_);
         if (result != VK_SUCCESS)
         {
             log::vk_error("vkCreateCommandPool", result);
@@ -117,15 +118,16 @@ namespace encke
 
         for (u32 index = 0; index < kFramesInFlight; ++index)
         {
-            result = vkCreateSemaphore(device.handle(), &semaphore_info, nullptr,
-                                       &image_available_[index]);
+            result = vkCreateSemaphore(device.handle(), &semaphore_info,
+                                       memory::vulkan_callbacks(), &image_available_[index]);
             if (result != VK_SUCCESS)
             {
                 log::vk_error("vkCreateSemaphore", result);
                 return false;
             }
 
-            result = vkCreateFence(device.handle(), &fence_info, nullptr, &in_flight_[index]);
+            result = vkCreateFence(device.handle(), &fence_info, memory::vulkan_callbacks(),
+                                   &in_flight_[index]);
             if (result != VK_SUCCESS)
             {
                 log::vk_error("vkCreateFence", result);
@@ -149,8 +151,8 @@ namespace encke
         render_finished_.resize(swapchain.image_count(), VK_NULL_HANDLE);
         for (VkSemaphore& semaphore : render_finished_)
         {
-            VkResult const result =
-                vkCreateSemaphore(device_->handle(), &semaphore_info, nullptr, &semaphore);
+            VkResult const result = vkCreateSemaphore(device_->handle(), &semaphore_info,
+                                                     memory::vulkan_callbacks(), &semaphore);
             if (result != VK_SUCCESS)
             {
                 log::vk_error("vkCreateSemaphore", result);
@@ -359,7 +361,7 @@ namespace encke
         {
             if (semaphore != VK_NULL_HANDLE)
             {
-                vkDestroySemaphore(device_->handle(), semaphore, nullptr);
+                vkDestroySemaphore(device_->handle(), semaphore, memory::vulkan_callbacks());
                 semaphore = VK_NULL_HANDLE;
             }
         }
@@ -382,13 +384,13 @@ namespace encke
         {
             if (image_available_[index] != VK_NULL_HANDLE)
             {
-                vkDestroySemaphore(device, image_available_[index], nullptr);
+                vkDestroySemaphore(device, image_available_[index], memory::vulkan_callbacks());
                 image_available_[index] = VK_NULL_HANDLE;
             }
 
             if (in_flight_[index] != VK_NULL_HANDLE)
             {
-                vkDestroyFence(device, in_flight_[index], nullptr);
+                vkDestroyFence(device, in_flight_[index], memory::vulkan_callbacks());
                 in_flight_[index] = VK_NULL_HANDLE;
             }
         }
@@ -396,7 +398,7 @@ namespace encke
         if (command_pool_ != VK_NULL_HANDLE)
         {
             // Frees the command buffers with it.
-            vkDestroyCommandPool(device, command_pool_, nullptr);
+            vkDestroyCommandPool(device, command_pool_, memory::vulkan_callbacks());
             command_pool_ = VK_NULL_HANDLE;
         }
 

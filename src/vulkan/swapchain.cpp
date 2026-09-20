@@ -3,6 +3,7 @@
 #include "vulkan/swapchain.hpp"
 
 #include "core/log.hpp"
+#include "core/memory.hpp"
 #include "vulkan/context.hpp"
 #include "vulkan/device.hpp"
 
@@ -85,7 +86,7 @@ namespace encke
 
         if (swapchain_ != VK_NULL_HANDLE)
         {
-            vkDestroySwapchainKHR(device_->handle(), swapchain_, nullptr);
+            vkDestroySwapchainKHR(device_->handle(), swapchain_, memory::vulkan_callbacks());
             swapchain_ = VK_NULL_HANDLE;
         }
 
@@ -166,7 +167,8 @@ namespace encke
             .oldSwapchain          = VK_NULL_HANDLE,
         };
 
-        result = vkCreateSwapchainKHR(device_->handle(), &info, nullptr, &swapchain_);
+        result = vkCreateSwapchainKHR(device_->handle(), &info, memory::vulkan_callbacks(),
+                                      &swapchain_);
         if (result != VK_SUCCESS)
         {
             log::vk_error("vkCreateSwapchainKHR", result);
@@ -199,7 +201,8 @@ namespace encke
                 },
             };
 
-            result = vkCreateImageView(device_->handle(), &view_info, nullptr, &views_[index]);
+            result = vkCreateImageView(device_->handle(), &view_info, memory::vulkan_callbacks(),
+                                       &views_[index]);
             if (result != VK_SUCCESS)
             {
                 log::vk_error("vkCreateImageView", result);
@@ -224,7 +227,7 @@ namespace encke
         {
             if (view != VK_NULL_HANDLE)
             {
-                vkDestroyImageView(device_->handle(), view, nullptr);
+                vkDestroyImageView(device_->handle(), view, memory::vulkan_callbacks());
                 view = VK_NULL_HANDLE;
             }
         }
@@ -239,7 +242,7 @@ namespace encke
 
         if (swapchain_ != VK_NULL_HANDLE && device_ != nullptr)
         {
-            vkDestroySwapchainKHR(device_->handle(), swapchain_, nullptr);
+            vkDestroySwapchainKHR(device_->handle(), swapchain_, memory::vulkan_callbacks());
             swapchain_ = VK_NULL_HANDLE;
         }
 

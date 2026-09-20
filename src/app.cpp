@@ -3,6 +3,7 @@
 #include "app.hpp"
 
 #include "core/log.hpp"
+#include "core/memory.hpp"
 
 namespace encke
 {
@@ -25,6 +26,13 @@ namespace encke
     bool App::init()
     {
         log::init();
+        log::info("allocator: %s", memory::backend_name());
+
+        // Must precede SDL_Init, which window_.init performs.
+        if (!memory::install_sdl_allocator())
+        {
+            return false;
+        }
 
         if (!window_.init(kTitle, kWidth, kHeight))
         {

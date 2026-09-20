@@ -3,6 +3,7 @@
 #include "vulkan/device.hpp"
 
 #include "core/log.hpp"
+#include "core/memory.hpp"
 #include "vulkan/context.hpp"
 
 #include <cstring>
@@ -259,7 +260,7 @@ namespace encke
             .pEnabledFeatures        = nullptr,
         };
 
-        result = vkCreateDevice(physical_, &device_info, nullptr, &device_);
+        result = vkCreateDevice(physical_, &device_info, memory::vulkan_callbacks(), &device_);
         if (result != VK_SUCCESS)
         {
             log::vk_error("vkCreateDevice", result);
@@ -289,7 +290,7 @@ namespace encke
     {
         if (device_ != VK_NULL_HANDLE)
         {
-            vkDestroyDevice(device_, nullptr);
+            vkDestroyDevice(device_, memory::vulkan_callbacks());
             device_ = VK_NULL_HANDLE;
         }
 

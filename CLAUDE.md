@@ -163,6 +163,74 @@ accept it and fail loudly at configure time, or fetch a pinned Slang release in
 CMake to stay hermetic.
 
 
+## Allocator
+
+mimalloc backs `operator new`/`delete` (via `mimalloc-new-delete.h` in
+`src/core/memory.cpp`, which must stay the only translation unit that includes
+it), SDL3 through `SDL_SetMemoryFunctions`, and Vulkan host allocations through
+`memory::vulkan_callbacks()`.
+
+`ENCKE_USE_MIMALLOC` gates all of it. When off, `vulkan_callbacks()` returns
+`nullptr`, which is exactly what Vulkan reads as "use the driver's allocator",
+so no call site needs a branch.
+
+**Every `vkCreate*` must pass `memory::vulkan_callbacks()` and so must its
+matching `vkDestroy*`.** Vulkan requires compatible callbacks at both ends and
+validation reports each mismatch individually. Five destroy sites were missed on
+the first pass and validation caught all five.
+
+### Off under the sanitizers, on purpose
+
+`clang-sanitize` sets `ENCKE_USE_MIMALLOC=OFF`. This is not a workaround.
+Measured with an identical deliberate use-after-free:
+
+| Allocator | Result |
+| --- | --- |
+| system | ASan reports `heap-use-after-free` with a stack trace, exit 1 |
+| mimalloc | reads freed memory, prints garbage, exit 0, no report at all |
+
+mimalloc takes memory from its own OS arenas, so ASan never sees the
+allocation and cannot place redzones around it. `MI_TRACK=ASAN` exists to make
+mimalloc ASan-aware, but it is unreachable through vcpkg (the port exposes only
+`override` and `secure`) and would need mimalloc compiled with ASan by the same
+compiler, while vcpkg builds dependencies with ucrt64 GCC and the preset uses
+clang64. Even if built, ASan's own allocator is the stronger detector — it has
+redzones and a free quarantine that mimalloc has no equivalent for.
+
+### Pinned to 2.2.7, not 3.x
+
+`vcpkg.json` overrides mimalloc to `2.2.7`. Version 3.5.3 **crashes at startup**
+on this triplet: `assertion failed: "mi_out_default == NULL"`.
+
+`_mi_auto_process_init()` runs twice. `mi_tls_attach` registers a
+`DLL_PROCESS_ATTACH` callback through data sections, and because
+`MI_PRIM_HAS_PROCESS_ATTACH` is left undefined on mingw, `src/prim/prim.c` also
+installs an `__attribute__((constructor))` calling the same function. The guard
+that would suppress one of them is `MI_MINGW_UCRT64`, which mimalloc's CMake
+sets only when `$ENV{MSYSTEM}` is `UCRT64`. vcpkg scrubs the environment for
+port builds and the triplet's `VCPKG_ENV_PASSTHROUGH` lists only `PATH`, so it
+never arrives. Setting `MSYSTEM` in the preset does not help for the same
+reason.
+
+To move to 3.x, build mimalloc outside vcpkg — CPM or `FetchContent` — where
+the define can be set directly. That is also the point at which `MI_SECURE`,
+`MI_GUARDED` and arena tuning become reachable. Nothing needs it yet.
+
+### What it is worth
+
+Release, clearing and presenting at 1280x720 on a GTX 1070:
+
+| Allocator | fps | frame time |
+| --- | --- | --- |
+| system | ~5090 | 0.196 ms |
+| mimalloc | ~7100 | 0.141 ms |
+
+Roughly 55 µs per frame, and noticeably less run-to-run variance. The driver
+allocates host memory in the acquire/present path and those calls now land in
+mimalloc. Read the percentage with care: at 0.15 ms/frame this loop does almost
+nothing but allocate, so the saving is close to constant while real frames get
+longer.
+
 ## Toolchain
 
 Windows host, **MSYS2 toolchains**, not MSVC:

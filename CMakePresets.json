@@ -22,7 +22,8 @@
       "hidden": true,
       "binaryDir": "${sourceDir}/build/clang-sanitize",
       "cacheVariables": {
-        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS"
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -D_GLIBCXX_ASSERTIONS",
+        "ENCKE_USE_MIMALLOC": "OFF"
       }
     },
     {

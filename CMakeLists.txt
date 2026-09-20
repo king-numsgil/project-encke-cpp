@@ -5,17 +5,28 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Routes operator new/delete, SDL and Vulkan host allocations through mimalloc.
+# See src/core/memory.cpp. Off under the sanitizers -- ASan cannot instrument
+# what it does not allocate, so leaving this on there trades heap diagnostics
+# for allocator throughput, which is the wrong way round in a debug build.
+option(ENCKE_USE_MIMALLOC "Route allocations through mimalloc" ON)
+
 find_package(Vulkan REQUIRED)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
+if(ENCKE_USE_MIMALLOC)
+    find_package(mimalloc CONFIG REQUIRED)
+endif()
+
 add_executable(encke
     src/main.cpp
     src/app.cpp
 
     src/core/log.cpp
+    src/core/memory.cpp
 
     src/platform/window.cpp
 
@@ -45,6 +56,16 @@ target_link_libraries(encke PUBLIC
     GPUOpen::VulkanMemoryAllocator
     SDL3::SDL3
     glm::glm
+)
+
+if(ENCKE_USE_MIMALLOC)
+    target_link_libraries(encke PUBLIC
+        $<IF:$<TARGET_EXISTS:mimalloc-static>,mimalloc-static,mimalloc>
+    )
+endif()
+
+target_compile_definitions(encke PUBLIC
+    ENCKE_USE_MIMALLOC=$<BOOL:${ENCKE_USE_MIMALLOC}>
 )
 
 target_compile_definitions(encke PUBLIC
