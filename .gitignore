@@ -5,6 +5,9 @@
 # vcpkg
 /vcpkg_installed/
 
+# CPM source cache (downloaded dependency sources)
+/.cpm/
+
 # CMake user-local overrides (machine-specific paths, toolchains)
 CMakeUserPresets.json
 

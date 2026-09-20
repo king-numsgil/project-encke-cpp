@@ -18,7 +18,49 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
 if(ENCKE_USE_MIMALLOC)
-    find_package(mimalloc CONFIG REQUIRED)
+    # Built via CPM rather than vcpkg, because mimalloc 3.x needs a build-time
+    # define that vcpkg cannot deliver. Its CMake sets MI_MINGW_UCRT64 only from
+    # $ENV{MSYSTEM}, and vcpkg scrubs the environment for port builds (the
+    # triplet passes through PATH alone). Without it, mingw ends up with two
+    # process-init paths -- a DLL_PROCESS_ATTACH callback registered through
+    # data sections plus a constructor attribute -- and mimalloc aborts on
+    # startup with `assertion failed: "mi_out_default == NULL"`.
+    set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
+        "Shared download cache so each build directory does not refetch sources")
+    include(cmake/CPM.cmake)
+
+    CPMAddPackage(
+        NAME mimalloc
+        GITHUB_REPOSITORY microsoft/mimalloc
+        VERSION 3.5.3
+        OPTIONS
+            "MI_BUILD_SHARED OFF"
+            "MI_BUILD_STATIC ON"
+            "MI_BUILD_OBJECT OFF"
+            "MI_BUILD_TESTS OFF"
+            "MI_OVERRIDE OFF"
+            "MI_INSTALL_TOPLEVEL OFF"
+    )
+
+    foreach(mi_target mimalloc-static mimalloc)
+        if(NOT TARGET ${mi_target})
+            continue()
+        endif()
+
+        # The define upstream would have set itself given MSYSTEM. Removing this
+        # reintroduces the double process-init and the startup assertion; it was
+        # A/B'd on one build tree with nothing else changed. Its only other
+        # effect upstream is a minject step on a dynamic test executable, which
+        # is not built here.
+        if(MINGW)
+            target_compile_definitions(${mi_target} PRIVATE MI_MINGW_UCRT64=1)
+        endif()
+
+        # We do not maintain mimalloc, and building it in-tree puts its
+        # diagnostics in our output where they would mask ours. GCC emits a
+        # -Wstringop-overflow= false positive from its atomics at -O2.
+        target_compile_options(${mi_target} PRIVATE -w)
+    endforeach()
 endif()
 
 add_executable(encke

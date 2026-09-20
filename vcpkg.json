@@ -3,7 +3,6 @@
   "version-string": "0.1.0",
   "dependencies": [
     "glm",
-    "mimalloc",
     {
       "name": "sdl3",
       "features": [
@@ -13,11 +12,5 @@
     "vulkan",
     "vulkan-memory-allocator",
     "volk"
-  ],
-  "overrides": [
-    {
-      "name": "mimalloc",
-      "version": "2.2.7"
-    }
   ]
 }

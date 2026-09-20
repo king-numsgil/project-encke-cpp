@@ -197,39 +197,52 @@ compiler, while vcpkg builds dependencies with ucrt64 GCC and the preset uses
 clang64. Even if built, ASan's own allocator is the stronger detector — it has
 redzones and a free quarantine that mimalloc has no equivalent for.
 
-### Pinned to 2.2.7, not 3.x
+### Built by CPM, not vcpkg, and why
 
-`vcpkg.json` overrides mimalloc to `2.2.7`. Version 3.5.3 **crashes at startup**
-on this triplet: `assertion failed: "mi_out_default == NULL"`.
+mimalloc 3.5.3 comes from `CPMAddPackage` in `CMakeLists.txt`, with `CPM.cmake`
+vendored at `cmake/CPM.cmake` and sources cached in `.cpm/` (gitignored). It is
+the **only** CPM dependency; everything else stays in the vcpkg manifest.
 
-`_mi_auto_process_init()` runs twice. `mi_tls_attach` registers a
+The reason is one build-time define. **`MI_MINGW_UCRT64` must be set or mimalloc
+aborts at startup** with `assertion failed: "mi_out_default == NULL"`.
+`_mi_auto_process_init()` runs twice: `mi_tls_attach` registers a
 `DLL_PROCESS_ATTACH` callback through data sections, and because
 `MI_PRIM_HAS_PROCESS_ATTACH` is left undefined on mingw, `src/prim/prim.c` also
-installs an `__attribute__((constructor))` calling the same function. The guard
-that would suppress one of them is `MI_MINGW_UCRT64`, which mimalloc's CMake
-sets only when `$ENV{MSYSTEM}` is `UCRT64`. vcpkg scrubs the environment for
-port builds and the triplet's `VCPKG_ENV_PASSTHROUGH` lists only `PATH`, so it
-never arrives. Setting `MSYSTEM` in the preset does not help for the same
-reason.
+installs an `__attribute__((constructor))` calling the same function.
 
-To move to 3.x, build mimalloc outside vcpkg — CPM or `FetchContent` — where
-the define can be set directly. That is also the point at which `MI_SECURE`,
-`MI_GUARDED` and arena tuning become reachable. Nothing needs it yet.
+Upstream's CMake sets that define only when `$ENV{MSYSTEM}` is `UCRT64`. vcpkg
+scrubs the environment for port builds and the triplet's `VCPKG_ENV_PASSTHROUGH`
+lists `PATH` alone, so it never arrives and setting `MSYSTEM` in the preset does
+not help. Building mimalloc ourselves is what makes the define reachable.
 
-### What it is worth
+Confirmed by A/B on one build tree, same compiler and flags, toggling only that
+define: with it the app runs clean, without it the identical assertion fires.
+Do not remove the `if(MINGW)` block that applies it.
 
-Release, clearing and presenting at 1280x720 on a GTX 1070:
+This also puts `MI_SECURE`, `MI_GUARDED` and arena tuning within reach if they
+ever matter.
 
-| Allocator | fps | frame time |
-| --- | --- | --- |
-| system | ~5090 | 0.196 ms |
-| mimalloc | ~7100 | 0.141 ms |
+### What it is worth: not measurable yet
 
-Roughly 55 µs per frame, and noticeably less run-to-run variance. The driver
-allocates host memory in the acquire/present path and those calls now land in
-mimalloc. Read the percentage with care: at 0.15 ms/frame this loop does almost
-nothing but allocate, so the saving is close to constant while real frames get
-longer.
+**No throughput claim survives measurement on the current workload.** An earlier
+note here reported mimalloc ~40% ahead; that was sequential A/B sampling
+contaminated by drift, and a later run reversed the ordering.
+
+The numbers behind that: five launches of one unchanged binary within a few
+minutes span 6158–6956 fps, a 1.13x spread. Identical configurations measured at
+different points in the session ranged 4100–7100. Cross-window drift is several
+times the within-window noise, so any A/B that builds one config, measures,
+rebuilds and measures again is reading drift rather than the allocator.
+
+This is the expected result rather than a disappointment. The renderer performs
+essentially no per-frame allocation, and the frame loop is bound by present
+throughput. mimalloc is wired in ahead of the allocation traffic that a scene
+graph, material system and per-frame staging buffers will bring, and because
+`VkAllocationCallbacks` threading is far cheaper to do now than to retrofit.
+
+To measure it honestly later: interleave the two configurations within one time
+window rather than running them back to back, and use a workload that actually
+allocates.
 
 ## Toolchain
 
