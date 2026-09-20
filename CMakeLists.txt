@@ -116,11 +116,16 @@ function(encke_add_shader out_spv source)
         OUTPUT "${spv}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${ENCKE_SHADER_DIR}"
         COMMAND "${ENCKE_SLANGC}" "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
                 -target spirv
                 -profile spirv_1_5
                 -fvk-use-entrypoint-name
+                -depfile "${spv}.d"
                 -o "${spv}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+        # slangc writes the modules it imported here, so editing shaders/lib/*
+        # rebuilds whatever imported it without listing dependencies by hand.
+        DEPFILE "${spv}.d"
         COMMENT "slangc ${source}"
         VERBATIM
     )

@@ -145,11 +145,11 @@ namespace encke
             .depthClampEnable        = VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode             = VK_POLYGON_MODE_FILL,
-            // Culling is off until the interaction with the negative-height
-            // viewport is settled -- flipping Y reverses apparent winding, so
-            // front-face orientation has to be decided against real geometry
-            // rather than guessed at here.
-            .cullMode                = VK_CULL_MODE_NONE,
+            // Facing is decided from the signed area in framebuffer
+            // coordinates, i.e. after the viewport transform, and the
+            // negative height reverses it. Geometry wound clockwise in NDC
+            // therefore presents as counter-clockwise to the rasteriser.
+            .cullMode                = VK_CULL_MODE_BACK_BIT,
             .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable         = VK_FALSE,
             .depthBiasConstantFactor = 0.0f,

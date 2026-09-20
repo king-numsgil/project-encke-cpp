@@ -78,6 +78,9 @@ src/
     renderer.{hpp,cpp}   command pool, per-frame sync, record and present
 shaders/
   triangle.slang         compiled to SPIR-V at build time by slangc
+  lib/
+    screen.slang         fragment/NDC/UV conversions and the Y conventions
+    colour.slang         sRGB <-> linear, luminance
 ```
 
 **Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
@@ -103,10 +106,13 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   the pipeline. The colour format does, since dynamic rendering bakes it in.
 - **The Y flip lives in the viewport**, via `flipped_viewport()` — negative
   height, set per frame. Projection matrices stay conventional.
-- **Face culling is off and the winding convention is undecided.** A negative
-  viewport height reverses apparent winding, so `frontFace` has to be settled
-  against real geometry rather than guessed. `VK_CULL_MODE_NONE` keeps that out
-  of the way until there is geometry to test with.
+- **Back-face culling is on with `frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE`,
+  and geometry is wound counter-clockwise in NDC with +Y up.** That is the
+  glTF convention, and it holds *because* of the negative viewport: the flip
+  cancels against Vulkan's y-down framebuffer. Settled by experiment, not
+  derivation — a clockwise-wound triangle is culled under this setting and a
+  counter-clockwise one survives, which also proves culling is live rather
+  than silently disabled.
 - **Two frames in flight.** `image_available` semaphores and fences are
   per-frame; `render_finished` semaphores are **per swapchain image**, because
   a frame index maps to a different image over time and signalling a semaphore
@@ -193,8 +199,28 @@ answer: accepted, not worked around. The SDK is needed for validation layers and
   validation rejects.
 - **Shader colour output is LINEAR.** The swapchain is `_SRGB` so the hardware
   encodes on write, and values written look considerably lighter than the
-  numbers suggest. Convert intended sRGB colours to linear at authoring time —
-  `triangle.slang` records both forms in a comment.
+  numbers suggest. Author in sRGB and call `srgb_to_linear` rather than
+  hand-computing linear constants, which leaves the intent unreadable.
+
+### Shared modules
+
+`shaders/lib/` holds Slang modules imported with `import lib.<name>;`, resolved
+by `-I shaders`. **Conventions that more than one shader depends on belong
+there, not open-coded per shader.**
+
+| Module | Holds |
+| --- | --- |
+| `lib/screen.slang` | fragment ↔ NDC ↔ UV conversions, and the Y-direction rules they encode |
+| `lib/colour.slang` | sRGB ↔ linear, luminance |
+
+`lib/screen.slang` matters most. NDC has +Y up while `SV_Position` and every
+render target are addressed top-left with +Y down, so screen-space work crosses
+that boundary constantly — and an inverted screen-space effect looks plausible
+enough to ship. One helper, used everywhere, rather than a flip rederived per
+shader.
+
+slangc writes a depfile and the custom command consumes it, so editing a module
+rebuilds every shader that imported it without any dependency listed by hand.
 
 
 ## Allocator
