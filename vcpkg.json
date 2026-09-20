@@ -1,0 +1,11 @@
+{
+  "name": "encke",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "glm",
+    "sdl3",
+    "vulkan",
+    "vulkan-memory-allocator",
+    "volk"
+  ]
+}

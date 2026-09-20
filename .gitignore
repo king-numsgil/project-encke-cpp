@@ -1,0 +1,20 @@
+# Build output
+/build/
+/out/
+
+# vcpkg
+/vcpkg_installed/
+
+# CMake user-local overrides (machine-specific paths, toolchains)
+CMakeUserPresets.json
+
+# IDE
+/.idea/
+/.vs/
+/cmake-build-*/
+
+# Claude Code scratch/utility scripts (machine-specific toolchain paths)
+/.claude/
+
+# Misc
+*.log
