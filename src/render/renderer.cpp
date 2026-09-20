@@ -4,9 +4,12 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "vulkan/allocator.hpp"
 #include "vulkan/context.hpp"
 #include "vulkan/device.hpp"
 #include "vulkan/swapchain.hpp"
+
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace encke
 {
@@ -18,11 +21,40 @@ namespace encke
 
         constexpr u64 kNoTimeout = ~0ULL;
 
+        struct PushConstants
+        {
+            f32mat4 mvp;
+            f32mat4 model;
+        };
+
+        constexpr VkVertexInputBindingDescription kVertexBindings[]{
+            {.binding = 0, .stride = sizeof(Vertex), .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+        };
+
+        constexpr VkVertexInputAttributeDescription kVertexAttributes[]{
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
+             .offset = offsetof(Vertex, position)},
+            {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
+             .offset = offsetof(Vertex, normal)},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
+             .offset = offsetof(Vertex, colour)},
+        };
+
+        // Reversed-Z comes from swapping the near and far arguments. With
+        // GLM_FORCE_DEPTH_ZERO_TO_ONE this maps near to 1.0 and far to 0.0,
+        // which is what the GREATER_OR_EQUAL compare and the 0.0 clear expect.
+        f32mat4 reversed_z_perspective(f32 vertical_fov, f32 aspect, f32 near_plane,
+                                       f32 far_plane)
+        {
+            return glm::perspective(vertical_fov, aspect, far_plane, near_plane);
+        }
+
         VkImageMemoryBarrier2 layout_barrier(VkImage image, VkImageLayout from, VkImageLayout to,
                                              VkPipelineStageFlags2 src_stage,
                                              VkAccessFlags2 src_access,
                                              VkPipelineStageFlags2 dst_stage,
-                                             VkAccessFlags2 dst_access)
+                                             VkAccessFlags2 dst_access,
+                                             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT)
         {
             return VkImageMemoryBarrier2{
                 .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -37,7 +69,7 @@ namespace encke
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .image               = image,
                 .subresourceRange    = {
-                    .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .aspectMask     = aspect,
                     .baseMipLevel   = 0,
                     .levelCount     = 1,
                     .baseArrayLayer = 0,
@@ -69,7 +101,8 @@ namespace encke
         shutdown();
     }
 
-    bool Renderer::init(VulkanDevice const& device, VulkanSwapchain const& swapchain)
+    bool Renderer::init(VulkanAllocator const& allocator, VulkanDevice const& device,
+                        VulkanSwapchain const& swapchain)
     {
         device_ = &device;
 
@@ -136,10 +169,32 @@ namespace encke
             }
         }
 
-        // Dynamic rendering bakes the colour format into the pipeline, so it
-        // has to come from the swapchain rather than being chosen here.
-        if (!triangle_.init(device, "triangle.spv", "vertex_main", "fragment_main",
-                            swapchain.format()))
+        vector<Vertex> vertices;
+        vector<u32>    indices;
+        build_cube(vertices, indices);
+
+        if (!cube_.init(allocator, device, vertices, indices))
+        {
+            return false;
+        }
+
+        if (!depth_.init(allocator, device, swapchain.extent()))
+        {
+            return false;
+        }
+
+        // Dynamic rendering bakes the attachment formats into the pipeline, so
+        // they have to come from the swapchain rather than being chosen here.
+        GraphicsPipeline::Config const config{
+            .spirv_name         = "mesh.spv",
+            .colour_format      = swapchain.format(),
+            .depth_format       = DepthTarget::kFormat,
+            .bindings           = kVertexBindings,
+            .attributes         = kVertexAttributes,
+            .push_constant_size = sizeof(PushConstants),
+        };
+
+        if (!pipeline_.init(device, config))
         {
             return false;
         }
@@ -149,6 +204,11 @@ namespace encke
 
     bool Renderer::on_swapchain_changed(VulkanSwapchain const& swapchain)
     {
+        if (!depth_.resize(swapchain.extent()))
+        {
+            return false;
+        }
+
         destroy_image_semaphores();
 
         VkSemaphoreCreateInfo const semaphore_info{
@@ -173,7 +233,7 @@ namespace encke
     }
 
     bool Renderer::record(VkCommandBuffer command, VulkanSwapchain const& swapchain,
-                          u32 image_index)
+                          u32 image_index, f32 seconds)
     {
         VkCommandBufferBeginInfo const begin{
             .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -214,6 +274,32 @@ namespace encke
             .clearValue         = {.color = kClearColor},
         };
 
+        // The depth image is only ever used inside rendering, so it can be
+        // discarded from UNDEFINED each frame rather than preserved.
+        submit_barrier(command,
+                       layout_barrier(depth_.image(),
+                                      VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, 0,
+                                      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                          VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                      VK_IMAGE_ASPECT_DEPTH_BIT));
+
+        VkRenderingAttachmentInfo const depth_attachment{
+            .sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .pNext              = nullptr,
+            .imageView          = depth_.view(),
+            .imageLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .resolveMode        = VK_RESOLVE_MODE_NONE,
+            .resolveImageView   = VK_NULL_HANDLE,
+            .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .loadOp             = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            // Nothing reads depth after the frame yet.
+            .storeOp            = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue         = {.depthStencil = {DepthTarget::kClearDepth, 0}},
+        };
+
         VkRenderingInfo const rendering{
             .sType      = VK_STRUCTURE_TYPE_RENDERING_INFO,
             .pNext      = nullptr,
@@ -223,7 +309,7 @@ namespace encke
             .viewMask   = 0,
             .colorAttachmentCount = 1,
             .pColorAttachments    = &color,
-            .pDepthAttachment     = nullptr,
+            .pDepthAttachment     = &depth_attachment,
             .pStencilAttachment   = nullptr,
         };
 
@@ -238,10 +324,31 @@ namespace encke
         vkCmdSetViewport(command, 0, 1, &viewport);
         vkCmdSetScissor(command, 0, 1, &scissor);
 
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, triangle_.handle());
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_.handle());
 
-        // Three vertices, no buffers -- the shader builds them from SV_VertexID.
-        vkCmdDraw(command, 3, 1, 0, 0);
+        f32 const aspect = static_cast<f32>(swapchain.extent().width) /
+                           static_cast<f32>(swapchain.extent().height);
+
+        f32mat4 const model =
+            glm::rotate(f32mat4{1.0f}, seconds * 0.6f, f32vec3{0.35f, 1.0f, 0.15f});
+
+        f32mat4 const view = glm::lookAt(f32vec3{0.0f, 1.1f, 2.6f},
+                                         f32vec3{0.0f, 0.0f, 0.0f},
+                                         f32vec3{0.0f, 1.0f, 0.0f});
+
+        f32mat4 const projection =
+            reversed_z_perspective(glm::radians(50.0f), aspect, 0.1f, 100.0f);
+
+        PushConstants const push{
+            .mvp   = projection * view * model,
+            .model = model,
+        };
+
+        vkCmdPushConstants(command, pipeline_.layout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(push), &push);
+
+        cube_.draw(command);
 
         vkCmdEndRendering(command);
 
@@ -263,7 +370,7 @@ namespace encke
         return true;
     }
 
-    FrameResult Renderer::draw(VulkanSwapchain const& swapchain)
+    FrameResult Renderer::draw(VulkanSwapchain const& swapchain, f32 seconds)
     {
         VkDevice const device = device_->handle();
 
@@ -295,7 +402,7 @@ namespace encke
         VkCommandBuffer const command = commands_[frame_];
         vkResetCommandBuffer(command, 0);
 
-        if (!record(command, swapchain, image_index))
+        if (!record(command, swapchain, image_index, seconds))
         {
             return FrameResult::Error;
         }
@@ -401,7 +508,9 @@ namespace encke
 
         VkDevice const device = device_->handle();
 
-        triangle_.shutdown();
+        pipeline_.shutdown();
+        cube_.shutdown();
+        depth_.shutdown();
 
         destroy_image_semaphores();
 

@@ -71,9 +71,7 @@ namespace encke
         shutdown();
     }
 
-    bool GraphicsPipeline::init(VulkanDevice const& device, char const* spirv_name,
-                                char const* vertex_entry, char const* fragment_entry,
-                                VkFormat colour_format)
+    bool GraphicsPipeline::init(VulkanDevice const& device, Config const& config)
     {
         device_ = &device;
 
@@ -81,7 +79,7 @@ namespace encke
 
         // One module, both entry points. slangc keeps the original names given
         // -fvk-use-entrypoint-name; without it they would both be "main".
-        VkShaderModule const module = load_module(handle, spirv_name);
+        VkShaderModule const module = load_module(handle, config.spirv_name);
         if (module == VK_NULL_HANDLE)
         {
             return false;
@@ -94,7 +92,7 @@ namespace encke
                 .flags               = 0,
                 .stage               = VK_SHADER_STAGE_VERTEX_BIT,
                 .module              = module,
-                .pName               = vertex_entry,
+                .pName               = config.vertex_entry,
                 .pSpecializationInfo = nullptr,
             },
             {
@@ -103,20 +101,19 @@ namespace encke
                 .flags               = 0,
                 .stage               = VK_SHADER_STAGE_FRAGMENT_BIT,
                 .module              = module,
-                .pName               = fragment_entry,
+                .pName               = config.fragment_entry,
                 .pSpecializationInfo = nullptr,
             },
         };
 
-        // No vertex buffers: the shader derives positions from SV_VertexID.
         VkPipelineVertexInputStateCreateInfo const vertex_input{
             .sType                           = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .pNext                           = nullptr,
             .flags                           = 0,
-            .vertexBindingDescriptionCount   = 0,
-            .pVertexBindingDescriptions      = nullptr,
-            .vertexAttributeDescriptionCount = 0,
-            .pVertexAttributeDescriptions    = nullptr,
+            .vertexBindingDescriptionCount   = static_cast<u32>(config.bindings.size()),
+            .pVertexBindingDescriptions      = config.bindings.data(),
+            .vertexAttributeDescriptionCount = static_cast<u32>(config.attributes.size()),
+            .pVertexAttributeDescriptions    = config.attributes.data(),
         };
 
         VkPipelineInputAssemblyStateCreateInfo const input_assembly{
@@ -206,14 +203,41 @@ namespace encke
             .pDynamicStates    = dynamic_states,
         };
 
+        // Reversed-Z: near is 1.0, far is 0.0, so a fragment passes when its
+        // depth is GREATER than what is already there.
+        VkPipelineDepthStencilStateCreateInfo const depth_stencil{
+            .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .depthTestEnable       = VK_TRUE,
+            .depthWriteEnable      = VK_TRUE,
+            .depthCompareOp        = VK_COMPARE_OP_GREATER_OR_EQUAL,
+            .depthBoundsTestEnable = VK_FALSE,
+            .stencilTestEnable     = VK_FALSE,
+            .front                 = {},
+            .back                  = {},
+            .minDepthBounds        = 0.0f,
+            .maxDepthBounds        = 1.0f,
+        };
+
+        bool const has_depth = config.depth_format != VK_FORMAT_UNDEFINED;
+
+        VkPushConstantRange const push_range{
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset     = 0,
+            .size       = config.push_constant_size,
+        };
+
+        bool const has_push = config.push_constant_size > 0;
+
         VkPipelineLayoutCreateInfo const layout_info{
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext                  = nullptr,
             .flags                  = 0,
             .setLayoutCount         = 0,
             .pSetLayouts            = nullptr,
-            .pushConstantRangeCount = 0,
-            .pPushConstantRanges    = nullptr,
+            .pushConstantRangeCount = has_push ? 1u : 0u,
+            .pPushConstantRanges    = has_push ? &push_range : nullptr,
         };
 
         VkResult result =
@@ -232,8 +256,8 @@ namespace encke
             .pNext                   = nullptr,
             .viewMask                = 0,
             .colorAttachmentCount    = 1,
-            .pColorAttachmentFormats = &colour_format,
-            .depthAttachmentFormat   = VK_FORMAT_UNDEFINED,
+            .pColorAttachmentFormats = &config.colour_format,
+            .depthAttachmentFormat   = config.depth_format,
             .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
         };
 
@@ -249,7 +273,7 @@ namespace encke
             .pViewportState      = &viewport_state,
             .pRasterizationState = &rasterization,
             .pMultisampleState   = &multisample,
-            .pDepthStencilState  = nullptr,
+            .pDepthStencilState  = has_depth ? &depth_stencil : nullptr,
             .pColorBlendState    = &blend,
             .pDynamicState       = &dynamic,
             .layout              = layout_,
@@ -271,7 +295,8 @@ namespace encke
             return false;
         }
 
-        log::info("pipeline ready (%s, %s)", vertex_entry, fragment_entry);
+        log::info("pipeline ready (%s: %s, %s)", config.spirv_name, config.vertex_entry,
+                  config.fragment_entry);
         return true;
     }
 

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "render/mesh.hpp"
 #include "render/pipeline.hpp"
+#include "vulkan/depth.hpp"
 
 namespace encke
 {
+    class VulkanAllocator;
     class VulkanDevice;
     class VulkanSwapchain;
 
@@ -27,23 +30,28 @@ namespace encke
         Renderer(Renderer&&)                 = delete;
         Renderer& operator=(Renderer&&)      = delete;
 
-        bool init(VulkanDevice const& device, VulkanSwapchain const& swapchain);
+        bool init(VulkanAllocator const& allocator, VulkanDevice const& device,
+                  VulkanSwapchain const& swapchain);
         void shutdown();
 
-        // Rebuilds the per-image semaphores after the swapchain changes.
+        // Rebuilds the per-image semaphores and the depth target after the
+        // swapchain changes.
         bool on_swapchain_changed(VulkanSwapchain const& swapchain);
 
-        FrameResult draw(VulkanSwapchain const& swapchain);
+        FrameResult draw(VulkanSwapchain const& swapchain, f32 seconds);
 
     private:
-        bool record(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index);
+        bool record(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index,
+                    f32 seconds);
         void destroy_image_semaphores();
 
         static constexpr u32 kFramesInFlight = 2;
 
         VulkanDevice const* device_ = nullptr;
 
-        GraphicsPipeline triangle_;
+        GraphicsPipeline pipeline_;
+        Mesh             cube_;
+        DepthTarget      depth_;
 
         VkCommandPool command_pool_ = VK_NULL_HANDLE;
 

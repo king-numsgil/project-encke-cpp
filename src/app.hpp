@@ -2,6 +2,7 @@
 
 #include "platform/window.hpp"
 #include "render/renderer.hpp"
+#include "vulkan/allocator.hpp"
 #include "vulkan/context.hpp"
 #include "vulkan/device.hpp"
 #include "vulkan/swapchain.hpp"
@@ -32,10 +33,12 @@ namespace encke
         void report_throughput();
 
         // Declaration order is destruction order reversed: renderer, then
-        // swapchain, then device, then instance, then window.
+        // swapchain, then allocator, then device, then instance, then window.
+        // The allocator must outlive every buffer and image the renderer owns.
         Window          window_;
         VulkanContext   vulkan_;
         VulkanDevice    device_;
+        VulkanAllocator allocator_;
         VulkanSwapchain swapchain_;
         Renderer        renderer_;
 

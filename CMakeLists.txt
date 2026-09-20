@@ -87,10 +87,14 @@ add_executable(encke
 
     src/platform/window.cpp
 
+    src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/renderer.cpp
 
+    src/vulkan/allocator.cpp
+    src/vulkan/buffer.cpp
     src/vulkan/context.cpp
+    src/vulkan/depth.cpp
     src/vulkan/device.cpp
     src/vulkan/swapchain.cpp
 )
@@ -120,6 +124,10 @@ function(encke_add_shader out_spv source)
                 -target spirv
                 -profile spirv_1_5
                 -fvk-use-entrypoint-name
+                # GLM is column-major and so is SPIR-V by default; Slang would
+                # otherwise use HLSL's row-major and silently transpose every
+                # matrix pushed from C++.
+                -matrix-layout-column-major
                 -depfile "${spv}.d"
                 -o "${spv}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
@@ -134,8 +142,9 @@ function(encke_add_shader out_spv source)
 endfunction()
 
 encke_add_shader(ENCKE_TRIANGLE_SPV shaders/triangle.slang)
+encke_add_shader(ENCKE_MESH_SPV shaders/mesh.slang)
 
-add_custom_target(encke_shaders DEPENDS "${ENCKE_TRIANGLE_SPV}")
+add_custom_target(encke_shaders DEPENDS "${ENCKE_TRIANGLE_SPV}" "${ENCKE_MESH_SPV}")
 add_dependencies(encke encke_shaders)
 
 # volk.h, SDL3 and glm are stable and heavy; our own code is not yet either.

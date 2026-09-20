@@ -44,12 +44,17 @@ namespace encke
             return false;
         }
 
+        if (!allocator_.init(vulkan_, device_))
+        {
+            return false;
+        }
+
         if (!swapchain_.init(vulkan_, device_, window_.pixel_size()))
         {
             return false;
         }
 
-        if (!renderer_.init(device_, swapchain_))
+        if (!renderer_.init(allocator_, device_, swapchain_))
         {
             return false;
         }
@@ -137,7 +142,9 @@ namespace encke
                 }
             }
 
-            switch (renderer_.draw(swapchain_))
+            f32 const seconds = static_cast<f32>(log::elapsed_ms()) / 1000.0f;
+
+            switch (renderer_.draw(swapchain_, seconds))
             {
             case FrameResult::Ok:
                 ++frames_;

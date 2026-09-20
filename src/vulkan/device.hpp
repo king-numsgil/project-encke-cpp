@@ -31,6 +31,11 @@ namespace encke
         // a command buffer might still reference.
         void wait_idle() const;
 
+        // Records and runs one command buffer on the graphics queue, blocking
+        // until it retires. For startup-time work -- staging uploads, layout
+        // transitions -- never for anything per-frame.
+        bool submit_immediate(function<void(VkCommandBuffer)> const& record) const;
+
         VkPhysicalDevice     physical() const { return physical_; }
         VkDevice             handle() const { return device_; }
         VkQueue              graphics_queue() const { return graphics_queue_; }
@@ -43,5 +48,8 @@ namespace encke
         VkQueue          graphics_queue_ = VK_NULL_HANDLE;
         VkQueue          present_queue_  = VK_NULL_HANDLE;
         QueueFamilies    families_;
+
+        // Transient pool for submit_immediate.
+        VkCommandPool    upload_pool_    = VK_NULL_HANDLE;
     };
 }

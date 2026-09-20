@@ -19,14 +19,33 @@ namespace encke
         GraphicsPipeline(GraphicsPipeline&&)                 = delete;
         GraphicsPipeline& operator=(GraphicsPipeline&&)      = delete;
 
-        // spirv_name is resolved against `shaders/` beside the executable.
-        bool init(VulkanDevice const& device, char const* spirv_name,
-                  char const* vertex_entry, char const* fragment_entry,
-                  VkFormat colour_format);
+        struct Config
+        {
+            // Resolved against `shaders/` beside the executable.
+            char const* spirv_name     = nullptr;
+            char const* vertex_entry   = "vertex_main";
+            char const* fragment_entry = "fragment_main";
+
+            VkFormat colour_format = VK_FORMAT_UNDEFINED;
+
+            // VK_FORMAT_UNDEFINED disables depth entirely.
+            VkFormat depth_format = VK_FORMAT_UNDEFINED;
+
+            // Empty means no vertex buffers; the shader builds its own
+            // positions from SV_VertexID.
+            span<VkVertexInputBindingDescription const>   bindings;
+            span<VkVertexInputAttributeDescription const> attributes;
+
+            // Zero means no push constants.
+            u32 push_constant_size = 0;
+        };
+
+        bool init(VulkanDevice const& device, Config const& config);
 
         void shutdown();
 
-        VkPipeline handle() const { return pipeline_; }
+        VkPipeline       handle() const { return pipeline_; }
+        VkPipelineLayout layout() const { return layout_; }
 
     private:
         VulkanDevice const* device_   = nullptr;

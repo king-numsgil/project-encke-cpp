@@ -291,7 +291,106 @@ namespace encke
         vkGetDeviceQueue(device_, *families_.present, 0, &present_queue_);
 
         log::info("queues: graphics=%u present=%u", *families_.graphics, *families_.present);
+
+        VkCommandPoolCreateInfo const pool_info{
+            .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .pNext            = nullptr,
+            .flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+            .queueFamilyIndex = *families_.graphics,
+        };
+
+        result = vkCreateCommandPool(device_, &pool_info, memory::vulkan_callbacks(),
+                                     &upload_pool_);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkCreateCommandPool (upload)", result);
+            return false;
+        }
+
         return true;
+    }
+
+    bool VulkanDevice::submit_immediate(function<void(VkCommandBuffer)> const& record) const
+    {
+        VkCommandBufferAllocateInfo const alloc_info{
+            .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext              = nullptr,
+            .commandPool        = upload_pool_,
+            .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+
+        VkCommandBuffer command = VK_NULL_HANDLE;
+        VkResult result = vkAllocateCommandBuffers(device_, &alloc_info, &command);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkAllocateCommandBuffers (upload)", result);
+            return false;
+        }
+
+        VkCommandBufferBeginInfo const begin{
+            .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .pNext            = nullptr,
+            .flags            = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            .pInheritanceInfo = nullptr,
+        };
+
+        bool ok = true;
+        result  = vkBeginCommandBuffer(command, &begin);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkBeginCommandBuffer (upload)", result);
+            ok = false;
+        }
+        else
+        {
+            record(command);
+
+            result = vkEndCommandBuffer(command);
+            if (result != VK_SUCCESS)
+            {
+                log::vk_error("vkEndCommandBuffer (upload)", result);
+                ok = false;
+            }
+        }
+
+        if (ok)
+        {
+            VkCommandBufferSubmitInfo const command_info{
+                .sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                .pNext         = nullptr,
+                .commandBuffer = command,
+                .deviceMask    = 0,
+            };
+
+            VkSubmitInfo2 const submit{
+                .sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                .pNext                    = nullptr,
+                .flags                    = 0,
+                .waitSemaphoreInfoCount   = 0,
+                .pWaitSemaphoreInfos      = nullptr,
+                .commandBufferInfoCount   = 1,
+                .pCommandBufferInfos      = &command_info,
+                .signalSemaphoreInfoCount = 0,
+                .pSignalSemaphoreInfos    = nullptr,
+            };
+
+            result = vkQueueSubmit2(graphics_queue_, 1, &submit, VK_NULL_HANDLE);
+            if (result != VK_SUCCESS)
+            {
+                log::vk_error("vkQueueSubmit2 (upload)", result);
+                ok = false;
+            }
+            else
+            {
+                // Crude, and correct for startup work. A fence would let the
+                // caller overlap uploads; nothing needs that yet.
+                vkQueueWaitIdle(graphics_queue_);
+            }
+        }
+
+        vkFreeCommandBuffers(device_, upload_pool_, 1, &command);
+        return ok;
     }
 
     void VulkanDevice::wait_idle() const
@@ -304,6 +403,12 @@ namespace encke
 
     void VulkanDevice::shutdown()
     {
+        if (upload_pool_ != VK_NULL_HANDLE)
+        {
+            vkDestroyCommandPool(device_, upload_pool_, memory::vulkan_callbacks());
+            upload_pool_ = VK_NULL_HANDLE;
+        }
+
         if (device_ != VK_NULL_HANDLE)
         {
             vkDestroyDevice(device_, memory::vulkan_callbacks());

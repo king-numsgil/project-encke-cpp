@@ -54,10 +54,9 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer. It draws a gouraud-shaded triangle from a Slang
-shader, survives resize, and reports throughput. There are no vertex buffers,
-descriptors, textures or depth yet — the triangle's positions come from
-`SV_VertexID`.
+`encke` is a Vulkan renderer. It draws a rotating lit cube from vertex and index
+buffers in device-local memory, depth-tested, with an MVP in push constants. No
+descriptors, textures or asset loading yet — the cube is generated in code.
 
 ```
 src/
@@ -71,13 +70,18 @@ src/
     window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
   vulkan/
     context.{hpp,cpp} volk, instance, validation, surface
-    device.{hpp,cpp}  physical device selection, logical device, queues
+    device.{hpp,cpp}  device selection, queues, submit_immediate
+    allocator.{hpp,cpp}  VMA lifetime; the only VMA_IMPLEMENTATION
+    buffer.{hpp,cpp}     device-local buffer filled via a staging copy
+    depth.{hpp,cpp}      reversed-Z depth attachment
     swapchain.{hpp,cpp}  swapchain, images, views, recreation
   render/
+    mesh.{hpp,cpp}       Vertex, Mesh, procedural cube
     pipeline.{hpp,cpp}   shader module loading, VkPipeline construction
     renderer.{hpp,cpp}   command pool, per-frame sync, record and present
 shaders/
-  triangle.slang         compiled to SPIR-V at build time by slangc
+  triangle.slang         SV_VertexID triangle, kept as the minimal case
+  mesh.slang             vertex-buffer mesh with MVP push constants
   lib/
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
@@ -103,7 +107,30 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   `shaderDrawParameters`, and rejects any GPU lacking them, so none of them
   needs a fallback path.
 - **Viewport and scissor are dynamic state**, so a resize does not invalidate
-  the pipeline. The colour format does, since dynamic rendering bakes it in.
+  the pipeline. The attachment formats do, since dynamic rendering bakes them
+  in.
+- **Depth is REVERSED-Z on `VK_FORMAT_D32_SFLOAT`.** Near maps to 1.0, far to
+  0.0. Four things must agree and all four are load-bearing:
+
+  | | |
+  | --- | --- |
+  | projection | `glm::perspective` with **near and far swapped** |
+  | clear value | `0.0` (`DepthTarget::kClearDepth`) |
+  | compare op | `VK_COMPARE_OP_GREATER_OR_EQUAL` |
+  | format | `D32_SFLOAT` — float depth is the point |
+
+  Float exponent bits bunch near zero, and a conventional 0..1 mapping spends
+  that precision at the far plane where it does nothing. Reversing moves it to
+  the near plane. Break any one of the four and geometry vanishes or z-fights;
+  a normal projection with a `GREATER` compare draws the far surfaces instead
+  of the near ones, which back-face culling can disguise on convex meshes.
+- **All device memory goes through VMA.** Nothing calls `vkAllocateMemory`.
+  `vulkan/allocator.cpp` is the single `VMA_IMPLEMENTATION`, and VMA is given
+  `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr` because volk means there are no
+  linked Vulkan symbols to find.
+- **Buffers are device-local, filled once through a staging copy** driven by
+  `VulkanDevice::submit_immediate`, which blocks on `vkQueueWaitIdle`. That is
+  fine for startup and wrong for anything per-frame.
 - **The Y flip lives in the viewport**, via `flipped_viewport()` — negative
   height, set per frame. Projection matrices stay conventional.
 - **Back-face culling is on with `frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE`,
@@ -192,6 +219,10 @@ answer: accepted, not worked around. The SDK is needed for validation layers and
   all become `main` and the pipeline cannot distinguish them.
 - **`.spv` lands in `shaders/` beside the executable**, and the runtime resolves
   it against `SDL_GetBasePath()`.
+- **Matrices are column-major on both sides.** slangc gets
+  `-matrix-layout-column-major` because Slang otherwise follows HLSL's
+  row-major convention and would silently transpose every matrix pushed from
+  GLM. Nothing warns about this; it presents as geometry in the wrong place.
 - **`SV_VertexID` requires `shaderDrawParameters`.** Slang lowers it to
   `gl_VertexIndex` and emits the SPIR-V `DrawParameters` capability. Device
   creation enables the feature and selection requires it; without it
@@ -511,8 +542,9 @@ gives `w=1` and stores `2 3 4 1`. Constructing is w-first, uploading is w-last.
 that no longer matches a shader-side `vec4`.
 - **No GLM type is `constexpr`-constructible.** `GLM_HAS_CONSTEXPR` is forced to
   0 whenever the SIMD arch bit is set (`detail/setup.hpp:297`), which
-  `GLM_FORCE_AVX2` does. `GLM_CONFIG_CONSTEXP` is `GLM_DISABLE` here. Compile-
-  time GLM constants are not available; use plain arrays or scalars instead.
+  `GLM_FORCE_AVX2` does. `GLM_CONFIG_CONSTEXP` is `GLM_DISABLE` here. A
+  `constexpr f32vec3` table is a compile error — use `const`. This one is easy
+  to write by reflex and has already cost one build.
 - **AVX2/FMA is a baseline assumption** (`-mavx2 -mfma` / `/arch:AVX2`) — the
   binary will not run on pre-Haswell CPUs.
 - **C++23**, no compiler extensions, hidden visibility, PIC.
