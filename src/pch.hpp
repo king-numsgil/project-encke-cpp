@@ -8,15 +8,9 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
-#include <glm/glm.hpp>
+// Pulls in glm and the std headers behind the global type aliases.
+#include "types.hpp"
 
-#include <array>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
