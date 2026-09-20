@@ -1,6 +1,14 @@
 #pragma once
 
-#if defined(__GNUC__) || defined(__clang__)
+// GCC's `printf` archetype validates against MSVCRT when targeting MinGW, and
+// MSVCRT has no %z -- so %zu draws "unknown conversion type character 'z'"
+// followed by a bogus "too many arguments". This project targets UCRT, whose
+// printf does support C99 conversions, so the GNU archetype is the accurate
+// one. Changing the format strings instead would be fixing the wrong end.
+#if defined(__MINGW32__) && defined(__GNUC__) && !defined(__clang__)
+#   define ENCKE_PRINTF_FORMAT(fmt_index, first_arg) \
+        __attribute__((format(gnu_printf, fmt_index, first_arg)))
+#elif defined(__GNUC__) || defined(__clang__)
 #   define ENCKE_PRINTF_FORMAT(fmt_index, first_arg) \
         __attribute__((format(printf, fmt_index, first_arg)))
 #else
