@@ -15,8 +15,11 @@ add_executable(encke
     src/main.cpp
     src/app.cpp
     src/log.cpp
+    src/renderer.cpp
     src/window.cpp
     src/vulkan_context.cpp
+    src/vulkan_device.cpp
+    src/vulkan_swapchain.cpp
 )
 
 target_include_directories(encke PRIVATE src)

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "renderer.hpp"
 #include "vulkan_context.hpp"
+#include "vulkan_device.hpp"
+#include "vulkan_swapchain.hpp"
 #include "window.hpp"
 
 namespace encke
@@ -9,7 +12,7 @@ namespace encke
     {
     public:
         App() = default;
-        ~App() = default;
+        ~App();
 
         App(App const&)            = delete;
         App& operator=(App const&) = delete;
@@ -20,9 +23,23 @@ namespace encke
         void run();
 
     private:
-        void on_resize();
+        // Returns false if the window has no drawable area, in which case the
+        // swapchain is left alone until it does.
+        bool rebuild_swapchain();
 
-        Window        window_;
-        VulkanContext vulkan_;
+        bool swapchain_matches_window() const;
+
+        void report_throughput();
+
+        // Declaration order is destruction order reversed: renderer, then
+        // swapchain, then device, then instance, then window.
+        Window          window_;
+        VulkanContext   vulkan_;
+        VulkanDevice    device_;
+        VulkanSwapchain swapchain_;
+        Renderer        renderer_;
+
+        u64 frames_          = 0;
+        i64 last_report_ms_  = 0;
     };
 }

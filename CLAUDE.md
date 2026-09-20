@@ -48,40 +48,49 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer. There is no physical device, swapchain or frame
-loop yet — the surface is as far as it goes.
+`encke` is a Vulkan renderer. It clears the swapchain to a colour and presents,
+survives resize, and reports throughput. There is no `VkPipeline`, no shaders
+and no geometry yet — a clear needs none of them.
 
 | File | Holds |
 | --- | --- |
 | `main.cpp` | Entry point. Constructs `App`, nothing else. |
-| `app.hpp/.cpp` | Owns the window and the Vulkan context; runs the event loop. |
+| `app.hpp/.cpp` | Owns everything; runs the event and frame loop. |
 | `window.hpp/.cpp` | SDL3 init, window, and event pump. Returns `FrameEvents`. |
 | `vulkan_context.hpp/.cpp` | volk, instance, validation, surface. |
+| `vulkan_device.hpp/.cpp` | Physical device selection, logical device, queues. |
+| `vulkan_swapchain.hpp/.cpp` | Swapchain, images, views, recreation. |
+| `renderer.hpp/.cpp` | Command pool, per-frame sync, record and present. |
 | `log.hpp/.cpp` | Unbuffered stderr diagnostics with millisecond stamps. |
 | `pch.hpp`, `types.hpp` | Precompiled header and the global type prelude. |
 
-`App`'s members are declared window-first so they destruct Vulkan-first, which
-is the order the surface requires. Every `shutdown()` checks its handle, so a
-partially constructed `App` tears down correctly.
+`App`'s members are declared window-first so they destruct in reverse: renderer,
+swapchain, device, instance, window. `~App` calls `wait_idle()` before any of
+that runs. Every `shutdown()` checks its handle, so a partially constructed
+`App` tears down correctly.
 
-## Known issue: 10-second exit
+## Rendering decisions already made
 
-`SDL_Quit()` takes **~10 seconds** on this machine. Measured, not guessed:
-`SDL_QuitSubSystem(SDL_INIT_VIDEO)` is 10014 ms while events and audio quit in
-under 2 ms, and a bare `SDL_Init(SDL_INIT_VIDEO)` + `SDL_Quit()` with no window
-and no Vulkan reproduces it. All Vulkan teardown finishes in ~200 ms.
+- **Dynamic rendering, not `VkRenderPass`.** Core in Vulkan 1.3. There is no
+  `VkRenderPass` or `VkFramebuffer` anywhere, and there should not be.
+- **synchronization2** for barriers and submits (`vkCmdPipelineBarrier2`,
+  `vkQueueSubmit2`). Device selection *requires* both features and rejects any
+  GPU lacking them, so neither needs a fallback path.
+- **Two frames in flight.** `image_available` semaphores and fences are
+  per-frame; `render_finished` semaphores are **per swapchain image**, because
+  a frame index maps to a different image over time and signalling a semaphore
+  that still has a pending wait is invalid.
+- **MAILBOX present mode where offered**, FIFO otherwise. FIFO is the only mode
+  guaranteed to exist.
+- **The clear colour is linear.** The swapchain is `B8G8R8A8_SRGB`, so the
+  hardware encodes on write. Linear `(0.03, 0.12, 0.18)` lands as sRGB
+  `(48, 97, 118)` on screen — verified by screen capture, not assumed.
+- The swapchain is only rebuilt when the window size actually differs, since a
+  resize event also fires once at startup for the initial size.
 
-The cause is SDL's Windows video backend: `SDL_windowsgameinput.cpp:240` calls
-`SDL_InitGameInput` unconditionally, with no hint guarding it, and the matching
-`SDL_QuitGameInput` blocks in `IGameInput::Release()` / `FreeLibrary` on
-`gameinput.dll` (0.2309.22621.4249 here). `SDL_HINT_WINDOWS_GAMEINPUT` does not
-help — that hint only gates the *joystick* driver. Disabling the Steam implicit
-layers and every `SDL_JOYSTICK_*` hint changes nothing either.
+Expect ~3000 fps clearing a 1280x720 window on a GTX 1070. A sharp drop means
+something changed, not that the number was ever meaningful.
 
-It is SDL's, not ours, and it costs nothing but wall-clock at exit. If it
-becomes intolerable during development, the blunt fix is to skip `SDL_Quit()`
-and `std::_Exit` after Vulkan teardown — at the cost of losing whatever a clean
-SDL shutdown would have reported.
 
 ## Toolchain
 

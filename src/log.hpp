@@ -13,6 +13,9 @@ namespace encke::log
     // last few lines, which are usually the interesting ones.
     void init();
 
+    // Milliseconds since init(). Also drives the log timestamps.
+    i64 elapsed_ms();
+
     void info(char const* fmt, ...)  ENCKE_PRINTF_FORMAT(1, 2);
     void warn(char const* fmt, ...)  ENCKE_PRINTF_FORMAT(1, 2);
     void error(char const* fmt, ...) ENCKE_PRINTF_FORMAT(1, 2);

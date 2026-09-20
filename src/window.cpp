@@ -43,9 +43,6 @@ namespace encke
 
         if (sdl_started_)
         {
-            // Costs ~10s on this machine: SDL's Windows video backend loads
-            // gameinput.dll unconditionally and its teardown blocks. See the
-            // note in CLAUDE.md -- it is SDL's, not ours.
             SDL_Quit();
             sdl_started_ = false;
         }
