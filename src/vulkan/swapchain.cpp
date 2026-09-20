@@ -1,10 +1,10 @@
-#include "pch.hpp"
+#include "core/pch.hpp"
 
-#include "vulkan_swapchain.hpp"
+#include "vulkan/swapchain.hpp"
 
-#include "log.hpp"
-#include "vulkan_context.hpp"
-#include "vulkan_device.hpp"
+#include "core/log.hpp"
+#include "vulkan/context.hpp"
+#include "vulkan/device.hpp"
 
 #include <algorithm>
 #include <limits>

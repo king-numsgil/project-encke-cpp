@@ -14,18 +14,22 @@ find_package(glm CONFIG REQUIRED)
 add_executable(encke
     src/main.cpp
     src/app.cpp
-    src/log.cpp
-    src/renderer.cpp
-    src/window.cpp
-    src/vulkan_context.cpp
-    src/vulkan_device.cpp
-    src/vulkan_swapchain.cpp
+
+    src/core/log.cpp
+
+    src/platform/window.cpp
+
+    src/render/renderer.cpp
+
+    src/vulkan/context.cpp
+    src/vulkan/device.cpp
+    src/vulkan/swapchain.cpp
 )
 
 target_include_directories(encke PRIVATE src)
 
-# volk.h, SDL3 and glm are stable and heavy; main.cpp is not yet either.
-target_precompile_headers(encke PRIVATE src/pch.hpp)
+# volk.h, SDL3 and glm are stable and heavy; our own code is not yet either.
+target_precompile_headers(encke PRIVATE src/core/pch.hpp)
 
 set_target_properties(encke PROPERTIES
     POSITION_INDEPENDENT_CODE ON

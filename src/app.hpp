@@ -1,10 +1,10 @@
 #pragma once
 
-#include "renderer.hpp"
-#include "vulkan_context.hpp"
-#include "vulkan_device.hpp"
-#include "vulkan_swapchain.hpp"
-#include "window.hpp"
+#include "platform/window.hpp"
+#include "render/renderer.hpp"
+#include "vulkan/context.hpp"
+#include "vulkan/device.hpp"
+#include "vulkan/swapchain.hpp"
 
 namespace encke
 {

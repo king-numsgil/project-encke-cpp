@@ -1,9 +1,9 @@
-#include "pch.hpp"
+#include "core/pch.hpp"
 
-#include "vulkan_device.hpp"
+#include "vulkan/device.hpp"
 
-#include "log.hpp"
-#include "vulkan_context.hpp"
+#include "core/log.hpp"
+#include "vulkan/context.hpp"
 
 #include <cstring>
 

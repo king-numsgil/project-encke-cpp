@@ -1,10 +1,10 @@
-#include "pch.hpp"
+#include "core/pch.hpp"
 
-#include "renderer.hpp"
+#include "render/renderer.hpp"
 
-#include "log.hpp"
-#include "vulkan_device.hpp"
-#include "vulkan_swapchain.hpp"
+#include "core/log.hpp"
+#include "vulkan/device.hpp"
+#include "vulkan/swapchain.hpp"
 
 namespace encke
 {

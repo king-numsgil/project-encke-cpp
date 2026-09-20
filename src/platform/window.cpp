@@ -1,8 +1,8 @@
-#include "pch.hpp"
+#include "core/pch.hpp"
 
-#include "window.hpp"
+#include "platform/window.hpp"
 
-#include "log.hpp"
+#include "core/log.hpp"
 
 namespace encke
 {

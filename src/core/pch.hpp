@@ -9,7 +9,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 // Pulls in glm and the std headers behind the global type aliases.
-#include "types.hpp"
+#include "core/types.hpp"
 
 #include <cstdio>
 #include <cstdlib>

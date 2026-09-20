@@ -1,6 +1,6 @@
-#include "pch.hpp"
+#include "core/pch.hpp"
 
-#include "log.hpp"
+#include "core/log.hpp"
 
 #include <chrono>
 #include <cstdarg>

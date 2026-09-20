@@ -52,17 +52,29 @@ be visible in this repository's code or history, so ask rather than infer intent
 survives resize, and reports throughput. There is no `VkPipeline`, no shaders
 and no geometry yet — a clear needs none of them.
 
-| File | Holds |
-| --- | --- |
-| `main.cpp` | Entry point. Constructs `App`, nothing else. |
-| `app.hpp/.cpp` | Owns everything; runs the event and frame loop. |
-| `window.hpp/.cpp` | SDL3 init, window, and event pump. Returns `FrameEvents`. |
-| `vulkan_context.hpp/.cpp` | volk, instance, validation, surface. |
-| `vulkan_device.hpp/.cpp` | Physical device selection, logical device, queues. |
-| `vulkan_swapchain.hpp/.cpp` | Swapchain, images, views, recreation. |
-| `renderer.hpp/.cpp` | Command pool, per-frame sync, record and present. |
-| `log.hpp/.cpp` | Unbuffered stderr diagnostics with millisecond stamps. |
-| `pch.hpp`, `types.hpp` | Precompiled header and the global type prelude. |
+```
+src/
+  main.cpp            entry point; constructs App and nothing else
+  app.{hpp,cpp}       composition root: owns everything, runs the frame loop
+  core/
+    pch.hpp           precompiled header
+    types.hpp         global type prelude
+    log.{hpp,cpp}     unbuffered stderr diagnostics, millisecond stamps
+  platform/
+    window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
+  vulkan/
+    context.{hpp,cpp} volk, instance, validation, surface
+    device.{hpp,cpp}  physical device selection, logical device, queues
+    swapchain.{hpp,cpp}  swapchain, images, views, recreation
+  render/
+    renderer.{hpp,cpp}   command pool, per-frame sync, record and present
+```
+
+**Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
+never `"device.hpp"`, even between files in the same directory. `src` is the
+only include root, so a bare name would be ambiguous about where it lives.
+Headers sit beside their `.cpp`; there is no separate `include/` tree, because
+nothing here is consumed as a library.
 
 `App`'s members are declared window-first so they destruct in reverse: renderer,
 swapchain, device, instance, window. `~App` calls `wait_idle()` before any of
@@ -113,17 +125,34 @@ terminal for a non-obvious reason — see *The PATH trap* below. The script sets
 PATH correctly for the chosen preset and is the supported way to build here.
 
 ```powershell
-.claude\cmake.ps1                                  # gcc-debug, incremental
-.claude\cmake.ps1 -Preset release -Run             # build, then execute
-.claude\cmake.ps1 -Preset clang-sanitize -Clean    # full rebuild under ASan/UBSan
+.claude\cmake.ps1                                  # clang-sanitize, incremental
+.claude\cmake.ps1 -Run                             # build, then execute
+.claude\cmake.ps1 -Preset release -Run             # perf check
 .claude\cmake.ps1 -Target encke                    # a specific target
 .claude\cmake.ps1 -Configure                       # force a reconfigure (slow — see below)
 ```
 
-Presets: `gcc-debug` (Debug, `-Og`), `release` (RelWithDebInfo), `clang-sanitize`
-(ASan + UBSan). The script picks the toolchain directory per preset, auto-
-configures when `build/<preset>/CMakeCache.txt` is missing, and exits nonzero on
-any configure or build failure rather than falling through to `-Run`.
+The script picks the toolchain directory per preset, auto-configures when
+`build/<preset>/CMakeCache.txt` is missing, and exits nonzero on any configure
+or build failure rather than falling through to `-Run`.
+
+### Build one preset, not all three
+
+**`clang-sanitize` is the default and the one to use while working.** ASan and
+UBSan catch what matters during development, and clang's diagnostics are the
+better ones to iterate against. Building all three on every change wastes
+minutes for nothing.
+
+Reach for the others only when there is a reason:
+
+| Preset | When |
+| --- | --- |
+| `clang-sanitize` | Default. Everything, unless a row below applies. |
+| `release` | Measuring performance. `-Og` numbers are meaningless. |
+| `gcc-debug` | Before a commit that touched build flags or headers, to catch GCC-only diagnostics; or when chasing a codegen difference. |
+
+A sweep of all three belongs before a commit that changes `CMakeLists.txt`,
+preset files or `vcpkg.json` — not after every edit.
 
 `.claude/` is gitignored — the script hardcodes machine-specific MSYS2 paths, so
 it will not exist in a fresh clone. Recreate it or fall back to raw `cmake` with
