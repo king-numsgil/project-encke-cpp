@@ -124,6 +124,35 @@ All deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 - **GLM is configured strictly**: `GLM_FORCE_EXPLICIT_CTOR` (no implicit
   conversions between vector types), `GLM_FORCE_SIZE_T_LENGTH` (`.length()`
   returns `size_t`), `GLM_FORCE_AVX2`.
+- **Alignment is opt-in per type, by design.** The default gentypes stay packed
+  — `vec3` is `size 12, align 4`, so `struct Vertex { vec3 pos; vec3 nrm; vec2
+  uv; }` is 32 bytes at offsets 0/12/24 and uploads to a vertex buffer directly.
+  `glm::aligned_vec3` / `aligned_vec4` (`#include <glm/gtc/type_aligned.hpp>`,
+  16/16) are opted into per type where SIMD or std140/std430 layout is wanted;
+  `packed_*` typedefs exist in the same header for the other direction.
+
+  **Do not add `GLM_FORCE_DEFAULT_ALIGNED_GENTYPES`.** It does not remove a
+  capability — `packed_vec3` stays 12/4 under it, so both layouts remain
+  expressible either way. What it changes is which one `vec3` means by default,
+  and the failure modes are not symmetric. With it, `struct Vertex { vec3 pos;
+  vec3 nrm; vec2 uv; }` is silently 48 bytes at offsets 0/16/32, so forgetting
+  `packed_vec3` at a vertex-data site corrupts what is uploaded to the GPU.
+  Without it, forgetting `aligned_vec4` in math code only costs SIMD. The
+  default is deliberately the one whose mistake is cheap. Tried and reverted.
+- **`GLM_FORCE_AVX2` alone does almost nothing.** GLM's SIMD paths are gated on
+  the *qualifier* being aligned, not on the arch — the define only selects which
+  instruction set those paths use once reached. Plain `vec4` is `align 4` and
+  never reaches them. Only the `aligned_*` types get SIMD: `a + b` on
+  `aligned_vec3` is one `vaddps` versus seven component-wise instructions on
+  plain `vec3`.
+- **Geometric functions are hand-specialized only for `L == 4`.** `dot` and
+  `normalize` on any 3-component vector pay extra `vblendps` masking and lose
+  the `vrsqrtps` path, so prefer `aligned_vec4` in hot math even when the data
+  is logically 3D.
+- **No GLM type is `constexpr`-constructible.** `GLM_HAS_CONSTEXPR` is forced to
+  0 whenever the SIMD arch bit is set (`detail/setup.hpp:297`), which
+  `GLM_FORCE_AVX2` does. `GLM_CONFIG_CONSTEXP` is `GLM_DISABLE` here. Compile-
+  time GLM constants are not available; use plain arrays or scalars instead.
 - **AVX2/FMA is a baseline assumption** (`-mavx2 -mfma` / `/arch:AVX2`) — the
   binary will not run on pre-Haswell CPUs.
 - **C++23**, no compiler extensions, hidden visibility, PIC.

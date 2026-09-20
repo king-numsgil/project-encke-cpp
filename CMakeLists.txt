@@ -29,6 +29,15 @@ target_compile_definitions(encke PUBLIC
     GLM_FORCE_EXPLICIT_CTOR
     GLM_FORCE_SIZE_T_LENGTH
     GLM_FORCE_AVX2
+
+    # Deliberately NOT GLM_FORCE_DEFAULT_ALIGNED_GENTYPES. It would not remove a
+    # capability (packed_vec3 stays 12 bytes under it), it flips what vec3 means
+    # by default -- and the mistakes are not symmetric. Aligned by default makes
+    # a plain {vec3,vec3,vec2} vertex silently 48 bytes at offsets 0/16/32, so a
+    # forgotten packed_vec3 corrupts GPU uploads; packed by default means a
+    # forgotten aligned_vec4 only costs SIMD. Opt in per type via
+    # glm::aligned_* (gtc/type_aligned.hpp) where SIMD or std140/std430 is
+    # actually wanted.
 )
 
 target_compile_options(encke PUBLIC
