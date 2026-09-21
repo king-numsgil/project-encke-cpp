@@ -4,8 +4,11 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "ui/image_window.hpp"
 
 #include <cstdlib>
+
+#include <imgui.h>
 
 namespace encke
 {
@@ -17,17 +20,49 @@ namespace encke
 
         constexpr i64 kReportIntervalMs = 1000;
 
-        constexpr u32 kDebugViewCount = 5;
+        // Keys 1 and 2 pick how the frame is shaded; the keys after them
+        // toggle one visualisation window each. ENCKE_DEBUG_VIEW uses the
+        // same numbering from zero.
+        constexpr u32 kShadingModeCount = 2;
+        constexpr u32 kDebugKeyCount    = kShadingModeCount + kDebugWindowCount;
+
+        // The motion gain slider's range. Motion is per-frame displacement:
+        // the top end suits an uncapped couple of thousand frames a second,
+        // the bottom a frame-limited 60.
+        constexpr f32 kMotionGainMin = 10.0f;
+        constexpr f32 kMotionGainMax = 100000.0f;
+
+        // Where each debug window first opens: beside the stats window and
+        // clear of one another at the default 1280x720, so opening all three
+        // does not stack them.
+        f32vec2 debug_window_position(u32 index)
+        {
+            constexpr f32 kLeft   = 470.0f;
+            constexpr f32 kTop    = 10.0f;
+            constexpr f32 kStepX  = 410.0f;
+            constexpr f32 kStepY  = 270.0f;
+
+            return f32vec2{kLeft + kStepX * static_cast<f32>(index % 2u),
+                           kTop + kStepY * static_cast<f32>(index / 2u)};
+        }
 
         char const* debug_view_name(DebugView view)
         {
             switch (view)
             {
-            case DebugView::Lit:         return "lit (clustered)";
-            case DebugView::BruteForce:  return "lit (brute force)";
-            case DebugView::ClusterHeat: return "lights per cluster";
-            case DebugView::Normals:     return "normals";
-            case DebugView::Motion:      return "motion vectors";
+            case DebugView::Lit:        return "lit (clustered)";
+            case DebugView::BruteForce: return "lit (brute force)";
+            }
+            return "unknown";
+        }
+
+        char const* debug_window_title(DebugWindow window)
+        {
+            switch (window)
+            {
+            case DebugWindow::ClusterHeat: return "Lights per cluster";
+            case DebugWindow::Normals:     return "Normals";
+            case DebugWindow::Motion:      return "Motion vectors";
             }
             return "unknown";
         }
@@ -45,22 +80,23 @@ namespace encke
             return std::strtod(value, nullptr);
         }
 
-        // ENCKE_DEBUG_VIEW picks the starting view, so a debug view can be
-        // captured without a keypress.
-        DebugView initial_debug_view()
+        // ENCKE_DEBUG_VIEW picks a starting shading mode or opens a window, so
+        // either can be captured without a keypress. Same numbering as the
+        // keys, from zero.
+        optional<u32> initial_debug_key()
         {
             char const* const value = std::getenv("ENCKE_DEBUG_VIEW");
             if (value == nullptr)
             {
-                return DebugView::Lit;
+                return nullopt;
             }
 
             long const parsed = std::strtol(value, nullptr, 10);
-            if (parsed < 0 || parsed >= static_cast<long>(kDebugViewCount))
+            if (parsed < 0 || parsed >= static_cast<long>(kDebugKeyCount))
             {
-                return DebugView::Lit;
+                return nullopt;
             }
-            return static_cast<DebugView>(parsed);
+            return static_cast<u32>(parsed);
         }
     }
 
@@ -123,16 +159,19 @@ namespace encke
             log::info("animation pinned to t=%.3f s", *fixed_time_);
         }
 
-        renderer_.set_debug_view(initial_debug_view());
-        log::info("debug view: %s (keys 1-%u to switch, F1 toggles the UI)",
-                  debug_view_name(renderer_.debug_view()), kDebugViewCount);
-
         // Any overlay makes two captures differ, which defeats comparing the
         // clustered and brute-force views byte for byte.
         if (std::getenv("ENCKE_NO_UI") != nullptr)
         {
             show_ui_ = false;
         }
+
+        if (optional<u32> const key = initial_debug_key())
+        {
+            on_debug_key(*key);
+        }
+        log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
+                  debug_view_name(renderer_.debug_view()), kDebugKeyCount);
 
         last_report_ms_ = log::elapsed_ms();
         return true;
@@ -184,6 +223,25 @@ namespace encke
         last_report_ms_ = now;
     }
 
+    void App::on_debug_key(u32 key)
+    {
+        if (key < kShadingModeCount)
+        {
+            renderer_.set_debug_view(static_cast<DebugView>(key));
+            log::info("debug view: %s", debug_view_name(renderer_.debug_view()));
+            return;
+        }
+
+        u32 const window = key - kShadingModeCount;
+        debug_windows_[window] = !debug_windows_[window];
+
+        // Asking for a window is asking to see it, so a hidden UI comes back.
+        if (debug_windows_[window])
+        {
+            show_ui_ = true;
+        }
+    }
+
     void App::draw_ui()
     {
         ui_.begin_frame();
@@ -195,9 +253,36 @@ namespace encke
                 .present_mode = swapchain_.present_mode_name(),
                 .extent       = swapchain_.extent(),
             });
+
+            for (u32 index = 0; index < kDebugWindowCount; ++index)
+            {
+                auto const window = static_cast<DebugWindow>(index);
+
+                function<void()> controls;
+                if (window == DebugWindow::Motion)
+                {
+                    controls = [this] {
+                        ImGui::SliderFloat("gain", &motion_gain_, kMotionGainMin, kMotionGainMax,
+                                           "%.0f", ImGuiSliderFlags_Logarithmic);
+                    };
+                }
+
+                image_window(debug_window_title(window), debug_windows_[index],
+                             renderer_.debug_window_image(window), swapchain_.extent(),
+                             debug_window_position(index), controls);
+            }
         }
 
         ui_.end_frame();
+
+        // After the UI, which may have closed a window this frame: the
+        // renderer must draw exactly the images the draw data samples.
+        for (u32 index = 0; index < kDebugWindowCount; ++index)
+        {
+            renderer_.set_debug_window_open(static_cast<DebugWindow>(index),
+                                            show_ui_ && debug_windows_[index]);
+        }
+        renderer_.set_motion_gain(motion_gain_);
     }
 
     void App::run()
@@ -220,11 +305,10 @@ namespace encke
             }
 
             // A digit typed into a UI text field is not a view switch.
-            if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugViewCount &&
-                !ui_.wants_keyboard())
+            if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugKeyCount &&
+                !ui_.wants_text())
             {
-                renderer_.set_debug_view(static_cast<DebugView>(events.debug_view));
-                log::info("debug view: %s", debug_view_name(renderer_.debug_view()));
+                on_debug_key(static_cast<u32>(events.debug_view));
             }
 
             if (window_.minimized())

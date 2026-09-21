@@ -41,9 +41,15 @@ namespace encke
         void prepare(VkCommandBuffer command, u32 slot) override;
         void record(VkCommandBuffer command) override;
 
-        // True while a UI widget has claimed that input, so the app should
-        // not also act on it.
-        bool wants_keyboard() const;
+        // True while a UI text field is taking typed characters, so the app
+        // should not also treat them as shortcuts.
+        //
+        // Not WantCaptureKeyboard: with keyboard navigation on, that is true
+        // whenever any ImGui window has focus -- which the first window gets
+        // on appearing -- and it swallowed every shortcut while the UI showed.
+        bool wants_text() const;
+
+        // True while the pointer is over, or dragging, a UI window.
         bool wants_mouse() const;
 
     private:

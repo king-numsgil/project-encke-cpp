@@ -12,6 +12,31 @@
 
 namespace encke
 {
+    namespace
+    {
+        // For every buffer the CPU writes. HOST_COHERENT is required, not
+        // preferred: on non-coherent memory a CPU write can sit in a cache the
+        // GPU does not see until vmaFlushAllocation, and nothing here flushes.
+        // The spec guarantees a HOST_VISIBLE | HOST_COHERENT type exists, so
+        // this cannot fail to find one, and VMA can still pick write-combined
+        // or resizable-BAR device-local memory where those are coherent.
+        VmaAllocationCreateInfo host_written()
+        {
+            return VmaAllocationCreateInfo{
+                .flags          = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                  VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage          = VMA_MEMORY_USAGE_AUTO,
+                .requiredFlags  = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                .preferredFlags = 0,
+                .memoryTypeBits = 0,
+                .pool           = nullptr,
+                .pUserData      = nullptr,
+                .priority       = 0.0f,
+                .minAlignment   = 0,
+            };
+        }
+    }
+
     Buffer::~Buffer()
     {
         shutdown();
@@ -71,11 +96,7 @@ namespace encke
             .pQueueFamilyIndices   = nullptr,
         };
 
-        VmaAllocationCreateInfo const staging_alloc{
-            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
-            .usage = VMA_MEMORY_USAGE_AUTO,
-        };
+        VmaAllocationCreateInfo const staging_alloc = host_written();
 
         VkBuffer          staging            = VK_NULL_HANDLE;
         VmaAllocation     staging_allocation = nullptr;
@@ -134,11 +155,7 @@ namespace encke
         // Sequential write lets VMA pick write-combined memory, and on a
         // discrete GPU with resizable BAR it may land in device-local
         // host-visible memory. Either way the CPU must only ever write it.
-        VmaAllocationCreateInfo const alloc{
-            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
-            .usage = VMA_MEMORY_USAGE_AUTO,
-        };
+        VmaAllocationCreateInfo const alloc = host_written();
 
         VmaAllocationInfo mapped{};
         VkResult const    result = vmaCreateBuffer(allocator.handle(), &info, &alloc, &buffer_,

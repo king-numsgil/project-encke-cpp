@@ -38,11 +38,5 @@ float4 fragment_main(VertexOut input) : SV_Target
     int3   texel = int3(int2(input.position.xy), 0);
     float3 hdr   = g_textures[NonUniformResourceIndex(push.hdr_sampled)].Load(texel).rgb;
 
-    // Debug views are already display-ready; do not tonemap them.
-    if (push.debug_view >= 2u)
-    {
-        return float4(hdr, 1.0f);
-    }
-
     return float4(aces(hdr * push.exposure), 1.0f);
 }

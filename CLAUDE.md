@@ -81,6 +81,7 @@ src/
     swapchain.{hpp,cpp}  swapchain, images, views (scene and UI), recreation
     timestamps.{hpp,cpp} GPU timestamp queries, one range per frame in flight
   ui/
+    image_window.{hpp,cpp} a window showing one bindless image, aspect kept
     imgui_layer.{hpp,cpp}  ImGui + ImPlot contexts, backends; the renderer's Overlay
     imgui_vulkan.{hpp,cpp} forked ImGui Vulkan backend: VMA, bindless, Slang
     stats_window.{hpp,cpp} frame timing history and the window graphing it
@@ -90,11 +91,12 @@ src/
     mesh.{hpp,cpp}       Vertex, Mesh, procedural cube
     gpu_types.hpp        structs shared with the shaders
     pipeline.{hpp,cpp}   graphics and compute pipeline construction
-    renderer.{hpp,cpp}   the four passes, barriers, per-frame upload
+    renderer.{hpp,cpp}   the passes, barriers, per-frame upload
 shaders/
   gbuffer.slang          geometry -> G-buffer + emissive into HDR
   cluster_build.slang    compute: lights -> froxels
   lighting.slang         compute: shade from the cluster's lights
+  debug_views.slang      compute: cluster heat, normals, motion, into window images
   tonemap.slang          HDR -> swapchain
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
   lib/
@@ -199,8 +201,36 @@ Four passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 | G-buffer | raster | albedo/ao, octahedral normal, roughness/metallic, motion, depth; emissive seeds the HDR target |
 | clusters | compute | one thread per froxel, tests every light against its view-space AABB |
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
+| debug views | compute | one visualisation image per open debug window; skipped when none is open |
 | tonemap | raster | full-screen triangle, exposure + ACES, into the sRGB swapchain |
 | overlay | raster | caller-recorded UI, its own rendering scope on the UI view, `LOAD` |
+
+### Debug views
+
+Keys 1 and 2 choose how the frame is shaded: clustered or brute force
+(`DebugView`). Keys 3 to 5 toggle a UI window each — lights per cluster,
+normals, motion vectors (`DebugWindow`) — and opening one while the UI is
+hidden brings the UI back. `ENCKE_DEBUG_VIEW` uses the same numbering from
+zero, so `ENCKE_DEBUG_VIEW=2` starts with the heat map open.
+
+The windows do not show render targets directly. `shaders/debug_views.slang`
+runs once per open window after lighting and writes a display-ready linear
+RGBA16F image, which the window samples through the bindless set. Only open
+windows are drawn: `App::draw_ui` tells the renderer which are open *after*
+ImGui has run, because a window closed this frame must not be sampled from an
+image the frame did not draw. The motion window's gain is a slider, since
+per-frame motion scales with frame rate.
+
+The images' barriers are the ones a sampled-in-UI image needs: `UNDEFINED ->
+GENERAL` waiting on the previous frame's `FRAGMENT_SHADER` reads, then `GENERAL
+-> READ_ONLY_OPTIMAL` into `FRAGMENT_SHADER` sampled reads. The "debug views"
+timestamp is written every frame, open windows or not, so the stats history
+does not reset on every toggle.
+
+Digit keys are ignored only while ImGui has a text field active
+(`WantTextInput`). `WantCaptureKeyboard` is the wrong test: with keyboard
+navigation on, it is true whenever an ImGui window has focus, which the first
+window gets on appearing, and it silently ate every digit key.
 
 The overlay is an interface (`Renderer::Overlay`) so the renderer never includes
 ImGui. It has two phases: `prepare(command, slot)` outside any rendering scope,
@@ -223,12 +253,12 @@ What changed, and what depends on it:
 - **Textures are bindless.** `ImTextureID` is a sampled-image handle plus one,
   because ImGui reserves 0 and slot 0 is live; build it with
   `ImGuiVulkan::texture_id(handle)`. Any renderer target registered in the set
-  can be drawn with `ImGui::Image`. Its layout must be `READ_ONLY_OPTIMAL` when
-  the overlay runs, *and* the barrier that put it there must include
-  `FRAGMENT_SHADER` in its destination. The G-buffer barriers currently name
-  compute only, so a debug window showing them needs that widened, and the next
-  frame's entry barriers need `FRAGMENT_SHADER` in their source for the
-  write-after-read.
+  can be drawn with `ImGui::Image` (`ui/image_window` wraps that). Its layout
+  must be `READ_ONLY_OPTIMAL` when the overlay runs, *and* the barrier that put
+  it there must include `FRAGMENT_SHADER` in its destination. The debug images
+  do. The G-buffer barriers name compute only, so showing a raw G-buffer
+  target needs them widened, and the next frame's entry barriers need
+  `FRAGMENT_SHADER` in their source for the write-after-read.
 - **Uploads are recorded in `prepare()`**, not submitted separately with
   `vkQueueWaitIdle`. Staging buffers and destroyed textures go on the slot's
   retire list and are freed when that slot next comes round. That is safe
@@ -272,9 +302,14 @@ in the fence wait, acquire and present.
   light with no clusters at all. Clustered and brute force must be
   byte-identical; they were verified so over a full frame. Any divergence is a
   cluster assignment bug, and this is far easier than eyeballing it.
-- **`DebugView::ClusterHeat` (key 3) proves the clusters are doing work.**
+- **The lights-per-cluster window (key 3) proves the clusters are doing work.**
   Identical output would also happen if every froxel held every light. The heat
   map must show variation — it currently runs 6 to 16 of 29 lights per froxel.
+- **A byte comparison captures the client area only.** Grabbing the window
+  rectangle picks up Windows 11's invisible resize border, and even the client
+  rectangle shows the desktop through the rounded bottom corners, so a few
+  corner pixels differ between runs whatever the renderer does. Last verified
+  with the debug views split out: identical apart from a 4x4 corner.
 - **`ENCKE_FIXED_TIME` pins animation** so two captures can be compared. The
   camera animates on wall-clock, so without it a comparison across runs is
   comparing camera positions, not renderer changes.
@@ -304,10 +339,18 @@ exterior lights and want different treatment anyway.
 - No shadows, so the sun is switched off: a directional light with no occlusion
   lights the inside of a sealed corridor. The code path is wired and ready.
 - Exposure is a hand-tuned constant, not an exposure model.
-- Host-visible buffers are never flushed. `Buffer::init_mapped` lets VMA pick
-  the memory type, and nothing calls `vmaFlushAllocation`, which is only
-  correct while that type is `HOST_COHERENT`. It is on this NVIDIA driver; it
-  is not guaranteed. The UI's vertex and staging buffers inherit this.
+
+## CPU-written buffers are host-coherent, required
+
+Every buffer the CPU writes (`Buffer::init_mapped`, and the staging buffer in
+`init_device`) is allocated with `requiredFlags = HOST_COHERENT`. On
+non-coherent memory a CPU write can sit in a CPU cache the GPU does not see
+until `vmaFlushAllocation`, and nothing here flushes. Requiring coherence means
+no call site has to remember to. It cannot fail — the spec guarantees a
+`HOST_VISIBLE | HOST_COHERENT` type — and it still lets VMA pick
+write-combined or resizable-BAR memory where that memory is coherent, as it is
+on every desktop driver. Before this the requirement was implicit and happened
+to hold on this NVIDIA driver.
 
 ## Renderer architecture — the decision behind it
 

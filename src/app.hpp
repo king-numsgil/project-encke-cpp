@@ -39,6 +39,9 @@ namespace encke
 
         void draw_ui();
 
+        // A digit key, 0-based: a shading mode, or a debug window toggle.
+        void on_debug_key(u32 key);
+
         // Declaration order is destruction order reversed: UI, renderer,
         // swapchain, allocator, device, instance, window. The allocator must
         // outlive every buffer and image the renderer owns, and the UI's
@@ -53,6 +56,9 @@ namespace encke
 
         StatsWindow stats_;
         bool        show_ui_ = true;
+
+        array<bool, kDebugWindowCount> debug_windows_{};
+        f32                            motion_gain_ = 5000.0f;
 
         Scene scene_;
 

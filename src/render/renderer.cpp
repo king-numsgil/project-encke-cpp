@@ -28,6 +28,14 @@ namespace encke
         constexpr VkFormat kMotionFormat   = VK_FORMAT_R16G16_SFLOAT;       // uv prev - cur
         constexpr VkFormat kHdrFormat      = VK_FORMAT_R16G16B16A16_SFLOAT; // light accum
 
+        // Visualisations: storage-writable (no sRGB format is), and linear, as
+        // the UI expects every texture it samples to be.
+        constexpr VkFormat kDebugFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+
+        constexpr char const* kDebugImageNames[kDebugWindowCount]{
+            "debug: cluster heat", "debug: normals", "debug: motion",
+        };
+
         constexpr VkFormat kGBufferFormats[]{
             kAlbedoFormat, kNormalFormat, kMaterialFormat, kMotionFormat, kHdrFormat,
         };
@@ -274,10 +282,17 @@ namespace encke
             .push_constant_size = sizeof(gpu::Push),
         };
 
+        ComputePipeline::Config const debug_config{
+            .spirv_name         = "debug_views.spv",
+            .set_layout         = bindless_.layout(),
+            .push_constant_size = sizeof(gpu::Push),
+        };
+
         if (!gbuffer_pipeline_.init(device, gbuffer_config) ||
             !tonemap_pipeline_.init(device, tonemap_config) ||
             !cluster_pipeline_.init(device, cluster_config) ||
-            !lighting_pipeline_.init(device, lighting_config))
+            !lighting_pipeline_.init(device, lighting_config) ||
+            !debug_pipeline_.init(device, debug_config))
         {
             return false;
         }
@@ -361,6 +376,18 @@ namespace encke
         VkImageUsageFlags const attachment_sampled =
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 
+        for (u32 index = 0; index < kDebugWindowCount; ++index)
+        {
+            if (!debug_images_[index].init(
+                    *allocator_, *device_,
+                    {kDebugFormat, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, kDebugImageNames[index]},
+                    extent))
+            {
+                return false;
+            }
+        }
+
         return albedo_.init(*allocator_, *device_,
                             {kAlbedoFormat, attachment_sampled, VK_IMAGE_ASPECT_COLOR_BIT,
                              "gbuffer albedo"},
@@ -404,7 +431,21 @@ namespace encke
             depth_handle_       = bindless_.add_sampled_image(depth_.view(), read_only);
             hdr_sampled_handle_ = bindless_.add_sampled_image(hdr_.view(), read_only);
             hdr_storage_handle_ = bindless_.add_storage_image(hdr_.view());
+
+            for (u32 index = 0; index < kDebugWindowCount; ++index)
+            {
+                VkImageView const view = debug_images_[index].view();
+                debug_sampled_handles_[index] = bindless_.add_sampled_image(view, read_only);
+                debug_storage_handles_[index] = bindless_.add_storage_image(view);
+            }
             return;
+        }
+
+        for (u32 index = 0; index < kDebugWindowCount; ++index)
+        {
+            VkImageView const view = debug_images_[index].view();
+            bindless_.update_sampled_image(debug_sampled_handles_[index], view, read_only);
+            bindless_.update_storage_image(debug_storage_handles_[index], view);
         }
 
         bindless_.update_sampled_image(albedo_handle_, albedo_.view(), read_only);
@@ -424,6 +465,14 @@ namespace encke
             !motion_.resize(extent) || !depth_.resize(extent) || !hdr_.resize(extent))
         {
             return false;
+        }
+
+        for (Image& image : debug_images_)
+        {
+            if (!image.resize(extent))
+            {
+                return false;
+            }
         }
         register_targets(false);
 
@@ -565,12 +614,12 @@ namespace encke
             .exposure         = kExposure,
             .debug_view       = static_cast<u32>(debug_view_),
             .gbuffer_motion   = motion_handle_,
-            .pad0             = 0,
+            .debug_target     = BindlessSet::kInvalid,
             .ui_transform     = f32vec4{0.0f},
             .ui_texture       = BindlessSet::kInvalid,
             .ui_sampler       = BindlessSet::kInvalid,
             .ui_encode_srgb   = 0,
-            .pad1             = 0,
+            .debug_gain       = motion_gain_,
         };
 
         // The pipeline layouts are identical in their set and push ranges, so
@@ -728,26 +777,93 @@ namespace encke
 
         timestamps_.mark(command, "lighting");
 
-        // -- 6. HDR -> sampled, swapchain -> attachment ----------------------
+        // -- 6. debug visualisations -----------------------------------------
+        // Only for open windows. The inputs -- G-buffer, depth, cluster counts
+        // -- were already made visible to compute for lighting. The images
+        // themselves were sampled by last frame's UI, so the write here waits
+        // on the fragment stage; UNDEFINED is fine because every pixel is
+        // rewritten.
+        {
+            array<Transition, kDebugWindowCount> to_storage{};
+            size_t                               count = 0;
+            for (u32 index = 0; index < kDebugWindowCount; ++index)
+            {
+                if (debug_open_[index])
+                {
+                    to_storage[count++] = Transition{
+                        debug_images_[index].handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+                }
+            }
+
+            if (count > 0)
+            {
+                barrier(command, span<Transition const>{to_storage.data(), count});
+
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, debug_pipeline_.handle());
+                for (u32 index = 0; index < kDebugWindowCount; ++index)
+                {
+                    if (!debug_open_[index])
+                    {
+                        continue;
+                    }
+
+                    push.debug_view   = kFirstDebugWindowView + index;
+                    push.debug_target = debug_storage_handles_[index];
+                    vkCmdPushConstants(command, debug_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
+                                       sizeof(push), &push);
+                    vkCmdDispatch(command, groups(extent.width, 8), groups(extent.height, 8), 1);
+                }
+
+                // Restored: tonemap and later passes read debug_view too.
+                push.debug_view = static_cast<u32>(debug_view_);
+            }
+        }
+
+        // Stamped even when no window is open, so the set of sections is
+        // fixed and the stats history does not reset on every toggle.
+        timestamps_.mark(command, "debug views");
+
+        // -- 7. HDR and debug images -> sampled, swapchain -> attachment -----
         {
             VkImage const target = swapchain.image(image_index);
 
-            Transition const handoff[]{
-                {hdr_.handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT},
+            array<Transition, 2 + kDebugWindowCount> handoff{
+                Transition{hdr_.handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                           VK_ACCESS_2_SHADER_SAMPLED_READ_BIT},
                 // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT,
                 // so the transition has to chain from that stage -- TOP_OF_PIPE
                 // would let it run before the image is actually available.
-                {target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
-                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT},
+                Transition{target, VK_IMAGE_LAYOUT_UNDEFINED,
+                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                           VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT},
             };
-            barrier(command, handoff);
+            size_t count = 2;
+
+            // The UI samples these in the overlay pass. A closed window's
+            // image is left alone; nothing reads it.
+            for (u32 index = 0; index < kDebugWindowCount; ++index)
+            {
+                if (debug_open_[index])
+                {
+                    handoff[count++] = Transition{
+                        debug_images_[index].handle(), VK_IMAGE_LAYOUT_GENERAL,
+                        VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+                }
+            }
+
+            barrier(command, span<Transition const>{handoff.data(), count});
         }
 
-        // -- 7. tonemap ------------------------------------------------------
+        // -- 8. tonemap ------------------------------------------------------
         {
             VkRenderingAttachmentInfo colour =
                 colour_attachment(swapchain.view(image_index), {{0.0f, 0.0f, 0.0f, 1.0f}});
@@ -778,7 +894,7 @@ namespace encke
 
         timestamps_.mark(command, "tonemap");
 
-        // -- 8. overlay ------------------------------------------------------
+        // -- 9. overlay ------------------------------------------------------
         // A separate rendering scope because it may write through a different
         // view: UNORM over the same sRGB image, so the UI can blend in the
         // space it was designed in. Loading what tonemap stored is a read of
@@ -827,7 +943,7 @@ namespace encke
 
         timestamps_.mark(command, "UI");
 
-        // -- 9. present ------------------------------------------------------
+        // -- 10. present -----------------------------------------------------
         {
             Transition const present[]{
                 {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1017,6 +1133,7 @@ namespace encke
         tonemap_pipeline_.shutdown();
         cluster_pipeline_.shutdown();
         lighting_pipeline_.shutdown();
+        debug_pipeline_.shutdown();
 
         cube_.shutdown();
 
@@ -1036,6 +1153,11 @@ namespace encke
         motion_.shutdown();
         depth_.shutdown();
         hdr_.shutdown();
+
+        for (Image& image : debug_images_)
+        {
+            image.shutdown();
+        }
 
         bindless_.shutdown();
 

@@ -66,14 +66,14 @@ namespace encke::gpu
         f32 exposure;
         u32 debug_view;
         u32 gbuffer_motion;
-        u32 pad0;
+        u32 debug_target;            // storage image a debug_views dispatch writes
 
         // UI overlay (ui/imgui_vulkan). Pixel -> NDC is xy * scale + translate.
         f32vec4 ui_transform;        // xy scale, zw translate
         u32     ui_texture;          // bindless sampled image
         u32     ui_sampler;          // bindless sampler
         u32     ui_encode_srgb;      // nonzero: target is UNORM, encode in-shader
-        u32     pad1;
+        f32     debug_gain;          // motion view magnification
     };
 
     static_assert(sizeof(Frame) == 176);

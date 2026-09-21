@@ -23,15 +23,26 @@ namespace encke
         Error,
     };
 
-    // Values must match the debug_view switch in shaders/lighting.slang.
+    // How the frame itself is shaded. Values must match the debug_view check
+    // in shaders/lighting.slang.
     enum class DebugView : u32
     {
-        Lit         = 0,
-        BruteForce  = 1,   // every light, no clusters; must match Lit
-        ClusterHeat = 2,
-        Normals     = 3,
-        Motion      = 4,
+        Lit        = 0,
+        BruteForce = 1,   // every light, no clusters; must match Lit
     };
+
+    // Visualisations drawn into their own images for UI windows, not over the
+    // frame. debug_view in shaders/debug_views.slang is kFirstDebugWindowView
+    // plus this value.
+    enum class DebugWindow : u32
+    {
+        ClusterHeat = 0,
+        Normals     = 1,
+        Motion      = 2,
+    };
+
+    inline constexpr u32 kDebugWindowCount      = 3;
+    inline constexpr u32 kFirstDebugWindowView  = 2;
 
     // Clustered deferred, first draft. Per frame:
     //
@@ -40,8 +51,9 @@ namespace encke
     //   2. clusters   compute assign lights to a 16x9x24 froxel grid
     //   3. lighting   compute shade each pixel against its cluster's lights,
     //                         adding onto the HDR target
-    //   4. tonemap    raster  HDR -> swapchain
-    //   5. overlay    raster  caller-recorded UI, through the swapchain's UI view
+    //   4. debug      compute one visualisation image per open debug window
+    //   5. tonemap    raster  HDR -> swapchain
+    //   6. overlay    raster  caller-recorded UI, through the swapchain's UI view
     class Renderer
     {
     public:
@@ -89,6 +101,26 @@ namespace encke
 
         void      set_debug_view(DebugView view) { debug_view_ = view; }
         DebugView debug_view() const { return debug_view_; }
+
+        // Which visualisation images to draw this frame. Set it after the UI
+        // has decided which windows are open and before draw(): a window
+        // showing an image this frame did not draw would show stale content.
+        void set_debug_window_open(DebugWindow window, bool open)
+        {
+            debug_open_[static_cast<u32>(window)] = open;
+        }
+
+        // Magnification for the motion visualisation. Motion is per-frame
+        // displacement, so the right gain depends on the frame rate.
+        void set_motion_gain(f32 gain) { motion_gain_ = gain; }
+
+        // Bindless sampled-image handle of a visualisation, in
+        // READ_ONLY_OPTIMAL by the time the overlay runs. Stable across
+        // resizes.
+        u32 debug_window_image(DebugWindow window) const
+        {
+            return debug_sampled_handles_[static_cast<u32>(window)];
+        }
 
         // Per-pass GPU time of the newest frame whose results are back, which
         // trails the frame being recorded by kFramesInFlight.
@@ -138,6 +170,14 @@ namespace encke
         u32 hdr_storage_handle_ = BindlessSet::kInvalid;
         u32 hdr_sampled_handle_ = BindlessSet::kInvalid;
 
+        // Written by compute in GENERAL, sampled by the UI in
+        // READ_ONLY_OPTIMAL, so each is registered twice like HDR.
+        array<Image, kDebugWindowCount> debug_images_;
+        array<u32, kDebugWindowCount>   debug_storage_handles_{};
+        array<u32, kDebugWindowCount>   debug_sampled_handles_{};
+        array<bool, kDebugWindowCount>  debug_open_{};
+        f32                             motion_gain_ = 5000.0f;
+
         // GPU-written by the cluster pass and read by lighting within the same
         // frame, so a single copy suffices given the barriers between them.
         Buffer cluster_counts_;
@@ -151,6 +191,7 @@ namespace encke
         GraphicsPipeline tonemap_pipeline_;
         ComputePipeline  cluster_pipeline_;
         ComputePipeline  lighting_pipeline_;
+        ComputePipeline  debug_pipeline_;
 
         Mesh cube_;
 

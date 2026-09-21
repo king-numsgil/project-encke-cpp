@@ -87,9 +87,9 @@ namespace encke
         renderer_.record(ImGui::GetDrawData(), command);
     }
 
-    bool ImGuiLayer::wants_keyboard() const
+    bool ImGuiLayer::wants_text() const
     {
-        return context_ && ImGui::GetIO().WantCaptureKeyboard;
+        return context_ && ImGui::GetIO().WantTextInput;
     }
 
     bool ImGuiLayer::wants_mouse() const

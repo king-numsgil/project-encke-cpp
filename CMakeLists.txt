@@ -151,6 +151,7 @@ add_executable(encke
     src/render/renderer.cpp
     src/render/scene.cpp
 
+    src/ui/image_window.cpp
     src/ui/imgui_layer.cpp
     src/ui/imgui_vulkan.cpp
     src/ui/stats_window.cpp
@@ -215,12 +216,13 @@ encke_add_shader(ENCKE_GBUFFER_SPV shaders/gbuffer.slang)
 encke_add_shader(ENCKE_CLUSTER_SPV shaders/cluster_build.slang)
 encke_add_shader(ENCKE_LIGHTING_SPV shaders/lighting.slang)
 encke_add_shader(ENCKE_TONEMAP_SPV shaders/tonemap.slang)
+encke_add_shader(ENCKE_DEBUG_VIEWS_SPV shaders/debug_views.slang)
 encke_add_shader(ENCKE_IMGUI_SPV shaders/imgui.slang)
 
 add_custom_target(encke_shaders DEPENDS
     "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
     "${ENCKE_LIGHTING_SPV}" "${ENCKE_TONEMAP_SPV}"
-    "${ENCKE_IMGUI_SPV}"
+    "${ENCKE_DEBUG_VIEWS_SPV}" "${ENCKE_IMGUI_SPV}"
 )
 add_dependencies(encke encke_shaders)
 

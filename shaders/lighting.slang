@@ -6,13 +6,12 @@
 //   0  clustered lighting
 //   1  brute force -- every light, no clusters. Must match 0; any difference
 //      is a cluster assignment bug.
-//   2  lights per cluster, as a heat map
-//   3  view-space normals
-//   4  motion vectors, magnified
+//
+// The visualisations (cluster heat, normals, motion) are not modes of this
+// pass; they are drawn into their own images by debug_views.slang.
 
 import lib.bindless;
 import lib.cluster;
-import lib.colour;
 import lib.gpu_types;
 import lib.normal;
 import lib.pbr;
@@ -31,14 +30,6 @@ float3 shade_light(Surface surface, float3 position, GpuLight light)
     float3 radiance = light.colour_intensity.rgb * light.colour_intensity.w *
                       point_attenuation(distance, radius);
     return shade(surface, to_light / distance, radiance);
-}
-
-float3 heat(float t)
-{
-    // Black -> blue -> green -> yellow -> red.
-    t = saturate(t);
-    return saturate(float3(1.5f * t - 0.25f, 1.5f - abs(2.0f * t - 1.0f) * 1.5f,
-                           1.0f - 2.0f * t));
 }
 
 [shader("compute")]
@@ -83,32 +74,6 @@ void compute_main(uint3 id : SV_DispatchThreadID)
     surface.metallic  = material.g;
 
     uint cluster = cluster_of(pixel, distance, frame);
-
-    if (push.debug_view == 2u)
-    {
-        uint count = g_rw_buffers[NonUniformResourceIndex(push.cluster_counts)].Load(cluster * 4u);
-        hdr[pixel] = float4(heat(float(count) / 16.0f), 1.0f);
-        return;
-    }
-    if (push.debug_view == 3u)
-    {
-        hdr[pixel] = float4(surface.normal * 0.5f + 0.5f, 1.0f);
-        return;
-    }
-    if (push.debug_view == 4u)
-    {
-        // Signed, centred on grey: static geometry under a static camera is
-        // exactly 0.5 grey.
-        //
-        // Motion is per-FRAME UV displacement, so the gain that makes it
-        // legible depends entirely on the frame rate. Uncapped at a couple of
-        // thousand frames a second it is around 5e-5 UV -- a twentieth of a
-        // pixel. This gain suits that; drop it by the same factor once there
-        // is a frame limiter.
-        float2 motion = g_textures[NonUniformResourceIndex(push.gbuffer_motion)].Load(texel).rg;
-        hdr[pixel] = float4(saturate(motion * 5000.0f + 0.5f), 0.5f, 1.0f);
-        return;
-    }
 
     float3 lit = shade(surface, frame.sun_direction.xyz, frame.sun_radiance.rgb);
     lit += frame.ambient.rgb * surface.albedo * surface.ao;
