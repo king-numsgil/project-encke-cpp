@@ -5,6 +5,8 @@
 #include "core/log.hpp"
 #include "core/memory.hpp"
 
+#include <cstdlib>
+
 namespace encke
 {
     namespace
@@ -14,6 +16,52 @@ namespace encke
         constexpr i32  kHeight  = 720;
 
         constexpr i64 kReportIntervalMs = 1000;
+
+        constexpr u32 kDebugViewCount = 5;
+
+        char const* debug_view_name(DebugView view)
+        {
+            switch (view)
+            {
+            case DebugView::Lit:         return "lit (clustered)";
+            case DebugView::BruteForce:  return "lit (brute force)";
+            case DebugView::ClusterHeat: return "lights per cluster";
+            case DebugView::Normals:     return "normals";
+            case DebugView::Motion:      return "motion vectors";
+            }
+            return "unknown";
+        }
+
+        // ENCKE_FIXED_TIME pins animation to one instant, so two runs render
+        // byte-identical frames. Without it, comparing captures across runs
+        // compares different camera positions rather than what changed.
+        optional<f64> fixed_time()
+        {
+            char const* const value = std::getenv("ENCKE_FIXED_TIME");
+            if (value == nullptr)
+            {
+                return nullopt;
+            }
+            return std::strtod(value, nullptr);
+        }
+
+        // ENCKE_DEBUG_VIEW picks the starting view, so a debug view can be
+        // captured without a keypress.
+        DebugView initial_debug_view()
+        {
+            char const* const value = std::getenv("ENCKE_DEBUG_VIEW");
+            if (value == nullptr)
+            {
+                return DebugView::Lit;
+            }
+
+            long const parsed = std::strtol(value, nullptr, 10);
+            if (parsed < 0 || parsed >= static_cast<long>(kDebugViewCount))
+            {
+                return DebugView::Lit;
+            }
+            return static_cast<DebugView>(parsed);
+        }
     }
 
     App::~App()
@@ -58,6 +106,19 @@ namespace encke
         {
             return false;
         }
+
+        scene_.build_test_corridor();
+        log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
+
+        fixed_time_ = fixed_time();
+        if (fixed_time_.has_value())
+        {
+            log::info("animation pinned to t=%.3f s", *fixed_time_);
+        }
+
+        renderer_.set_debug_view(initial_debug_view());
+        log::info("debug view: %s (keys 1-%u to switch)", debug_view_name(renderer_.debug_view()),
+                  kDebugViewCount);
 
         last_report_ms_ = log::elapsed_ms();
         return true;
@@ -123,6 +184,12 @@ namespace encke
                 continue;
             }
 
+            if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugViewCount)
+            {
+                renderer_.set_debug_view(static_cast<DebugView>(events.debug_view));
+                log::info("debug view: %s", debug_view_name(renderer_.debug_view()));
+            }
+
             if (window_.minimized())
             {
                 // Nothing presentable; block rather than spin.
@@ -142,9 +209,13 @@ namespace encke
                 }
             }
 
-            f32 const seconds = static_cast<f32>(log::elapsed_ms()) / 1000.0f;
+            // f64: the scene integrates animation over session-long times, and
+            // f32 seconds lose millisecond resolution after a few hours.
+            f64 const seconds =
+                fixed_time_.value_or(static_cast<f64>(log::elapsed_ms()) / 1000.0);
+            scene_.update(seconds);
 
-            switch (renderer_.draw(swapchain_, seconds))
+            switch (renderer_.draw(swapchain_, scene_))
             {
             case FrameResult::Ok:
                 ++frames_;

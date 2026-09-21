@@ -87,15 +87,18 @@ add_executable(encke
 
     src/platform/window.cpp
 
+    src/render/camera.cpp
     src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/renderer.cpp
+    src/render/scene.cpp
 
     src/vulkan/allocator.cpp
+    src/vulkan/bindless.cpp
     src/vulkan/buffer.cpp
     src/vulkan/context.cpp
-    src/vulkan/depth.cpp
     src/vulkan/device.cpp
+    src/vulkan/image.cpp
     src/vulkan/swapchain.cpp
 )
 
@@ -128,6 +131,10 @@ function(encke_add_shader out_spv source)
                 # otherwise use HLSL's row-major and silently transpose every
                 # matrix pushed from C++.
                 -matrix-layout-column-major
+                # 41012 is "profile implicitly upgraded": Slang's own capability
+                # bookkeeping, not extra SPIR-V capabilities. The emitted module
+                # is unchanged.
+                -warnings-disable 41012
                 -depfile "${spv}.d"
                 -o "${spv}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
@@ -141,10 +148,15 @@ function(encke_add_shader out_spv source)
     set(${out_spv} "${spv}" PARENT_SCOPE)
 endfunction()
 
-encke_add_shader(ENCKE_TRIANGLE_SPV shaders/triangle.slang)
-encke_add_shader(ENCKE_MESH_SPV shaders/mesh.slang)
+encke_add_shader(ENCKE_GBUFFER_SPV shaders/gbuffer.slang)
+encke_add_shader(ENCKE_CLUSTER_SPV shaders/cluster_build.slang)
+encke_add_shader(ENCKE_LIGHTING_SPV shaders/lighting.slang)
+encke_add_shader(ENCKE_TONEMAP_SPV shaders/tonemap.slang)
 
-add_custom_target(encke_shaders DEPENDS "${ENCKE_TRIANGLE_SPV}" "${ENCKE_MESH_SPV}")
+add_custom_target(encke_shaders DEPENDS
+    "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
+    "${ENCKE_LIGHTING_SPV}" "${ENCKE_TONEMAP_SPV}"
+)
 add_dependencies(encke encke_shaders)
 
 # volk.h, SDL3 and glm are stable and heavy; our own code is not yet either.

@@ -108,6 +108,10 @@ namespace encke
                 {
                     events.quit_requested = true;
                 }
+                else if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9 && !event.key.repeat)
+                {
+                    events.debug_view = static_cast<i32>(event.key.key - SDLK_1);
+                }
                 break;
 
             default:

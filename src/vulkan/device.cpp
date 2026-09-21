@@ -86,32 +86,88 @@ namespace encke
             return true;
         }
 
-        // Dynamic rendering removes VkRenderPass and VkFramebuffer entirely;
-        // synchronization2 gives the cleaner barrier and submit structs. Both
-        // are core in 1.3 but still opt-in features.
-        //
-        // shaderDrawParameters is needed because Slang lowers SV_VertexID to
-        // gl_VertexIndex and emits the SPIR-V DrawParameters capability with
-        // it. Without the feature, vkCreateShaderModule is a spec violation
-        // even though drivers generally accept it.
-        bool has_required_features(VkPhysicalDevice device)
+        // Self-referential through pNext, so it must never be copied or moved.
+        struct FeatureChain
         {
-            VkPhysicalDeviceVulkan13Features features13{};
-            features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+            VkPhysicalDeviceFeatures2        core{};
+            VkPhysicalDeviceVulkan11Features v11{};
+            VkPhysicalDeviceVulkan12Features v12{};
+            VkPhysicalDeviceVulkan13Features v13{};
 
-            VkPhysicalDeviceVulkan11Features features11{};
-            features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-            features11.pNext = &features13;
+            FeatureChain()
+            {
+                core.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                core.pNext = &v11;
+                v11.sType  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+                v11.pNext  = &v12;
+                v12.sType  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+                v12.pNext  = &v13;
+                v13.sType  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+                v13.pNext  = nullptr;
+            }
 
-            VkPhysicalDeviceFeatures2 features{};
-            features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            features.pNext = &features11;
+            FeatureChain(FeatureChain const&)            = delete;
+            FeatureChain& operator=(FeatureChain const&) = delete;
+        };
 
-            vkGetPhysicalDeviceFeatures2(device, &features);
+        // Sets every feature encke needs in `want`, checking each against
+        // `have`. Each feature appears exactly once, so selection and creation
+        // cannot drift apart. `missing` names the first one absent.
+        //
+        //  dynamicRendering, synchronization2 -- no render passes, sync2 barriers.
+        //  shaderDrawParameters -- Slang lowers SV_VertexID to gl_VertexIndex
+        //      and emits the DrawParameters capability with it.
+        //  descriptor indexing set -- the bindless model: runtime-sized arrays,
+        //      non-uniform indexing, partially bound, update-after-bind.
+        //  storage image read/write without format -- bindless storage images
+        //      are declared without a format qualifier.
+        bool require_features(FeatureChain const& have, FeatureChain& want, char const*& missing)
+        {
+            bool ok = true;
 
-            return features13.dynamicRendering == VK_TRUE &&
-                   features13.synchronization2 == VK_TRUE &&
-                   features11.shaderDrawParameters == VK_TRUE;
+            auto need = [&](VkBool32 available, VkBool32& enabled, char const* name) {
+                if (available != VK_TRUE)
+                {
+                    if (missing == nullptr)
+                    {
+                        missing = name;
+                    }
+                    return false;
+                }
+                enabled = VK_TRUE;
+                return true;
+            };
+
+#define ENCKE_REQUIRE(field) ok = need(have.field, want.field, #field) && ok
+            ENCKE_REQUIRE(core.features.shaderStorageImageReadWithoutFormat);
+            ENCKE_REQUIRE(core.features.shaderStorageImageWriteWithoutFormat);
+
+            ENCKE_REQUIRE(v11.shaderDrawParameters);
+
+            ENCKE_REQUIRE(v12.runtimeDescriptorArray);
+            ENCKE_REQUIRE(v12.descriptorBindingPartiallyBound);
+            ENCKE_REQUIRE(v12.descriptorBindingSampledImageUpdateAfterBind);
+            ENCKE_REQUIRE(v12.descriptorBindingStorageImageUpdateAfterBind);
+            ENCKE_REQUIRE(v12.descriptorBindingStorageBufferUpdateAfterBind);
+            ENCKE_REQUIRE(v12.descriptorBindingUpdateUnusedWhilePending);
+            ENCKE_REQUIRE(v12.shaderSampledImageArrayNonUniformIndexing);
+            ENCKE_REQUIRE(v12.shaderStorageImageArrayNonUniformIndexing);
+            ENCKE_REQUIRE(v12.shaderStorageBufferArrayNonUniformIndexing);
+
+            ENCKE_REQUIRE(v13.dynamicRendering);
+            ENCKE_REQUIRE(v13.synchronization2);
+#undef ENCKE_REQUIRE
+
+            return ok;
+        }
+
+        bool has_required_features(VkPhysicalDevice device, char const*& missing)
+        {
+            FeatureChain have;
+            vkGetPhysicalDeviceFeatures2(device, &have.core);
+
+            FeatureChain want;
+            return require_features(have, want, missing);
         }
 
         bool supports_surface(VkPhysicalDevice device, VkSurfaceKHR surface)
@@ -125,24 +181,32 @@ namespace encke
             return formats > 0 && modes > 0;
         }
 
-        // Higher is better; 0 means unusable.
+        // Higher is better; 0 means unusable, and `reason` says why.
         u32 score_device(VkPhysicalDevice device, VkSurfaceKHR surface,
-                         VkPhysicalDeviceProperties const& properties)
+                         VkPhysicalDeviceProperties const& properties, char const*& reason)
         {
             if (properties.apiVersion < VK_API_VERSION_1_3)
             {
+                reason = "Vulkan 1.3 unsupported";
                 return 0;
             }
             if (!find_queue_families(device, surface).complete())
             {
+                reason = "no graphics+present queue";
                 return 0;
             }
-            if (!has_required_extensions(device) || !has_required_features(device))
+            if (!has_required_extensions(device))
+            {
+                reason = "VK_KHR_swapchain missing";
+                return 0;
+            }
+            if (!has_required_features(device, reason))
             {
                 return 0;
             }
             if (!supports_surface(device, surface))
             {
+                reason = "surface reports no formats or present modes";
                 return 0;
             }
 
@@ -193,11 +257,19 @@ namespace encke
             VkPhysicalDeviceProperties properties{};
             vkGetPhysicalDeviceProperties(candidate, &properties);
 
-            u32 const score = score_device(candidate, context.surface(), properties);
-            log::info("gpu: %s (%s) -- %s",
-                      properties.deviceName,
-                      device_type_name(properties.deviceType),
-                      score == 0 ? "unsuitable" : "usable");
+            char const* reason = nullptr;
+            u32 const   score  = score_device(candidate, context.surface(), properties, reason);
+            if (score == 0)
+            {
+                log::info("gpu: %s (%s) -- unsuitable: %s", properties.deviceName,
+                          device_type_name(properties.deviceType),
+                          reason != nullptr ? reason : "unknown");
+            }
+            else
+            {
+                log::info("gpu: %s (%s) -- usable", properties.deviceName,
+                          device_type_name(properties.deviceType));
+            }
 
             if (score > best_score)
             {
@@ -247,23 +319,22 @@ namespace encke
             });
         }
 
-        VkPhysicalDeviceVulkan13Features features13{};
-        features13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-        features13.dynamicRendering = VK_TRUE;
-        features13.synchronization2 = VK_TRUE;
+        // Selection already proved these are all present; this pass only
+        // builds the chain of what to enable, from the same single list.
+        FeatureChain have;
+        vkGetPhysicalDeviceFeatures2(physical_, &have.core);
 
-        VkPhysicalDeviceVulkan11Features features11{};
-        features11.sType                = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-        features11.pNext                = &features13;
-        features11.shaderDrawParameters = VK_TRUE;
-
-        VkPhysicalDeviceFeatures2 features{};
-        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &features11;
+        FeatureChain enabled;
+        char const*  missing = nullptr;
+        if (!require_features(have, enabled, missing))
+        {
+            log::error("selected device lost feature %s", missing);
+            return false;
+        }
 
         VkDeviceCreateInfo const device_info{
             .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext                   = &features,
+            .pNext                   = &enabled.core,
             .flags                   = 0,
             .queueCreateInfoCount    = static_cast<u32>(queue_infos.size()),
             .pQueueCreateInfos       = queue_infos.data(),

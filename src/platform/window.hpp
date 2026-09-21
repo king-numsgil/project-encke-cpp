@@ -10,6 +10,10 @@ namespace encke
         // The drawable changed size. Once a swapchain exists this is the
         // signal to recreate it; the new size is Window::pixel_size().
         bool resized = false;
+
+        // Digit key 1..9 pressed this frame, as 0..8; -1 when none. Drives
+        // the renderer's debug views.
+        i32 debug_view = -1;
     };
 
     class Window

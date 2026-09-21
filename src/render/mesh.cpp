@@ -9,19 +9,6 @@ namespace encke
 {
     namespace
     {
-        // Linear values; see shaders/lib/colour.slang for why these are not the
-        // numbers you would name the colours with.
-        // const, not constexpr: GLM types are not constexpr-constructible here
-        // because GLM_FORCE_AVX2 sets the SIMD arch bit. See CLAUDE.md.
-        f32vec3 const kFaceColours[6]{
-            {0.640f, 0.055f, 0.070f},   // +X  red
-            {0.055f, 0.250f, 0.640f},   // -X  blue
-            {0.070f, 0.450f, 0.120f},   // +Y  green
-            {0.360f, 0.180f, 0.020f},   // -Y  amber
-            {0.500f, 0.450f, 0.055f},   // +Z  yellow
-            {0.300f, 0.055f, 0.400f},   // -Z  violet
-        };
-
         // Face basis vectors: normal, then the two in-plane axes. Emitting
         // corners as normal + (-u -v, +u -v, +u +v, -u +v) gives a
         // counter-clockwise winding seen from outside, which is what the
@@ -33,6 +20,8 @@ namespace encke
             f32vec3 v;
         };
 
+        // const, not constexpr: GLM types are not constexpr-constructible here
+        // because GLM_FORCE_AVX2 sets the SIMD arch bit. See CLAUDE.md.
         Face const kFaces[6]{
             {{ 1.0f,  0.0f,  0.0f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f,  0.0f}},
             {{-1.0f,  0.0f,  0.0f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f,  0.0f}},
@@ -50,10 +39,12 @@ namespace encke
         vertices.reserve(24);
         indices.reserve(36);
 
+        // White: colour comes from the object's material, not the mesh.
+        f32vec3 const colour{1.0f};
+
         for (u32 face = 0; face < 6; ++face)
         {
-            Face const&    basis  = kFaces[face];
-            f32vec3 const& colour = kFaceColours[face];
+            Face const& basis = kFaces[face];
 
             f32vec3 const centre = basis.normal * 0.5f;
             f32vec3 const u      = basis.u * 0.5f;
@@ -84,15 +75,14 @@ namespace encke
             return false;
         }
 
-        if (!vertices_.init(allocator, device, vertices.data(),
-                            vertices.size() * sizeof(Vertex),
-                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+        if (!vertices_.init_device(allocator, device, vertices.size() * sizeof(Vertex),
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data()))
         {
             return false;
         }
 
-        if (!indices_.init(allocator, device, indices.data(), indices.size() * sizeof(u32),
-                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT))
+        if (!indices_.init_device(allocator, device, indices.size() * sizeof(u32),
+                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data()))
         {
             return false;
         }

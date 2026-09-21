@@ -2,6 +2,7 @@
 
 #include "platform/window.hpp"
 #include "render/renderer.hpp"
+#include "render/scene.hpp"
 #include "vulkan/allocator.hpp"
 #include "vulkan/context.hpp"
 #include "vulkan/device.hpp"
@@ -41,6 +42,11 @@ namespace encke
         VulkanAllocator allocator_;
         VulkanSwapchain swapchain_;
         Renderer        renderer_;
+
+        Scene scene_;
+
+        // Set from ENCKE_FIXED_TIME; pins animation so captures are comparable.
+        optional<f64> fixed_time_;
 
         u64 frames_          = 0;
         i64 last_report_ms_  = 0;

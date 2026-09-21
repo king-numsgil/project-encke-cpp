@@ -10,6 +10,9 @@ namespace encke
 {
     namespace
     {
+        // Upper bound on colour attachments in one pass. The G-buffer uses five.
+        constexpr size_t kMaxColourAttachments = 8;
+
         // SPIR-V sits in shaders/ beside the executable, written there by the
         // slangc custom command. SDL owns the base path; do not free it.
         VkShaderModule load_module(VkDevice device, char const* name)
@@ -61,10 +64,62 @@ namespace encke
                 return VK_NULL_HANDLE;
             }
 
-            log::info("loaded %s (%zu bytes)", name, size);
             return module;
         }
+
+        // The layout every pipeline in encke uses: bindless set 0, one push
+        // constant range across all stages.
+        VkPipelineLayout create_layout(VkDevice device, VkDescriptorSetLayout set_layout,
+                                       u32 push_constant_size)
+        {
+            VkPushConstantRange const push_range{
+                .stageFlags = VK_SHADER_STAGE_ALL,
+                .offset     = 0,
+                .size       = push_constant_size,
+            };
+
+            bool const has_set  = set_layout != VK_NULL_HANDLE;
+            bool const has_push = push_constant_size > 0;
+
+            VkPipelineLayoutCreateInfo const info{
+                .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                .pNext                  = nullptr,
+                .flags                  = 0,
+                .setLayoutCount         = has_set ? 1u : 0u,
+                .pSetLayouts            = has_set ? &set_layout : nullptr,
+                .pushConstantRangeCount = has_push ? 1u : 0u,
+                .pPushConstantRanges    = has_push ? &push_range : nullptr,
+            };
+
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkResult const   result =
+                vkCreatePipelineLayout(device, &info, memory::vulkan_callbacks(), &layout);
+            if (result != VK_SUCCESS)
+            {
+                log::vk_error("vkCreatePipelineLayout", result);
+                return VK_NULL_HANDLE;
+            }
+
+            return layout;
+        }
+
+        void destroy(VkDevice device, VkPipeline& pipeline, VkPipelineLayout& layout)
+        {
+            if (pipeline != VK_NULL_HANDLE)
+            {
+                vkDestroyPipeline(device, pipeline, memory::vulkan_callbacks());
+                pipeline = VK_NULL_HANDLE;
+            }
+
+            if (layout != VK_NULL_HANDLE)
+            {
+                vkDestroyPipelineLayout(device, layout, memory::vulkan_callbacks());
+                layout = VK_NULL_HANDLE;
+            }
+        }
     }
+
+    // -- graphics ---------------------------------------------------------------
 
     GraphicsPipeline::~GraphicsPipeline()
     {
@@ -74,6 +129,13 @@ namespace encke
     bool GraphicsPipeline::init(VulkanDevice const& device, Config const& config)
     {
         device_ = &device;
+
+        if (config.colour_formats.size() > kMaxColourAttachments)
+        {
+            log::error("%s: %zu colour attachments exceeds %zu", config.spirv_name,
+                       config.colour_formats.size(), kMaxColourAttachments);
+            return false;
+        }
 
         VkDevice const handle = device.handle();
 
@@ -142,11 +204,11 @@ namespace encke
             .depthClampEnable        = VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode             = VK_POLYGON_MODE_FILL,
+            .cullMode                = config.cull_mode,
             // Facing is decided from the signed area in framebuffer
             // coordinates, i.e. after the viewport transform, and the
-            // negative height reverses it. Geometry wound clockwise in NDC
-            // therefore presents as counter-clockwise to the rasteriser.
-            .cullMode                = VK_CULL_MODE_BACK_BIT,
+            // negative height reverses it. Geometry wound counter-clockwise in
+            // NDC with +Y up therefore stays front-facing here.
             .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable         = VK_FALSE,
             .depthBiasConstantFactor = 0.0f,
@@ -167,17 +229,42 @@ namespace encke
             .alphaToOneEnable      = VK_FALSE,
         };
 
-        VkPipelineColorBlendAttachmentState const blend_attachment{
-            .blendEnable         = VK_FALSE,
-            .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
-            .colorBlendOp        = VK_BLEND_OP_ADD,
-            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-            .alphaBlendOp        = VK_BLEND_OP_ADD,
-            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                   VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        // Reversed-Z: near is 1.0, far is 0.0, so a fragment passes when its
+        // depth is GREATER than what is already there.
+        VkPipelineDepthStencilStateCreateInfo const depth_stencil{
+            .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .depthTestEnable       = VK_TRUE,
+            .depthWriteEnable      = config.depth_write ? VK_TRUE : VK_FALSE,
+            .depthCompareOp        = VK_COMPARE_OP_GREATER_OR_EQUAL,
+            .depthBoundsTestEnable = VK_FALSE,
+            .stencilTestEnable     = VK_FALSE,
+            .front                 = {},
+            .back                  = {},
+            .minDepthBounds        = 0.0f,
+            .maxDepthBounds        = 1.0f,
         };
+
+        bool const has_depth = config.depth_format != VK_FORMAT_UNDEFINED;
+
+        // No blending anywhere yet: the G-buffer overwrites, and the only other
+        // raster pass is a full-screen tonemap.
+        array<VkPipelineColorBlendAttachmentState, kMaxColourAttachments> blend_attachments{};
+        for (size_t index = 0; index < config.colour_formats.size(); ++index)
+        {
+            blend_attachments[index] = VkPipelineColorBlendAttachmentState{
+                .blendEnable         = VK_FALSE,
+                .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+                .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+                .colorBlendOp        = VK_BLEND_OP_ADD,
+                .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+                .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+                .alphaBlendOp        = VK_BLEND_OP_ADD,
+                .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                       VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+            };
+        }
 
         VkPipelineColorBlendStateCreateInfo const blend{
             .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -185,8 +272,8 @@ namespace encke
             .flags           = 0,
             .logicOpEnable   = VK_FALSE,
             .logicOp         = VK_LOGIC_OP_COPY,
-            .attachmentCount = 1,
-            .pAttachments    = &blend_attachment,
+            .attachmentCount = static_cast<u32>(config.colour_formats.size()),
+            .pAttachments    = blend_attachments.data(),
             .blendConstants  = {0.0f, 0.0f, 0.0f, 0.0f},
         };
 
@@ -203,48 +290,9 @@ namespace encke
             .pDynamicStates    = dynamic_states,
         };
 
-        // Reversed-Z: near is 1.0, far is 0.0, so a fragment passes when its
-        // depth is GREATER than what is already there.
-        VkPipelineDepthStencilStateCreateInfo const depth_stencil{
-            .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-            .pNext                 = nullptr,
-            .flags                 = 0,
-            .depthTestEnable       = VK_TRUE,
-            .depthWriteEnable      = VK_TRUE,
-            .depthCompareOp        = VK_COMPARE_OP_GREATER_OR_EQUAL,
-            .depthBoundsTestEnable = VK_FALSE,
-            .stencilTestEnable     = VK_FALSE,
-            .front                 = {},
-            .back                  = {},
-            .minDepthBounds        = 0.0f,
-            .maxDepthBounds        = 1.0f,
-        };
-
-        bool const has_depth = config.depth_format != VK_FORMAT_UNDEFINED;
-
-        VkPushConstantRange const push_range{
-            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            .offset     = 0,
-            .size       = config.push_constant_size,
-        };
-
-        bool const has_push = config.push_constant_size > 0;
-
-        VkPipelineLayoutCreateInfo const layout_info{
-            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .pNext                  = nullptr,
-            .flags                  = 0,
-            .setLayoutCount         = 0,
-            .pSetLayouts            = nullptr,
-            .pushConstantRangeCount = has_push ? 1u : 0u,
-            .pPushConstantRanges    = has_push ? &push_range : nullptr,
-        };
-
-        VkResult result =
-            vkCreatePipelineLayout(handle, &layout_info, memory::vulkan_callbacks(), &layout_);
-        if (result != VK_SUCCESS)
+        layout_ = create_layout(handle, config.set_layout, config.push_constant_size);
+        if (layout_ == VK_NULL_HANDLE)
         {
-            log::vk_error("vkCreatePipelineLayout", result);
             vkDestroyShaderModule(handle, module, memory::vulkan_callbacks());
             return false;
         }
@@ -255,8 +303,8 @@ namespace encke
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .pNext                   = nullptr,
             .viewMask                = 0,
-            .colorAttachmentCount    = 1,
-            .pColorAttachmentFormats = &config.colour_format,
+            .colorAttachmentCount    = static_cast<u32>(config.colour_formats.size()),
+            .pColorAttachmentFormats = config.colour_formats.data(),
             .depthAttachmentFormat   = config.depth_format,
             .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
         };
@@ -283,8 +331,8 @@ namespace encke
             .basePipelineIndex   = -1,
         };
 
-        result = vkCreateGraphicsPipelines(handle, VK_NULL_HANDLE, 1, &pipeline_info,
-                                           memory::vulkan_callbacks(), &pipeline_);
+        VkResult const result = vkCreateGraphicsPipelines(
+            handle, VK_NULL_HANDLE, 1, &pipeline_info, memory::vulkan_callbacks(), &pipeline_);
 
         // The module is baked into the pipeline; nothing needs it afterwards.
         vkDestroyShaderModule(handle, module, memory::vulkan_callbacks());
@@ -292,11 +340,11 @@ namespace encke
         if (result != VK_SUCCESS)
         {
             log::vk_error("vkCreateGraphicsPipelines", result);
+            log::error("  while creating %s", config.spirv_name);
             return false;
         }
 
-        log::info("pipeline ready (%s: %s, %s)", config.spirv_name, config.vertex_entry,
-                  config.fragment_entry);
+        log::info("graphics pipeline %s ready", config.spirv_name);
         return true;
     }
 
@@ -307,20 +355,78 @@ namespace encke
             return;
         }
 
-        VkDevice const handle = device_->handle();
+        destroy(device_->handle(), pipeline_, layout_);
+        device_ = nullptr;
+    }
 
-        if (pipeline_ != VK_NULL_HANDLE)
+    // -- compute ----------------------------------------------------------------
+
+    ComputePipeline::~ComputePipeline()
+    {
+        shutdown();
+    }
+
+    bool ComputePipeline::init(VulkanDevice const& device, Config const& config)
+    {
+        device_ = &device;
+
+        VkDevice const handle = device.handle();
+
+        VkShaderModule const module = load_module(handle, config.spirv_name);
+        if (module == VK_NULL_HANDLE)
         {
-            vkDestroyPipeline(handle, pipeline_, memory::vulkan_callbacks());
-            pipeline_ = VK_NULL_HANDLE;
+            return false;
         }
 
-        if (layout_ != VK_NULL_HANDLE)
+        layout_ = create_layout(handle, config.set_layout, config.push_constant_size);
+        if (layout_ == VK_NULL_HANDLE)
         {
-            vkDestroyPipelineLayout(handle, layout_, memory::vulkan_callbacks());
-            layout_ = VK_NULL_HANDLE;
+            vkDestroyShaderModule(handle, module, memory::vulkan_callbacks());
+            return false;
         }
 
+        VkComputePipelineCreateInfo const info{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .stage = {
+                .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext               = nullptr,
+                .flags               = 0,
+                .stage               = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module              = module,
+                .pName               = config.entry,
+                .pSpecializationInfo = nullptr,
+            },
+            .layout             = layout_,
+            .basePipelineHandle = VK_NULL_HANDLE,
+            .basePipelineIndex  = -1,
+        };
+
+        VkResult const result = vkCreateComputePipelines(handle, VK_NULL_HANDLE, 1, &info,
+                                                         memory::vulkan_callbacks(), &pipeline_);
+
+        vkDestroyShaderModule(handle, module, memory::vulkan_callbacks());
+
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkCreateComputePipelines", result);
+            log::error("  while creating %s", config.spirv_name);
+            return false;
+        }
+
+        log::info("compute pipeline %s ready", config.spirv_name);
+        return true;
+    }
+
+    void ComputePipeline::shutdown()
+    {
+        if (device_ == nullptr)
+        {
+            return;
+        }
+
+        destroy(device_->handle(), pipeline_, layout_);
         device_ = nullptr;
     }
 }

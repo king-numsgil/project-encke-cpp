@@ -1,0 +1,69 @@
+// Cluster grid addressing, shared by cluster_build and lighting.
+//
+// Both passes MUST agree on which cluster a point falls in, or a light gets
+// assigned to one cluster and looked up in another -- which does not fail, it
+// just loses lighting at cluster boundaries. Everything that maps a position
+// to a cluster lives here and nowhere else.
+//
+// Tiles are addressed from the top-left, matching pixel coordinates. Depth
+// slices are logarithmic in view distance: slice = log(d) * scale + bias,
+// which spends resolution close to the camera where ship interiors live.
+
+module cluster;
+
+import lib.gpu_types;
+
+// Distance along the view axis. View space looks down -Z.
+public float view_distance(float3 view_position)
+{
+    return -view_position.z;
+}
+
+public uint depth_slice(float distance, GpuFrame frame)
+{
+    uint  slices = frame.cluster_grid.z;
+    float slice  = log(max(distance, frame.cluster_depth.x)) * frame.cluster_depth.z +
+                   frame.cluster_depth.w;
+    return min(uint(max(slice, 0.0f)), slices - 1u);
+}
+
+// Depth at the near edge of a slice; slice == slices gives the far edge.
+public float slice_distance(uint slice, GpuFrame frame)
+{
+    float near   = frame.cluster_depth.x;
+    float far    = frame.cluster_depth.y;
+    float slices = float(frame.cluster_grid.z);
+    return near * pow(far / near, float(slice) / slices);
+}
+
+public uint flatten(uint3 cluster, GpuFrame frame)
+{
+    uint3 grid = frame.cluster_grid.xyz;
+    return cluster.x + grid.x * (cluster.y + grid.y * cluster.z);
+}
+
+public uint3 unflatten(uint index, GpuFrame frame)
+{
+    uint3 grid = frame.cluster_grid.xyz;
+    uint  x    = index % grid.x;
+    uint  y    = (index / grid.x) % grid.y;
+    uint  z    = index / (grid.x * grid.y);
+    return uint3(x, y, z);
+}
+
+public uint cluster_of(uint2 pixel, float distance, GpuFrame frame)
+{
+    uint3 grid = frame.cluster_grid.xyz;
+    uint2 tile = min(uint2(float2(pixel) * float2(grid.xy) * frame.screen.zw), grid.xy - 1u);
+    return flatten(uint3(tile, depth_slice(distance, frame)), frame);
+}
+
+// View-space point at a given distance along the ray through an NDC position.
+// Specific to the infinite reversed-Z projection: only its two focal terms
+// matter, c0.x = f / aspect and c1.y = f.
+public float3 view_at(float2 ndc, float distance, GpuFrame frame)
+{
+    return float3(ndc.x * distance / frame.projection.c0.x,
+                  ndc.y * distance / frame.projection.c1.y,
+                  -distance);
+}

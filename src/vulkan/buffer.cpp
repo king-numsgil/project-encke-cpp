@@ -17,19 +17,49 @@ namespace encke
         shutdown();
     }
 
-    bool Buffer::init(VulkanAllocator const& allocator, VulkanDevice const& device,
-                      void const* data, size_t size, VkBufferUsageFlags usage)
+    bool Buffer::init_device(VulkanAllocator const& allocator, VulkanDevice const& device,
+                             VkDeviceSize size, VkBufferUsageFlags usage, void const* data)
     {
-        if (data == nullptr || size == 0)
+        if (size == 0)
         {
             log::error("refusing to create an empty buffer");
             return false;
         }
 
         allocator_ = &allocator;
+        size_      = size;
 
-        // Staging buffer: host-visible, sequentially written once, then copied
-        // into device-local memory that the GPU can read at full speed.
+        VkBufferCreateInfo const device_info{
+            .sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .size                  = size,
+            .usage                 = usage | (data != nullptr ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0u),
+            .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices   = nullptr,
+        };
+
+        VmaAllocationCreateInfo const device_alloc{
+            .flags = 0,
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        };
+
+        VkResult result = vmaCreateBuffer(allocator.handle(), &device_info, &device_alloc,
+                                          &buffer_, &allocation_, nullptr);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vmaCreateBuffer (device)", result);
+            return false;
+        }
+
+        if (data == nullptr)
+        {
+            return true;
+        }
+
+        // Staging buffer: host-visible, written once sequentially, then copied
+        // into device-local memory the GPU reads at full speed.
         VkBufferCreateInfo const staging_info{
             .sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
             .pNext                 = nullptr,
@@ -51,40 +81,16 @@ namespace encke
         VmaAllocation     staging_allocation = nullptr;
         VmaAllocationInfo staging_mapped{};
 
-        VkResult result = vmaCreateBuffer(allocator.handle(), &staging_info, &staging_alloc,
-                                          &staging, &staging_allocation, &staging_mapped);
+        result = vmaCreateBuffer(allocator.handle(), &staging_info, &staging_alloc, &staging,
+                                 &staging_allocation, &staging_mapped);
         if (result != VK_SUCCESS)
         {
             log::vk_error("vmaCreateBuffer (staging)", result);
+            shutdown();
             return false;
         }
 
-        std::memcpy(staging_mapped.pMappedData, data, size);
-
-        VkBufferCreateInfo const device_info{
-            .sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .pNext                 = nullptr,
-            .flags                 = 0,
-            .size                  = size,
-            .usage                 = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
-            .queueFamilyIndexCount = 0,
-            .pQueueFamilyIndices   = nullptr,
-        };
-
-        VmaAllocationCreateInfo const device_alloc{
-            .flags = 0,
-            .usage = VMA_MEMORY_USAGE_AUTO,
-        };
-
-        result = vmaCreateBuffer(allocator.handle(), &device_info, &device_alloc, &buffer_,
-                                 &allocation_, nullptr);
-        if (result != VK_SUCCESS)
-        {
-            log::vk_error("vmaCreateBuffer (device)", result);
-            vmaDestroyBuffer(allocator.handle(), staging, staging_allocation);
-            return false;
-        }
+        std::memcpy(staging_mapped.pMappedData, data, static_cast<size_t>(size));
 
         bool const copied = device.submit_immediate([&](VkCommandBuffer command) {
             VkBufferCopy const region{.srcOffset = 0, .dstOffset = 0, .size = size};
@@ -102,6 +108,51 @@ namespace encke
         return true;
     }
 
+    bool Buffer::init_mapped(VulkanAllocator const& allocator, VkDeviceSize size,
+                             VkBufferUsageFlags usage)
+    {
+        if (size == 0)
+        {
+            log::error("refusing to create an empty buffer");
+            return false;
+        }
+
+        allocator_ = &allocator;
+        size_      = size;
+
+        VkBufferCreateInfo const info{
+            .sType                 = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext                 = nullptr,
+            .flags                 = 0,
+            .size                  = size,
+            .usage                 = usage,
+            .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices   = nullptr,
+        };
+
+        // Sequential write lets VMA pick write-combined memory, and on a
+        // discrete GPU with resizable BAR it may land in device-local
+        // host-visible memory. Either way the CPU must only ever write it.
+        VmaAllocationCreateInfo const alloc{
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                     VMA_ALLOCATION_CREATE_MAPPED_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO,
+        };
+
+        VmaAllocationInfo mapped{};
+        VkResult const    result = vmaCreateBuffer(allocator.handle(), &info, &alloc, &buffer_,
+                                                   &allocation_, &mapped);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vmaCreateBuffer (mapped)", result);
+            return false;
+        }
+
+        mapped_ = mapped.pMappedData;
+        return true;
+    }
+
     void Buffer::shutdown()
     {
         if (buffer_ != VK_NULL_HANDLE && allocator_ != nullptr)
@@ -111,6 +162,8 @@ namespace encke
             allocation_ = nullptr;
         }
 
+        mapped_    = nullptr;
+        size_      = 0;
         allocator_ = nullptr;
     }
 }

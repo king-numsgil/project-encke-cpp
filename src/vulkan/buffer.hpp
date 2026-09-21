@@ -7,9 +7,6 @@ namespace encke
     class VulkanAllocator;
     class VulkanDevice;
 
-    // A device-local buffer, filled once at creation through a staging copy.
-    // Nothing here supports updating after the fact; per-frame data will want a
-    // different type with host-visible memory and no staging round trip.
     class Buffer
     {
     public:
@@ -21,16 +18,30 @@ namespace encke
         Buffer(Buffer&&)                 = delete;
         Buffer& operator=(Buffer&&)      = delete;
 
-        bool init(VulkanAllocator const& allocator, VulkanDevice const& device,
-                  void const* data, size_t size, VkBufferUsageFlags usage);
+        // Device-local. With `data` it is filled once through a staging copy;
+        // without, its contents are undefined until the GPU writes them.
+        bool init_device(VulkanAllocator const& allocator, VulkanDevice const& device,
+                         VkDeviceSize size, VkBufferUsageFlags usage,
+                         void const* data = nullptr);
+
+        // Host-visible and persistently mapped, for data rewritten every frame.
+        // Written sequentially from the CPU; never read back.
+        bool init_mapped(VulkanAllocator const& allocator, VkDeviceSize size,
+                         VkBufferUsageFlags usage);
 
         void shutdown();
 
-        VkBuffer handle() const { return buffer_; }
+        VkBuffer     handle() const { return buffer_; }
+        VkDeviceSize size() const { return size_; }
+
+        // Null unless created with init_mapped.
+        void* mapped() const { return mapped_; }
 
     private:
         VulkanAllocator const* allocator_  = nullptr;
         VkBuffer               buffer_     = VK_NULL_HANDLE;
         VmaAllocation          allocation_ = nullptr;
+        VkDeviceSize           size_       = 0;
+        void*                  mapped_     = nullptr;
     };
 }

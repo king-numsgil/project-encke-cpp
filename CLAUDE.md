@@ -54,9 +54,11 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer. It draws a rotating lit cube from vertex and index
-buffers in device-local memory, depth-tested, with an MVP in push constants. No
-descriptors, textures or asset loading yet — the cube is generated in code.
+`encke` is a Vulkan renderer with a working clustered deferred pipeline: a
+G-buffer pass, compute light clustering, compute lighting and a tonemap pass,
+drawing a procedural ship corridor lit by a few dozen point lights. No textures,
+shadows or asset loading yet — all geometry is generated in code from one cube
+mesh, and every material is flat.
 
 ```
 src/
@@ -69,20 +71,31 @@ src/
   platform/
     window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
   vulkan/
-    context.{hpp,cpp} volk, instance, validation, surface
-    device.{hpp,cpp}  device selection, queues, submit_immediate
+    context.{hpp,cpp}    volk, instance, validation, surface
+    device.{hpp,cpp}     device selection, queues, submit_immediate
     allocator.{hpp,cpp}  VMA lifetime; the only VMA_IMPLEMENTATION
-    buffer.{hpp,cpp}     device-local buffer filled via a staging copy
-    depth.{hpp,cpp}      reversed-Z depth attachment
+    bindless.{hpp,cpp}   the one global descriptor set
+    buffer.{hpp,cpp}     device-local (staged) and host-mapped buffers
+    image.{hpp,cpp}      any screen-sized target: G-buffer, HDR, depth
     swapchain.{hpp,cpp}  swapchain, images, views, recreation
   render/
+    camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
+    scene.{hpp,cpp}      f64 world: test corridor, objects, lights
     mesh.{hpp,cpp}       Vertex, Mesh, procedural cube
-    pipeline.{hpp,cpp}   shader module loading, VkPipeline construction
-    renderer.{hpp,cpp}   command pool, per-frame sync, record and present
+    gpu_types.hpp        structs shared with the shaders
+    pipeline.{hpp,cpp}   graphics and compute pipeline construction
+    renderer.{hpp,cpp}   the four passes, barriers, per-frame upload
 shaders/
-  triangle.slang         SV_VertexID triangle, kept as the minimal case
-  mesh.slang             vertex-buffer mesh with MVP push constants
+  gbuffer.slang          geometry -> G-buffer + emissive into HDR
+  cluster_build.slang    compute: lights -> froxels
+  lighting.slang         compute: shade from the cluster's lights
+  tonemap.slang          HDR -> swapchain
   lib/
+    bindless.slang       the descriptor arrays; mirrors vulkan/bindless.hpp
+    gpu_types.slang      mirrors render/gpu_types.hpp
+    cluster.slang        cluster addressing, shared by build and lighting
+    pbr.slang            GGX / Smith / Schlick
+    normal.slang         octahedral encode and decode
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
 ```
@@ -155,7 +168,58 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
 The frame loop reports throughput once a second. Treat it as a relative signal
 within a single session, never as a figure worth recording.
 
-## Renderer architecture — decided, not yet built
+## Clustered deferred — built, first draft
+
+Four passes per frame, orchestrated in `render/renderer.cpp`:
+
+| Pass | Kind | Does |
+| --- | --- | --- |
+| G-buffer | raster | albedo/ao, octahedral normal, roughness/metallic, motion, depth; emissive seeds the HDR target |
+| clusters | compute | one thread per froxel, tests every light against its view-space AABB |
+| lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
+| tonemap | raster | full-screen triangle, exposure + ACES, into the sRGB swapchain |
+
+### The invariants that make it correct
+
+- **`shaders/lib/cluster.slang` is the single source of cluster addressing.**
+  The build pass and the lighting pass must agree on which froxel a point falls
+  in. If they disagree nothing errors — lighting just goes missing at froxel
+  boundaries. Never inline that math into a pass.
+- **`DebugView::BruteForce` (key 2) is the correctness test.** It shades every
+  light with no clusters at all. Clustered and brute force must be
+  byte-identical; they were verified so over a full frame. Any divergence is a
+  cluster assignment bug, and this is far easier than eyeballing it.
+- **`DebugView::ClusterHeat` (key 3) proves the clusters are doing work.**
+  Identical output would also happen if every froxel held every light. The heat
+  map must show variation — it currently runs 6 to 16 of 29 lights per froxel.
+- **`ENCKE_FIXED_TIME` pins animation** so two captures can be compared. The
+  camera animates on wall-clock, so without it a comparison across runs is
+  comparing camera positions, not renderer changes.
+
+### Parameters, and why these
+
+16x9x24 froxels, logarithmic in depth between 10 cm and 400 m, 64 lights per
+froxel. The 16:9 tiling matches the screen; the log depth distribution puts
+most slices inside the first tens of metres, which is where a corridor or a
+bridge has lights. Beyond 400 m everything shares the last slice — those are
+exterior lights and want different treatment anyway.
+
+### Known gaps, deliberately
+
+- The cluster pass is brute force, every light against every froxel. Correct,
+  and fine for dozens of lights; it will not survive thousands.
+- Per-froxel light lists are fixed size and silently drop past 64.
+- The G-buffer and HDR targets are single-copy, so a frame's entry barriers
+  wait on the previous frame's reads. Correct, and it serialises more than it
+  needs to.
+- The acquire semaphore is waited at `COLOR_ATTACHMENT_OUTPUT`, which stalls
+  the G-buffer pass on the swapchain image even though only the tonemap needs
+  it. Splitting the submission would fix it.
+- No shadows, so the sun is switched off: a directional light with no occlusion
+  lights the inside of a sealed corridor. The code path is wired and ready.
+- Exposure is a hand-tuned constant, not an exposure model.
+
+## Renderer architecture — the decision behind it
 
 **Clustered deferred**, with a forward pass for transparency. Decided
 2026-09-20 after weighing it against Forward+ and the visibility buffer.
@@ -174,10 +238,37 @@ genuinely new work is the G-buffer and the lighting pass.
 
 - **Keep it lean.** The 1070 has ~256 GB/s and a fat G-buffer spends it. Fine
   at 1080p, the first thing to optimise at 4K.
-- **Octahedral-pack normals into RG16.** Not RGBA32F.
-- **Motion vectors from the first version.** RG16F, previous-frame clip
-  position minus current. Committed deliberately at design time because
-  retrofitting them means touching every shader and re-deciding the layout.
+- **Octahedral normals in RG16_UNORM.** Not RGBA32F.
+- **Motion vectors exist from the first version**, RG16F, storing
+  `uv_previous - uv_current` so reprojection is `uv + motion`. Both NDC
+  positions go through `ndc_to_uv`, which carries the Y flip.
+
+  They are per-FRAME displacement, so their magnitude scales with frame time.
+  Uncapped at a couple of thousand frames a second they are around 5e-5 UV,
+  which looks like nothing in the debug view and sits near fp16's smallest
+  normal. That is expected, not a bug — at a realistic frame rate they are
+  twenty times larger. Verified nonzero and spatially varying by cranking the
+  debug gain.
+
+## World space is f64; the GPU only sees view space
+
+A space sim spans instruments centimetres from the eye and bodies millions of
+metres away. An f32 world position holds about 6 cm of precision at 1,000 km,
+which is enough to make a ship interior visibly jitter.
+
+**Every world -> view transform happens in f64 on the CPU.** `view * model` is
+composed in f64, which cancels the large translations against each other, and
+only the small view-space result is narrowed to f32. Lights are transformed to
+view space on the CPU for the same reason, which is why they have to be
+re-uploaded every frame rather than living in a static buffer.
+
+A shader that receives a world-space position is a bug.
+
+The test corridor is built at (1e6, 2.5e5, -7e5) metres on purpose. Set
+`kWorldOrigin` in `render/scene.cpp` to zero and the render must not change.
+Measured: a 1 mm offset 3 m ahead of a camera at 1,000 km survives exactly
+camera-relative, and collapses to 0.000000 if world positions are narrowed to
+f32 first.
 
 ### Antialiasing
 
@@ -232,6 +323,39 @@ answer: accepted, not worked around. The SDK is needed for validation layers and
   encodes on write, and values written look considerably lighter than the
   numbers suggest. Author in sRGB and call `srgb_to_linear` rather than
   hand-computing linear constants, which leaves the intent unreadable.
+
+## Bindless
+
+One global descriptor set, bound once per bind point per command buffer, shared
+by every pipeline. Shaders index it with integer handles carried in push
+constants. `vulkan/bindless.hpp` and `shaders/lib/bindless.slang` must agree on
+binding numbers; nothing checks that but validation at draw time.
+
+| Binding | Holds |
+| --- | --- |
+| 0 | sampled images |
+| 1 | storage images (always accessed in `GENERAL`) |
+| 2 | **read-only** storage buffers |
+| 3 | samplers |
+| 4 | **writable** storage buffers, compute only |
+
+**Bindings 2 and 4 are split for a reason.** A writable storage buffer in the
+vertex or fragment stage requires `vertexPipelineStoresAndAtomics` /
+`fragmentStoresAndAtomics`. Those stages only ever read, so they get the
+read-only view and the features stay off. Each buffer is registered in exactly
+one of the two.
+
+Descriptors bake in an image layout, so a sampled slot is always
+`READ_ONLY_OPTIMAL` and a storage slot always `GENERAL`, and the frame's
+barriers must land exactly there. The HDR target is registered twice, once per
+layout.
+
+Handles are stable across a resize: `update_*` rewrites the slot in place. That
+is only legal because the caller waits for idle first — `UPDATE_UNUSED_WHILE_PENDING`
+permits rewriting a slot no pending command buffer uses, not one in flight.
+
+This is also why the Intel iGPU is rejected at selection: format-less bindless
+storage images need `shaderStorageImageReadWithoutFormat`, which it lacks.
 
 ### Shared modules
 
