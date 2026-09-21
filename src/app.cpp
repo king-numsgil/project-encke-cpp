@@ -18,8 +18,6 @@ namespace encke
         constexpr i32  kWidth   = 1280;
         constexpr i32  kHeight  = 720;
 
-        constexpr i64 kReportIntervalMs = 1000;
-
         // Keys 1 and 2 pick how the frame is shaded; the keys after them
         // toggle one visualisation window each. ENCKE_DEBUG_VIEW uses the
         // same numbering from zero.
@@ -173,7 +171,6 @@ namespace encke
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
 
-        last_report_ms_ = log::elapsed_ms();
         return true;
     }
 
@@ -203,24 +200,6 @@ namespace encke
         }
 
         return renderer_.on_swapchain_changed(swapchain_);
-    }
-
-    void App::report_throughput()
-    {
-        i64 const now = log::elapsed_ms();
-        i64 const span = now - last_report_ms_;
-        if (span < kReportIntervalMs)
-        {
-            return;
-        }
-
-        double const fps = static_cast<double>(frames_) * 1000.0 / static_cast<double>(span);
-        log::info("%llu frames in %lld ms (%.1f fps)",
-                  static_cast<unsigned long long>(frames_),
-                  static_cast<long long>(span), fps);
-
-        frames_         = 0;
-        last_report_ms_ = now;
     }
 
     void App::on_debug_key(u32 key)
@@ -346,9 +325,6 @@ namespace encke
             {
             case FrameResult::Ok:
             {
-                ++frames_;
-                report_throughput();
-
                 // Wall clock, not `seconds`: ENCKE_FIXED_TIME pins animation,
                 // not the passage of real time the stats are measuring.
                 auto const now = std::chrono::steady_clock::now();

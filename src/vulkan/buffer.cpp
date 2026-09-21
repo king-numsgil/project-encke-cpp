@@ -59,15 +59,23 @@ namespace encke
             .pNext                 = nullptr,
             .flags                 = 0,
             .size                  = size,
-            .usage                 = usage | (data != nullptr ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0u),
+            .usage                 = usage | (data != nullptr ? VkBufferUsageFlags{VK_BUFFER_USAGE_TRANSFER_DST_BIT}
+                                                              : VkBufferUsageFlags{0}),
             .sharingMode           = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices   = nullptr,
         };
 
         VmaAllocationCreateInfo const device_alloc{
-            .flags = 0,
-            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .flags          = 0,
+            .usage          = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .requiredFlags  = 0,
+            .preferredFlags = 0,
+            .memoryTypeBits = 0,
+            .pool           = nullptr,
+            .pUserData      = nullptr,
+            .priority       = 0.0f,
+            .minAlignment   = 0,
         };
 
         VkResult result = vmaCreateBuffer(allocator.handle(), &device_info, &device_alloc,

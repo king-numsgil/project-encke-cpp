@@ -264,6 +264,9 @@ namespace encke
             .spirv_name         = "tonemap.spv",
             .colour_formats     = span<VkFormat const>{&swapchain_format, 1},
             .depth_format       = VK_FORMAT_UNDEFINED,
+            // Full-screen triangle generated from SV_VertexID.
+            .bindings           = {},
+            .attributes         = {},
             .cull_mode          = VK_CULL_MODE_NONE,
             .alpha_blend        = false,
             .set_layout         = bindless_.layout(),
@@ -829,21 +832,25 @@ namespace encke
         {
             VkImage const target = swapchain.image(image_index);
 
-            array<Transition, 2 + kDebugWindowCount> handoff{
-                Transition{hdr_.handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
-                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                           VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                           VK_ACCESS_2_SHADER_SAMPLED_READ_BIT},
-                // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT,
-                // so the transition has to chain from that stage -- TOP_OF_PIPE
-                // would let it run before the image is actually available.
-                Transition{target, VK_IMAGE_LAYOUT_UNDEFINED,
-                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
-                           VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                           VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT},
-            };
+            // Filled by assignment: a std::array brace-initialised with only
+            // some of its elements draws GCC's -Wmissing-braces.
+            array<Transition, 2 + kDebugWindowCount> handoff{};
+
+            handoff[0] = Transition{hdr_.handle(), VK_IMAGE_LAYOUT_GENERAL,
+                                    VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+
+            // The acquire semaphore is waited on at COLOR_ATTACHMENT_OUTPUT,
+            // so the transition has to chain from that stage -- TOP_OF_PIPE
+            // would let it run before the image is actually available.
+            handoff[1] = Transition{target, VK_IMAGE_LAYOUT_UNDEFINED,
+                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT};
             size_t count = 2;
 
             // The UI samples these in the overlay pass. A closed window's

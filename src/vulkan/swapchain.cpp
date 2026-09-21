@@ -177,7 +177,9 @@ namespace encke
         VkSwapchainCreateInfoKHR const info{
             .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .pNext            = mutable_format ? &format_list : nullptr,
-            .flags            = mutable_format ? VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR : 0u,
+            .flags            = mutable_format
+                                    ? VkSwapchainCreateFlagsKHR{VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR}
+                                    : VkSwapchainCreateFlagsKHR{0},
             .surface          = surface,
             .minImageCount    = image_count,
             .imageFormat      = surface_format.format,

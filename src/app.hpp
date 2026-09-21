@@ -35,8 +35,6 @@ namespace encke
 
         bool swapchain_matches_window() const;
 
-        void report_throughput();
-
         void draw_ui();
 
         // A digit key, 0-based: a shading mode, or a debug window toggle.
@@ -64,9 +62,6 @@ namespace encke
 
         // Set from ENCKE_FIXED_TIME; pins animation so captures are comparable.
         optional<f64> fixed_time_;
-
-        u64 frames_          = 0;
-        i64 last_report_ms_  = 0;
 
         // Wall-clock stamp of the previous completed frame, for frame time.
         optional<std::chrono::steady_clock::time_point> last_frame_;

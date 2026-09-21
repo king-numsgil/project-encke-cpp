@@ -88,8 +88,15 @@ namespace encke
         // Render targets are large and replaced whole on resize; a dedicated
         // allocation avoids fragmenting a shared block every time.
         VmaAllocationCreateInfo const alloc_info{
-            .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
-            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .flags          = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT,
+            .usage          = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .requiredFlags  = 0,
+            .preferredFlags = 0,
+            .memoryTypeBits = 0,
+            .pool           = nullptr,
+            .pUserData      = nullptr,
+            .priority       = 0.0f,
+            .minAlignment   = 0,
         };
 
         VkResult result = vmaCreateImage(allocator_->handle(), &image_info, &alloc_info, &image_,

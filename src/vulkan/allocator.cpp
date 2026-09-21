@@ -26,20 +26,22 @@ namespace encke
 
     bool VulkanAllocator::init(VulkanContext const& context, VulkanDevice const& device)
     {
-        VmaVulkanFunctions const functions{
-            .vkGetInstanceProcAddr = vkGetInstanceProcAddr,
-            .vkGetDeviceProcAddr   = vkGetDeviceProcAddr,
-        };
+        // Zeroed, then the members that matter assigned: both structs are long
+        // and mostly optional, and a designated initializer naming only some
+        // of them trips -Wmissing-field-initializers. Every entry point VMA
+        // is not handed here, it fetches itself through these two.
+        VmaVulkanFunctions functions{};
+        functions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+        functions.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
 
-        VmaAllocatorCreateInfo const info{
-            .flags            = 0,
-            .physicalDevice   = device.physical(),
-            .device           = device.handle(),
-            .pAllocationCallbacks = memory::vulkan_callbacks(),
-            .pVulkanFunctions = &functions,
-            .instance         = context.instance(),
-            .vulkanApiVersion = VK_API_VERSION_1_3,
-        };
+        VmaAllocatorCreateInfo info{};
+        info.flags                = 0;
+        info.physicalDevice       = device.physical();
+        info.device               = device.handle();
+        info.pAllocationCallbacks = memory::vulkan_callbacks();
+        info.pVulkanFunctions     = &functions;
+        info.instance             = context.instance();
+        info.vulkanApiVersion     = VK_API_VERSION_1_3;
 
         VkResult const created = vmaCreateAllocator(&info, &allocator_);
         if (created != VK_SUCCESS)

@@ -189,8 +189,8 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
 - The swapchain is only rebuilt when the window size actually differs, since a
   resize event also fires once at startup for the initial size.
 
-The frame loop reports throughput once a second. Treat it as a relative signal
-within a single session, never as a figure worth recording.
+Frame and per-pass timings live in the stats window, not the log. Treat them as
+a relative signal within a single session, never as figures worth recording.
 
 ## Clustered deferred — built, first draft
 
