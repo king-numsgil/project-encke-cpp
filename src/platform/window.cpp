@@ -73,6 +73,11 @@ namespace encke
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
+            if (hook_)
+            {
+                hook_(event);
+            }
+
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
@@ -107,6 +112,10 @@ namespace encke
                 if (event.key.key == SDLK_ESCAPE)
                 {
                     events.quit_requested = true;
+                }
+                else if (event.key.key == SDLK_F1 && !event.key.repeat)
+                {
+                    events.toggle_ui = true;
                 }
                 else if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9 && !event.key.repeat)
                 {

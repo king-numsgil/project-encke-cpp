@@ -4,6 +4,8 @@
 
 #include "core/log.hpp"
 
+#include <imgui.h>
+
 #if ENCKE_USE_MIMALLOC
 
 #   include <mimalloc.h>
@@ -58,6 +60,18 @@ namespace encke::memory
             mi_free(memory);
         }
 
+        void* imgui_allocate(size_t size, void* user)
+        {
+            static_cast<void>(user);
+            return mi_malloc(size);
+        }
+
+        void imgui_free(void* memory, void* user)
+        {
+            static_cast<void>(user);
+            mi_free(memory);
+        }
+
         constinit VkAllocationCallbacks const g_vulkan_callbacks{
             .pUserData             = nullptr,
             .pfnAllocation         = vk_allocate,
@@ -79,6 +93,11 @@ namespace encke::memory
         return true;
     }
 
+    void install_imgui_allocator()
+    {
+        ImGui::SetAllocatorFunctions(imgui_allocate, imgui_free);
+    }
+
     VkAllocationCallbacks const* vulkan_callbacks()
     {
         return &g_vulkan_callbacks;
@@ -94,6 +113,10 @@ namespace encke::memory
     bool install_sdl_allocator()
     {
         return true;
+    }
+
+    void install_imgui_allocator()
+    {
     }
 
     VkAllocationCallbacks const* vulkan_callbacks()

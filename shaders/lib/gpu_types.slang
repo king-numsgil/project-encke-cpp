@@ -72,6 +72,13 @@ public struct Push
     public uint  debug_view;
     public uint  gbuffer_motion;
     public uint  pad0;
+
+    // UI overlay. Pixel -> NDC is xy * scale + translate.
+    public float4 ui_transform;    // xy scale, zw translate
+    public uint   ui_texture;      // bindless sampled image
+    public uint   ui_sampler;      // bindless sampler
+    public uint   ui_encode_srgb;  // nonzero: target is UNORM, encode in-shader
+    public uint   pad1;
 };
 
 // Byte strides must match sizeof() on the C++ side.

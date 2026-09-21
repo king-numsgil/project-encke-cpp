@@ -33,6 +33,10 @@ namespace encke
 
             VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
 
+            // Straight (non-premultiplied) alpha over every colour attachment:
+            // rgb = src * a + dst * (1 - a), alpha accumulates coverage.
+            bool alpha_blend = false;
+
             VkDescriptorSetLayout set_layout         = VK_NULL_HANDLE;
             u32                   push_constant_size = 0;
         };

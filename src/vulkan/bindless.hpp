@@ -43,6 +43,11 @@ namespace encke
         u32  add_sampled_image(VkImageView view, VkImageLayout layout);
         void update_sampled_image(u32 handle, VkImageView view, VkImageLayout layout);
 
+        // Returns the slot for a later add_sampled_image to reuse. The caller
+        // guarantees no pending command buffer still reads it. The descriptor
+        // is left pointing at the old view, which is legal while unused.
+        void release_sampled_image(u32 handle);
+
         u32  add_storage_image(VkImageView view);
         void update_storage_image(u32 handle, VkImageView view);
 
@@ -68,9 +73,11 @@ namespace encke
         VkDescriptorPool      pool_   = VK_NULL_HANDLE;
         VkDescriptorSet       set_    = VK_NULL_HANDLE;
 
-        // Monotonic. Nothing is freed yet; slots are reused only through the
-        // update_* calls.
+        // Monotonic, except sampled images, whose released slots are reused
+        // first. Everything else is reused only through the update_* calls.
         u32 add_buffer(Binding binding, u32& next, VkBuffer buffer, VkDeviceSize size);
+
+        vector<u32> free_sampled_images_;
 
         u32 next_sampled_image_   = 0;
         u32 next_storage_image_   = 0;

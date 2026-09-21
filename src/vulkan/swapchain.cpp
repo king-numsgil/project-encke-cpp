@@ -28,8 +28,22 @@ namespace encke
             return available.front();
         }
 
-        // FIFO is the only mode guaranteed present. MAILBOX gives lower
-        // latency without tearing where the driver offers it.
+        // The UNORM twin of an sRGB format, for writing already-encoded values
+        // through a view the hardware will not encode again. UNDEFINED when
+        // the format has no such twin, or is not sRGB in the first place.
+        VkFormat unorm_twin(VkFormat format)
+        {
+            switch (format)
+            {
+            case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_UNORM;
+            case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_R8G8B8A8_UNORM;
+            case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+            default: return VK_FORMAT_UNDEFINED;
+            }
+        }
+
+        // FIFO is the only mode guaranteed present, and it is vsync. MAILBOX
+        // gives lower latency without tearing where the driver offers it.
         VkPresentModeKHR choose_present_mode(vector<VkPresentModeKHR> const& available)
         {
             for (VkPresentModeKHR const mode : available)
@@ -124,10 +138,24 @@ namespace encke
         }
 
         VkSurfaceFormatKHR const surface_format = choose_format(formats);
-        VkPresentModeKHR const   present_mode   = choose_present_mode(modes);
+        present_mode_                           = choose_present_mode(modes);
 
         extent_ = choose_extent(capabilities, size);
         format_ = surface_format.format;
+
+        VkFormat const twin    = unorm_twin(format_);
+        bool const     mutable_format = device_->mutable_swapchain_format() && twin != VK_FORMAT_UNDEFINED;
+        ui_format_             = mutable_format ? twin : format_;
+
+        // The spec requires the list of every format a view may take whenever
+        // the chain is created mutable.
+        VkFormat const view_formats[]{format_, twin};
+        VkImageFormatListCreateInfo const format_list{
+            .sType           = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+            .pNext           = nullptr,
+            .viewFormatCount = static_cast<u32>(std::size(view_formats)),
+            .pViewFormats    = view_formats,
+        };
 
         if (extent_.width == 0 || extent_.height == 0)
         {
@@ -148,8 +176,8 @@ namespace encke
 
         VkSwapchainCreateInfoKHR const info{
             .sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-            .pNext            = nullptr,
-            .flags            = 0,
+            .pNext            = mutable_format ? &format_list : nullptr,
+            .flags            = mutable_format ? VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR : 0u,
             .surface          = surface,
             .minImageCount    = image_count,
             .imageFormat      = surface_format.format,
@@ -162,7 +190,7 @@ namespace encke
             .pQueueFamilyIndices   = shared ? nullptr : families,
             .preTransform          = capabilities.currentTransform,
             .compositeAlpha        = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            .presentMode           = present_mode,
+            .presentMode           = present_mode_,
             .clipped               = VK_TRUE,
             .oldSwapchain          = VK_NULL_HANDLE,
         };
@@ -180,8 +208,27 @@ namespace encke
         images_.resize(actual_count);
         vkGetSwapchainImagesKHR(device_->handle(), swapchain_, &actual_count, images_.data());
 
-        views_.resize(actual_count, VK_NULL_HANDLE);
-        for (u32 index = 0; index < actual_count; ++index)
+        if (!create_views(views_, format_))
+        {
+            return false;
+        }
+
+        // Without a distinct UI format the UI shares the main views rather
+        // than holding a duplicate set.
+        if (ui_format_ != format_ && !create_views(ui_views_, ui_format_))
+        {
+            return false;
+        }
+
+        log::info("swapchain %ux%u, %u images, %s%s", extent_.width, extent_.height, actual_count,
+                  present_mode_name(), ui_format_ != format_ ? ", UNORM UI view" : "");
+        return true;
+    }
+
+    bool VulkanSwapchain::create_views(vector<VkImageView>& views, VkFormat format)
+    {
+        views.resize(images_.size(), VK_NULL_HANDLE);
+        for (size_t index = 0; index < images_.size(); ++index)
         {
             VkImageViewCreateInfo const view_info{
                 .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -189,7 +236,7 @@ namespace encke
                 .flags    = 0,
                 .image    = images_[index],
                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                .format   = format_,
+                .format   = format,
                 .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
                 .subresourceRange = {
@@ -201,8 +248,8 @@ namespace encke
                 },
             };
 
-            result = vkCreateImageView(device_->handle(), &view_info, memory::vulkan_callbacks(),
-                                       &views_[index]);
+            VkResult const result = vkCreateImageView(device_->handle(), &view_info,
+                                                      memory::vulkan_callbacks(), &views[index]);
             if (result != VK_SUCCESS)
             {
                 log::vk_error("vkCreateImageView", result);
@@ -210,10 +257,19 @@ namespace encke
             }
         }
 
-        log::info("swapchain %ux%u, %u images, %s",
-                  extent_.width, extent_.height, actual_count,
-                  present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
         return true;
+    }
+
+    char const* VulkanSwapchain::present_mode_name() const
+    {
+        switch (present_mode_)
+        {
+        case VK_PRESENT_MODE_MAILBOX_KHR:      return "mailbox";
+        case VK_PRESENT_MODE_FIFO_KHR:         return "fifo (vsync)";
+        case VK_PRESENT_MODE_IMMEDIATE_KHR:    return "immediate";
+        case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo relaxed";
+        default:                               return "other";
+        }
     }
 
     void VulkanSwapchain::destroy_views()
@@ -223,16 +279,19 @@ namespace encke
             return;
         }
 
-        for (VkImageView& view : views_)
+        for (vector<VkImageView>* const set : {&views_, &ui_views_})
         {
-            if (view != VK_NULL_HANDLE)
+            for (VkImageView& view : *set)
             {
-                vkDestroyImageView(device_->handle(), view, memory::vulkan_callbacks());
-                view = VK_NULL_HANDLE;
+                if (view != VK_NULL_HANDLE)
+                {
+                    vkDestroyImageView(device_->handle(), view, memory::vulkan_callbacks());
+                    view = VK_NULL_HANDLE;
+                }
             }
+            set->clear();
         }
 
-        views_.clear();
         images_.clear();
     }
 

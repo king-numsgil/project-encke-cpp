@@ -5,6 +5,7 @@
 #include "vulkan/bindless.hpp"
 #include "vulkan/buffer.hpp"
 #include "vulkan/image.hpp"
+#include "vulkan/timestamps.hpp"
 
 namespace encke
 {
@@ -40,9 +41,29 @@ namespace encke
     //   3. lighting   compute shade each pixel against its cluster's lights,
     //                         adding onto the HDR target
     //   4. tonemap    raster  HDR -> swapchain
+    //   5. overlay    raster  caller-recorded UI, through the swapchain's UI view
     class Renderer
     {
     public:
+        static constexpr u32 kFramesInFlight = 2;
+
+        // Whatever draws over the finished frame -- the UI. Two phases, because
+        // uploads and barriers are illegal inside a rendering scope.
+        class Overlay
+        {
+        public:
+            virtual ~Overlay() = default;
+
+            // Outside any rendering scope, before record(). `slot` is the
+            // frame-in-flight index; its previous use has retired, so
+            // anything the overlay keyed to that slot may be reused or freed.
+            virtual void prepare(VkCommandBuffer command, u32 slot) = 0;
+
+            // Inside the overlay rendering scope: one colour attachment, the
+            // swapchain's ui_view() in ui_format(), contents loaded.
+            virtual void record(VkCommandBuffer command) = 0;
+        };
+
         Renderer() = default;
         ~Renderer();
 
@@ -59,10 +80,23 @@ namespace encke
         // place, and rebuilds per-image semaphores. Caller waits for idle.
         bool on_swapchain_changed(VulkanSwapchain const& swapchain);
 
-        FrameResult draw(VulkanSwapchain const& swapchain, Scene const& scene);
+        // `overlay` may be null.
+        FrameResult draw(VulkanSwapchain const& swapchain, Scene const& scene, Overlay* overlay);
+
+        // The one global descriptor set. Mutable so the UI can register its
+        // textures and samplers in it; every pipeline shares it.
+        BindlessSet& bindless() { return bindless_; }
 
         void      set_debug_view(DebugView view) { debug_view_ = view; }
         DebugView debug_view() const { return debug_view_; }
+
+        // Per-pass GPU time of the newest frame whose results are back, which
+        // trails the frame being recorded by kFramesInFlight.
+        span<GpuSection const> gpu_timings() const { return timestamps_.sections(); }
+
+        // Time the last draw() spent blocked on the frame fence, image
+        // acquisition and present, in milliseconds.
+        f64 blocked_ms() const { return blocked_ms_; }
 
     private:
         // Rewritten by the CPU every frame, so one set per frame in flight.
@@ -81,10 +115,8 @@ namespace encke
         void register_targets(bool first_time);
         void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources) const;
         bool record(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index,
-                    Scene const& scene);
+                    Scene const& scene, Overlay* overlay);
         void destroy_image_semaphores();
-
-        static constexpr u32 kFramesInFlight = 2;
 
         VulkanAllocator const* allocator_ = nullptr;
         VulkanDevice const*    device_    = nullptr;
@@ -132,6 +164,9 @@ namespace encke
         // to a different image over time, and reusing a pending signal is
         // invalid.
         vector<VkSemaphore> render_finished_;
+
+        GpuTimestamps timestamps_;
+        f64           blocked_ms_ = 0.0;
 
         u32       frame_      = 0;
         DebugView debug_view_ = DebugView::Lit;

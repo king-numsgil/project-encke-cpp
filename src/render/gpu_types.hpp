@@ -67,10 +67,17 @@ namespace encke::gpu
         u32 debug_view;
         u32 gbuffer_motion;
         u32 pad0;
+
+        // UI overlay (ui/imgui_vulkan). Pixel -> NDC is xy * scale + translate.
+        f32vec4 ui_transform;        // xy scale, zw translate
+        u32     ui_texture;          // bindless sampled image
+        u32     ui_sampler;          // bindless sampler
+        u32     ui_encode_srgb;      // nonzero: target is UNORM, encode in-shader
+        u32     pad1;
     };
 
     static_assert(sizeof(Frame) == 176);
     static_assert(sizeof(Light) == 32);
     static_assert(sizeof(Object) == 224);
-    static_assert(sizeof(Push) == 64, "must fit the 128-byte guaranteed minimum");
+    static_assert(sizeof(Push) == 96, "must fit the 128-byte guaranteed minimum");
 }

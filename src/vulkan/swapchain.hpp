@@ -31,17 +31,33 @@ namespace encke
         VkImage        image(u32 index) const { return images_[index]; }
         VkImageView    view(u32 index) const { return views_[index]; }
 
+        // The view and format the UI draws through. UNORM over the sRGB
+        // images where the device allows it, because UI colours are authored
+        // already encoded; otherwise the same as view() and format().
+        VkFormat    ui_format() const { return ui_format_; }
+        VkImageView ui_view(u32 index) const
+        {
+            return ui_views_.empty() ? views_[index] : ui_views_[index];
+        }
+
+        VkPresentModeKHR present_mode() const { return present_mode_; }
+        char const*      present_mode_name() const;
+
     private:
         bool build(i32vec2 size);
+        bool create_views(vector<VkImageView>& views, VkFormat format);
         void destroy_views();
 
         VulkanContext const* context_ = nullptr;
         VulkanDevice const*  device_  = nullptr;
 
-        VkSwapchainKHR      swapchain_ = VK_NULL_HANDLE;
-        VkFormat            format_    = VK_FORMAT_UNDEFINED;
+        VkSwapchainKHR      swapchain_    = VK_NULL_HANDLE;
+        VkFormat            format_       = VK_FORMAT_UNDEFINED;
+        VkFormat            ui_format_    = VK_FORMAT_UNDEFINED;
+        VkPresentModeKHR    present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
         VkExtent2D          extent_{};
         vector<VkImage>     images_;
         vector<VkImageView> views_;
+        vector<VkImageView> ui_views_;
     };
 }

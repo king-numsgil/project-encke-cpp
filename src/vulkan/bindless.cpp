@@ -145,6 +145,14 @@ namespace encke
 
     u32 BindlessSet::add_sampled_image(VkImageView view, VkImageLayout layout)
     {
+        if (!free_sampled_images_.empty())
+        {
+            u32 const handle = free_sampled_images_.back();
+            free_sampled_images_.pop_back();
+            update_sampled_image(handle, view, layout);
+            return handle;
+        }
+
         if (next_sampled_image_ >= kMaxSampledImages)
         {
             log::error("bindless sampled images exhausted (%u)", kMaxSampledImages);
@@ -159,6 +167,14 @@ namespace encke
     void BindlessSet::update_sampled_image(u32 handle, VkImageView view, VkImageLayout layout)
     {
         write_image(kSampledImages, handle, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, view, layout);
+    }
+
+    void BindlessSet::release_sampled_image(u32 handle)
+    {
+        if (handle != kInvalid)
+        {
+            free_sampled_images_.push_back(handle);
+        }
     }
 
     u32 BindlessSet::add_storage_image(VkImageView view)
@@ -276,6 +292,7 @@ namespace encke
             layout_ = VK_NULL_HANDLE;
         }
 
+        free_sampled_images_.clear();
         device_ = nullptr;
     }
 }

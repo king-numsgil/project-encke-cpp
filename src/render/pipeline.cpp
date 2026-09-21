@@ -248,18 +248,22 @@ namespace encke
 
         bool const has_depth = config.depth_format != VK_FORMAT_UNDEFINED;
 
-        // No blending anywhere yet: the G-buffer overwrites, and the only other
-        // raster pass is a full-screen tonemap.
+        // Only the UI blends; the G-buffer overwrites and tonemap is a
+        // full-screen overwrite.
+        bool const blend_on = config.alpha_blend;
+
         array<VkPipelineColorBlendAttachmentState, kMaxColourAttachments> blend_attachments{};
         for (size_t index = 0; index < config.colour_formats.size(); ++index)
         {
             blend_attachments[index] = VkPipelineColorBlendAttachmentState{
-                .blendEnable         = VK_FALSE,
-                .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-                .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+                .blendEnable         = blend_on ? VK_TRUE : VK_FALSE,
+                .srcColorBlendFactor = blend_on ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
+                .dstColorBlendFactor =
+                    blend_on ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
                 .colorBlendOp        = VK_BLEND_OP_ADD,
                 .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-                .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+                .dstAlphaBlendFactor =
+                    blend_on ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO,
                 .alphaBlendOp        = VK_BLEND_OP_ADD,
                 .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,

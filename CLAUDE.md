@@ -58,7 +58,8 @@ be visible in this repository's code or history, so ask rather than infer intent
 G-buffer pass, compute light clustering, compute lighting and a tonemap pass,
 drawing a procedural ship corridor lit by a few dozen point lights. No textures,
 shadows or asset loading yet — all geometry is generated in code from one cube
-mesh, and every material is flat.
+mesh, and every material is flat. A Dear ImGui overlay shows frame and per-pass
+GPU timings, graphed with ImPlot.
 
 ```
 src/
@@ -77,7 +78,12 @@ src/
     bindless.{hpp,cpp}   the one global descriptor set
     buffer.{hpp,cpp}     device-local (staged) and host-mapped buffers
     image.{hpp,cpp}      any screen-sized target: G-buffer, HDR, depth
-    swapchain.{hpp,cpp}  swapchain, images, views, recreation
+    swapchain.{hpp,cpp}  swapchain, images, views (scene and UI), recreation
+    timestamps.{hpp,cpp} GPU timestamp queries, one range per frame in flight
+  ui/
+    imgui_layer.{hpp,cpp}  ImGui + ImPlot contexts, backends; the renderer's Overlay
+    imgui_vulkan.{hpp,cpp} forked ImGui Vulkan backend: VMA, bindless, Slang
+    stats_window.{hpp,cpp} frame timing history and the window graphing it
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
     scene.{hpp,cpp}      f64 world: test corridor, objects, lights
@@ -90,6 +96,7 @@ shaders/
   cluster_build.slang    compute: lights -> froxels
   lighting.slang         compute: shade from the cluster's lights
   tonemap.slang          HDR -> swapchain
+  imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
   lib/
     bindless.slang       the descriptor arrays; mirrors vulkan/bindless.hpp
     gpu_types.slang      mirrors render/gpu_types.hpp
@@ -106,8 +113,8 @@ only include root, so a bare name would be ambiguous about where it lives.
 Headers sit beside their `.cpp`; there is no separate `include/` tree, because
 nothing here is consumed as a library.
 
-`App`'s members are declared window-first so they destruct in reverse: renderer,
-swapchain, device, instance, window. `~App` calls `wait_idle()` before any of
+`App`'s members are declared window-first so they destruct in reverse: UI,
+renderer, swapchain, device, instance, window. `~App` calls `wait_idle()` before any of
 that runs. Every `shutdown()` checks its handle, so a partially constructed
 `App` tears down correctly.
 
@@ -157,8 +164,23 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   per-frame; `render_finished` semaphores are **per swapchain image**, because
   a frame index maps to a different image over time and signalling a semaphore
   that still has a pending wait is invalid.
-- **MAILBOX present mode where offered**, FIFO otherwise. FIFO is the only mode
-  guaranteed to exist.
+- **MAILBOX present mode where offered**, FIFO (vsync) otherwise. FIFO is the
+  only mode guaranteed to exist.
+- **The UI is colour-correct on either view; the view decides the blend
+  space.** `shaders/imgui.slang` decodes ImGui's sRGB vertex colours to linear,
+  treats every texture as linear (ImGui's own are created `_SRGB` so the sampler
+  decodes them), and multiplies. Written to an `_SRGB` target that goes out
+  as-is; written to a UNORM target, `push.ui_encode_srgb` has the shader encode
+  it. Only blending differs: sRGB-space through UNORM, linear-space through
+  sRGB.
+- **The UI prefers a UNORM view of the sRGB swapchain,** because ImGui's styles
+  and anti-aliasing were tuned for sRGB-space blending. The swapchain is created
+  with `VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR` and a format list, and
+  `ui_view()` / `ui_format()` hand out the UNORM twin. The extension
+  (`VK_KHR_swapchain_mutable_format`) is optional: without it the UI uses the
+  sRGB view and blends in linear space, which lightens translucent elements
+  slightly. `ENCKE_UI_SRGB` forces that path so it stays tested on hardware that
+  has the extension.
 - **The clear colour is linear.** The swapchain is `B8G8R8A8_SRGB`, so the
   hardware encodes on write. Linear `(0.03, 0.12, 0.18)` lands as sRGB
   `(48, 97, 118)` on screen — verified by screen capture, not assumed.
@@ -170,7 +192,7 @@ within a single session, never as a figure worth recording.
 
 ## Clustered deferred — built, first draft
 
-Four passes per frame, orchestrated in `render/renderer.cpp`:
+Four passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 
 | Pass | Kind | Does |
 | --- | --- | --- |
@@ -178,6 +200,67 @@ Four passes per frame, orchestrated in `render/renderer.cpp`:
 | clusters | compute | one thread per froxel, tests every light against its view-space AABB |
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
 | tonemap | raster | full-screen triangle, exposure + ACES, into the sRGB swapchain |
+| overlay | raster | caller-recorded UI, its own rendering scope on the UI view, `LOAD` |
+
+The overlay is an interface (`Renderer::Overlay`) so the renderer never includes
+ImGui. It has two phases: `prepare(command, slot)` outside any rendering scope,
+for texture uploads and vertex data, then `record(command)` inside. The scope
+is separate from tonemap's because it may use a different view of the same
+image, and a colour-attachment barrier precedes it because its `LOAD` reads what
+tonemap stored.
+
+### The ImGui renderer backend is a fork
+
+`ui/imgui_vulkan` is `backends/imgui_impl_vulkan.cpp` from ImGui
+`v1.92.9b-docking`, forked and version-locked. It carries ImGui's MIT notice in
+both files, which the licence requires, and it stays there. Upgrading ImGui
+means reading upstream's changes to that file and porting what applies, not
+replacing ours.
+
+What changed, and what depends on it:
+
+- **Memory is VMA** through `Buffer` and `Image`. No `vkAllocateMemory`.
+- **Textures are bindless.** `ImTextureID` is a sampled-image handle plus one,
+  because ImGui reserves 0 and slot 0 is live; build it with
+  `ImGuiVulkan::texture_id(handle)`. Any renderer target registered in the set
+  can be drawn with `ImGui::Image`. Its layout must be `READ_ONLY_OPTIMAL` when
+  the overlay runs, *and* the barrier that put it there must include
+  `FRAGMENT_SHADER` in its destination. The G-buffer barriers currently name
+  compute only, so a debug window showing them needs that widened, and the next
+  frame's entry barriers need `FRAGMENT_SHADER` in their source for the
+  write-after-read.
+- **Uploads are recorded in `prepare()`**, not submitted separately with
+  `vkQueueWaitIdle`. Staging buffers and destroyed textures go on the slot's
+  retire list and are freed when that slot next comes round. That is safe
+  whatever ImGui's `UnusedFrames` says, because every frame submitted before it
+  has retired by then.
+- **It shares the pipeline layout.** The UI's push fields live in `gpu::Push`
+  (`ui_transform`, `ui_texture`, `ui_sampler`, `ui_encode_srgb`), following the
+  one-struct-for-every-pass convention.
+- **Multi-viewport is gone,** along with the `ImGui_ImplVulkanH_*` window
+  helpers. Secondary OS windows would need a swapchain each, ported onto
+  `VulkanSwapchain`. Docking alone needs nothing from the renderer.
+
+`BindlessSet::release_sampled_image` exists for it: ImGui can destroy and
+recreate textures when the font atlas rebuilds, and sampled-image slots now go
+on a free list for reuse.
+
+### GPU timings
+
+`vulkan/timestamps` stamps the frame as a chain: `begin()` at the start, then
+`mark("label")` after each pass closes the section since the previous stamp.
+Every stamp is written at `ALL_COMMANDS`, so the sections tile the frame with no
+overlap — which also means they hide any overlap the GPU would have found. The
+sum is the frame's GPU time. Results are read after the slot's fence, so they
+trail the recorded frame by `kFramesInFlight`.
+
+The G-buffer section includes any wait on the acquire semaphore, because that
+semaphore gates `COLOR_ATTACHMENT_OUTPUT` and the G-buffer is the first pass to
+reach it. A G-buffer figure that swings with present mode is that wait, not
+rasterisation.
+
+"CPU busy" in the stats window is frame time minus what `draw()` spent blocked
+in the fence wait, acquire and present.
 
 ### The invariants that make it correct
 
@@ -195,6 +278,9 @@ Four passes per frame, orchestrated in `render/renderer.cpp`:
 - **`ENCKE_FIXED_TIME` pins animation** so two captures can be compared. The
   camera animates on wall-clock, so without it a comparison across runs is
   comparing camera positions, not renderer changes.
+- **`ENCKE_NO_UI` (or F1) hides the overlay**, and a byte comparison needs it:
+  the stats window's numbers change every frame, so two captures with it
+  showing never match.
 
 ### Parameters, and why these
 
@@ -218,6 +304,10 @@ exterior lights and want different treatment anyway.
 - No shadows, so the sun is switched off: a directional light with no occlusion
   lights the inside of a sealed corridor. The code path is wired and ready.
 - Exposure is a hand-tuned constant, not an exposure model.
+- Host-visible buffers are never flushed. `Buffer::init_mapped` lets VMA pick
+  the memory type, and nothing calls `vmaFlushAllocation`, which is only
+  correct while that type is `HOST_COHERENT`. It is on this NVIDIA driver; it
+  is not guaranteed. The UI's vertex and staging buffers inherit this.
 
 ## Renderer architecture — the decision behind it
 
@@ -382,7 +472,8 @@ rebuilds every shader that imported it without any dependency listed by hand.
 
 mimalloc backs `operator new`/`delete` (via `mimalloc-new-delete.h` in
 `src/core/memory.cpp`, which must stay the only translation unit that includes
-it), SDL3 through `SDL_SetMemoryFunctions`, and Vulkan host allocations through
+it), SDL3 through `SDL_SetMemoryFunctions`, Dear ImGui and ImPlot through
+`ImGui::SetAllocatorFunctions`, and Vulkan host allocations through
 `memory::vulkan_callbacks()`.
 
 `ENCKE_USE_MIMALLOC` gates all of it. When off, `vulkan_callbacks()` returns
@@ -415,8 +506,9 @@ redzones and a free quarantine that mimalloc has no equivalent for.
 ### Built by CPM, not vcpkg, and why
 
 mimalloc 3.5.3 comes from `CPMAddPackage` in `CMakeLists.txt`, with `CPM.cmake`
-vendored at `cmake/CPM.cmake` and sources cached in `.cpm/` (gitignored). It is
-the **only** CPM dependency; everything else stays in the vcpkg manifest.
+vendored at `cmake/CPM.cmake` and sources cached in `.cpm/` (gitignored). Dear
+ImGui and ImPlot are the only other CPM dependencies, for a reason of the same
+kind (see *Dependencies*); everything else stays in the vcpkg manifest.
 
 The reason is one build-time define. **`MI_MINGW_UCRT64` must be set or mimalloc
 aborts at startup** with `assertion failed: "mi_out_default == NULL"`.
@@ -582,9 +674,29 @@ backend, so it has no equivalent failure mode.
 
 ## Dependencies and build settings that constrain code
 
-All deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
+Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
-`sdl3`, `glm`.
+`sdl3`, `glm`. Three come from CPM instead: mimalloc (see *Allocator*), and
+Dear ImGui and ImPlot.
+
+- **Dear ImGui is the docking branch** (`v1.92.9b-docking`), built from bare
+  sources into the `encke_imgui` static library alongside ImPlot `v1.0`.
+  Docking and multi-viewport are *not* enabled; the branch is taken so turning
+  them on later is a flag, not a dependency change. The vcpkg port was the
+  obvious route and is unusable: its `vulkan-binding` feature links
+  `Vulkan::Vulkan`, which collides with volk exactly as described below. Only
+  the SDL3 platform backend is built from upstream; the Vulkan renderer backend
+  is our fork (see *The ImGui renderer backend is a fork*). ImPlot follows ImGui
+  into CPM because it must compile against the same ImGui.
+- **`IMGUI_DISABLE_OBSOLETE_FUNCTIONS` cannot be set.** ImPlot v1.0 still calls
+  the pre-1.92 `AddPolyline(flags, thickness)` order, which that define deletes.
+- Their headers are included `SYSTEM`, so this project's warning set does not
+  fire inside them, and their sources build with `-w`.
+- **`imgui.ini` is written beside the executable** (`SDL_GetBasePath()`), inside
+  the gitignored build tree, not in the working directory.
+- **ImGui tables: avoid `ImGuiTableFlags_SizingStretchProp`** on a table that
+  appears with no measured content. Its first-frame weights come out 0/0, and
+  UBSan catches the NaN in ImGui's window content-size maths a frame later.
 
 - **volk owns every Vulkan entry point.** `VK_NO_PROTOTYPES` is defined
   globally and the target links `Vulkan::Headers`, never `Vulkan::Vulkan`.

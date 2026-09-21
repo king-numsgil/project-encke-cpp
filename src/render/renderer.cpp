@@ -11,6 +11,7 @@
 #include "vulkan/device.hpp"
 #include "vulkan/swapchain.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -59,6 +60,8 @@ namespace encke
         constexpr f32 kExposure = 0.06f;
 
         constexpr u64 kNoTimeout = ~0ULL;
+
+        using Clock = std::chrono::steady_clock;
 
         struct Transition
         {
@@ -242,6 +245,7 @@ namespace encke
             .bindings           = kVertexBindings,
             .attributes         = kVertexAttributes,
             .cull_mode          = VK_CULL_MODE_BACK_BIT,
+            .alpha_blend        = false,
             .set_layout         = bindless_.layout(),
             .push_constant_size = sizeof(gpu::Push),
         };
@@ -253,6 +257,7 @@ namespace encke
             .colour_formats     = span<VkFormat const>{&swapchain_format, 1},
             .depth_format       = VK_FORMAT_UNDEFINED,
             .cull_mode          = VK_CULL_MODE_NONE,
+            .alpha_blend        = false,
             .set_layout         = bindless_.layout(),
             .push_constant_size = sizeof(gpu::Push),
         };
@@ -273,6 +278,11 @@ namespace encke
             !tonemap_pipeline_.init(device, tonemap_config) ||
             !cluster_pipeline_.init(device, cluster_config) ||
             !lighting_pipeline_.init(device, lighting_config))
+        {
+            return false;
+        }
+
+        if (!timestamps_.init(device, kFramesInFlight))
         {
             return false;
         }
@@ -515,7 +525,7 @@ namespace encke
     }
 
     bool Renderer::record(VkCommandBuffer command, VulkanSwapchain const& swapchain,
-                          u32 image_index, Scene const& scene)
+                          u32 image_index, Scene const& scene, Overlay* overlay)
     {
         VkCommandBufferBeginInfo const begin{
             .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -534,6 +544,11 @@ namespace encke
         VkExtent2D const      extent    = swapchain.extent();
         FrameResources const& resources = frames_[frame_];
 
+        // Each mark() below closes the section since the previous stamp. The
+        // G-buffer section also absorbs any wait on the acquire semaphore,
+        // which its colour output stage is gated on -- see CLAUDE.md.
+        timestamps_.begin(command, frame_);
+
         gpu::Push push{
             .frame            = resources.frame_handle,
             .objects          = resources.objects_handle,
@@ -551,6 +566,11 @@ namespace encke
             .debug_view       = static_cast<u32>(debug_view_),
             .gbuffer_motion   = motion_handle_,
             .pad0             = 0,
+            .ui_transform     = f32vec4{0.0f},
+            .ui_texture       = BindlessSet::kInvalid,
+            .ui_sampler       = BindlessSet::kInvalid,
+            .ui_encode_srgb   = 0,
+            .pad1             = 0,
         };
 
         // The pipeline layouts are identical in their set and push ranges, so
@@ -649,6 +669,8 @@ namespace encke
             vkCmdEndRendering(command);
         }
 
+        timestamps_.mark(command, "G-buffer");
+
         // -- 3. G-buffer -> readable, HDR -> storage --------------------------
         {
             constexpr VkPipelineStageFlags2 kWrite = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -690,6 +712,8 @@ namespace encke
                            sizeof(push), &push);
         vkCmdDispatch(command, groups(kClusterCount, 64), 1, 1);
 
+        timestamps_.mark(command, "clusters");
+
         {
             VkMemoryBarrier2 const raw = compute_to_compute(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                                                             VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
@@ -701,6 +725,8 @@ namespace encke
         vkCmdPushConstants(command, lighting_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                            sizeof(push), &push);
         vkCmdDispatch(command, groups(extent.width, 8), groups(extent.height, 8), 1);
+
+        timestamps_.mark(command, "lighting");
 
         // -- 6. HDR -> sampled, swapchain -> attachment ----------------------
         {
@@ -750,7 +776,58 @@ namespace encke
             vkCmdEndRendering(command);
         }
 
-        // -- 8. present ------------------------------------------------------
+        timestamps_.mark(command, "tonemap");
+
+        // -- 8. overlay ------------------------------------------------------
+        // A separate rendering scope because it may write through a different
+        // view: UNORM over the same sRGB image, so the UI can blend in the
+        // space it was designed in. Loading what tonemap stored is a read of
+        // the same attachment memory, so its writes must be made visible first.
+        if (overlay != nullptr)
+        {
+            // Texture uploads and vertex data; must precede the scope.
+            overlay->prepare(command, frame_);
+        }
+
+        {
+            constexpr VkPipelineStageFlags2 kOutput = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+            Transition const reload[]{
+                {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kOutput,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, kOutput,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT},
+            };
+            barrier(command, reload);
+
+            VkRenderingAttachmentInfo colour =
+                colour_attachment(swapchain.ui_view(image_index), {{0.0f, 0.0f, 0.0f, 1.0f}});
+            colour.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+
+            VkRenderingInfo const rendering{
+                .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .pNext                = nullptr,
+                .flags                = 0,
+                .renderArea           = {.offset = {0, 0}, .extent = extent},
+                .layerCount           = 1,
+                .viewMask             = 0,
+                .colorAttachmentCount = 1,
+                .pColorAttachments    = &colour,
+                .pDepthAttachment     = nullptr,
+                .pStencilAttachment   = nullptr,
+            };
+
+            vkCmdBeginRendering(command, &rendering);
+            if (overlay != nullptr)
+            {
+                overlay->record(command);
+            }
+            vkCmdEndRendering(command);
+        }
+
+        timestamps_.mark(command, "UI");
+
+        // -- 9. present ------------------------------------------------------
         {
             Transition const present[]{
                 {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -770,20 +847,36 @@ namespace encke
         return true;
     }
 
-    FrameResult Renderer::draw(VulkanSwapchain const& swapchain, Scene const& scene)
+    FrameResult Renderer::draw(VulkanSwapchain const& swapchain, Scene const& scene,
+                               Overlay* overlay)
     {
         VkDevice const device = device_->handle();
 
-        VkResult result = vkWaitForFences(device, 1, &in_flight_[frame_], VK_TRUE, kNoTimeout);
+        blocked_ms_ = 0.0;
+        auto const blocked = [this](auto const& call) {
+            auto const start  = Clock::now();
+            auto const result = call();
+            blocked_ms_ += std::chrono::duration<f64, std::milli>(Clock::now() - start).count();
+            return result;
+        };
+
+        VkResult result = blocked([&] {
+            return vkWaitForFences(device, 1, &in_flight_[frame_], VK_TRUE, kNoTimeout);
+        });
         if (result != VK_SUCCESS)
         {
             log::vk_error("vkWaitForFences", result);
             return FrameResult::Error;
         }
 
+        // The fence covers the queries this slot wrote last time round.
+        timestamps_.collect(frame_);
+
         u32 image_index = 0;
-        result = vkAcquireNextImageKHR(device, swapchain.handle(), kNoTimeout,
-                                       image_available_[frame_], VK_NULL_HANDLE, &image_index);
+        result = blocked([&] {
+            return vkAcquireNextImageKHR(device, swapchain.handle(), kNoTimeout,
+                                         image_available_[frame_], VK_NULL_HANDLE, &image_index);
+        });
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR)
         {
@@ -806,7 +899,7 @@ namespace encke
         VkCommandBuffer const command = commands_[frame_];
         vkResetCommandBuffer(command, 0);
 
-        if (!record(command, swapchain, image_index, scene))
+        if (!record(command, swapchain, image_index, scene, overlay))
         {
             return FrameResult::Error;
         }
@@ -871,7 +964,9 @@ namespace encke
             .pResults           = nullptr,
         };
 
-        result = vkQueuePresentKHR(device_->present_queue(), &present);
+        // FIFO blocks here, or in the next acquire, once the queue of
+        // presentable images is full.
+        result = blocked([&] { return vkQueuePresentKHR(device_->present_queue(), &present); });
 
         frame_ = (frame_ + 1) % kFramesInFlight;
 
@@ -915,6 +1010,8 @@ namespace encke
         }
 
         VkDevice const device = device_->handle();
+
+        timestamps_.shutdown();
 
         gbuffer_pipeline_.shutdown();
         tonemap_pipeline_.shutdown();

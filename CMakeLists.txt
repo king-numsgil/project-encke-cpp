@@ -32,6 +32,10 @@ find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
+set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
+    "Shared download cache so each build directory does not refetch sources")
+include(cmake/CPM.cmake)
+
 if(ENCKE_USE_MIMALLOC)
     # Built via CPM rather than vcpkg, because mimalloc 3.x needs a build-time
     # define that vcpkg cannot deliver. Its CMake sets MI_MINGW_UCRT64 only from
@@ -40,10 +44,6 @@ if(ENCKE_USE_MIMALLOC)
     # process-init paths -- a DLL_PROCESS_ATTACH callback registered through
     # data sections plus a constructor attribute -- and mimalloc aborts on
     # startup with `assertion failed: "mi_out_default == NULL"`.
-    set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
-        "Shared download cache so each build directory does not refetch sources")
-    include(cmake/CPM.cmake)
-
     CPMAddPackage(
         NAME mimalloc
         GITHUB_REPOSITORY microsoft/mimalloc
@@ -78,6 +78,64 @@ if(ENCKE_USE_MIMALLOC)
     endforeach()
 endif()
 
+# --- Dear ImGui (docking branch) and ImPlot ------------------------------------
+
+# CPM, not vcpkg. The vcpkg port's vulkan-binding links Vulkan::Vulkan, whose
+# import library defines vkCreateInstance and friends as real symbols -- the same
+# multiple-definition clash with volk that the encke target avoids below. So the
+# sources are fetched bare and built here. ImPlot has to follow, because it must
+# compile against this exact ImGui rather than vcpkg's.
+#
+# Only the SDL3 platform backend comes from upstream. The Vulkan renderer backend
+# is a fork in src/ui/imgui_vulkan, version-locked to this tag.
+#
+# Docking branch for the docking and multi-viewport features. Neither is enabled
+# yet; taking the branch now keeps a later switch from being a dependency change.
+CPMAddPackage(
+    NAME imgui
+    GITHUB_REPOSITORY ocornut/imgui
+    GIT_TAG v1.92.9b-docking
+    DOWNLOAD_ONLY YES
+)
+
+CPMAddPackage(
+    NAME implot
+    GITHUB_REPOSITORY epezent/implot
+    GIT_TAG v1.0
+    DOWNLOAD_ONLY YES
+)
+
+add_library(encke_imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    # The Vulkan renderer backend is not built from here: encke carries a fork
+    # of it in src/ui/imgui_vulkan, on VMA and the bindless set.
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+
+    ${implot_SOURCE_DIR}/implot.cpp
+    ${implot_SOURCE_DIR}/implot_demo.cpp
+    ${implot_SOURCE_DIR}/implot_items.cpp
+)
+
+# SYSTEM, so our -Wold-style-cast and -Wconversion do not fire inside their
+# headers wherever encke includes them.
+target_include_directories(encke_imgui SYSTEM PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+    ${implot_SOURCE_DIR}
+)
+
+# Not IMGUI_DISABLE_OBSOLETE_FUNCTIONS: ImPlot v1.0 still calls the old
+# AddPolyline(flags, thickness) argument order, which that define deletes.
+
+target_link_libraries(encke_imgui PUBLIC SDL3::SDL3)
+
+# Not ours to fix; keep their diagnostics out of our build output.
+target_compile_options(encke_imgui PRIVATE -w)
+
 add_executable(encke
     src/main.cpp
     src/app.cpp
@@ -93,6 +151,10 @@ add_executable(encke
     src/render/renderer.cpp
     src/render/scene.cpp
 
+    src/ui/imgui_layer.cpp
+    src/ui/imgui_vulkan.cpp
+    src/ui/stats_window.cpp
+
     src/vulkan/allocator.cpp
     src/vulkan/bindless.cpp
     src/vulkan/buffer.cpp
@@ -100,6 +162,7 @@ add_executable(encke
     src/vulkan/device.cpp
     src/vulkan/image.cpp
     src/vulkan/swapchain.cpp
+    src/vulkan/timestamps.cpp
 )
 
 target_include_directories(encke PRIVATE src)
@@ -152,10 +215,12 @@ encke_add_shader(ENCKE_GBUFFER_SPV shaders/gbuffer.slang)
 encke_add_shader(ENCKE_CLUSTER_SPV shaders/cluster_build.slang)
 encke_add_shader(ENCKE_LIGHTING_SPV shaders/lighting.slang)
 encke_add_shader(ENCKE_TONEMAP_SPV shaders/tonemap.slang)
+encke_add_shader(ENCKE_IMGUI_SPV shaders/imgui.slang)
 
 add_custom_target(encke_shaders DEPENDS
     "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
     "${ENCKE_LIGHTING_SPV}" "${ENCKE_TONEMAP_SPV}"
+    "${ENCKE_IMGUI_SPV}"
 )
 add_dependencies(encke encke_shaders)
 
@@ -176,6 +241,7 @@ target_link_libraries(encke PUBLIC
     GPUOpen::VulkanMemoryAllocator
     SDL3::SDL3
     glm::glm
+    encke_imgui
 )
 
 if(ENCKE_USE_MIMALLOC)

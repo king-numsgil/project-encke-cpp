@@ -16,6 +16,38 @@ namespace encke
             VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         };
 
+        // Lets the swapchain hand out a UNORM view of its sRGB images, so the
+        // UI can blend in sRGB space as ImGui's styles assume. Optional:
+        // without it the UI draws through the sRGB view, still colour-correct
+        // because its shader decodes, but blending in linear space.
+        constexpr char const* kMutableFormatExtension = VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME;
+
+        bool has_extension(VkPhysicalDevice device, char const* name)
+        {
+            u32 count = 0;
+            if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
+            {
+                return false;
+            }
+
+            vector<VkExtensionProperties> available(count);
+            if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) !=
+                VK_SUCCESS)
+            {
+                return false;
+            }
+
+            for (VkExtensionProperties const& extension : available)
+            {
+                if (std::strcmp(extension.extensionName, name) == 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         QueueFamilies find_queue_families(VkPhysicalDevice device, VkSurfaceKHR surface)
         {
             QueueFamilies families;
@@ -52,32 +84,9 @@ namespace encke
 
         bool has_required_extensions(VkPhysicalDevice device)
         {
-            u32 count = 0;
-            if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS)
-            {
-                return false;
-            }
-
-            vector<VkExtensionProperties> available(count);
-            if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, available.data()) !=
-                VK_SUCCESS)
-            {
-                return false;
-            }
-
             for (char const* const required : kRequiredDeviceExtensions)
             {
-                bool found = false;
-                for (VkExtensionProperties const& extension : available)
-                {
-                    if (std::strcmp(extension.extensionName, required) == 0)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-
-                if (!found)
+                if (!has_extension(device, required))
                 {
                     return false;
                 }
@@ -293,7 +302,34 @@ namespace encke
                   VK_API_VERSION_MINOR(best_properties.apiVersion),
                   VK_API_VERSION_PATCH(best_properties.apiVersion));
 
-        families_ = find_queue_families(physical_, context.surface());
+        properties_ = best_properties;
+        families_   = find_queue_families(physical_, context.surface());
+
+        {
+            u32 family_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);
+            vector<VkQueueFamilyProperties> family_properties(family_count);
+            vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count,
+                                                     family_properties.data());
+            timestamp_valid_bits_ = family_properties[*families_.graphics].timestampValidBits;
+        }
+
+        vector<char const*> extensions(std::begin(kRequiredDeviceExtensions),
+                                       std::end(kRequiredDeviceExtensions));
+
+        // ENCKE_UI_SRGB takes the path a GPU without the extension would, so
+        // the sRGB-target UI stays exercised on hardware that has it.
+        bool const force_srgb_ui  = std::getenv("ENCKE_UI_SRGB") != nullptr;
+        mutable_swapchain_format_ = !force_srgb_ui && has_extension(physical_, kMutableFormatExtension);
+        if (mutable_swapchain_format_)
+        {
+            extensions.push_back(kMutableFormatExtension);
+        }
+        else
+        {
+            log::info("%s -- the UI draws through the sRGB view and blends in linear space",
+                      force_srgb_ui ? "ENCKE_UI_SRGB set" : "no swapchain mutable format");
+        }
 
         // Graphics and present are usually the same family; submitting the
         // same index twice is invalid, so deduplicate.
@@ -340,8 +376,8 @@ namespace encke
             .pQueueCreateInfos       = queue_infos.data(),
             .enabledLayerCount       = 0,
             .ppEnabledLayerNames     = nullptr,
-            .enabledExtensionCount   = static_cast<u32>(std::size(kRequiredDeviceExtensions)),
-            .ppEnabledExtensionNames = kRequiredDeviceExtensions,
+            .enabledExtensionCount   = static_cast<u32>(extensions.size()),
+            .ppEnabledExtensionNames = extensions.data(),
             // pEnabledFeatures must stay null when VkPhysicalDeviceFeatures2
             // is chained into pNext.
             .pEnabledFeatures        = nullptr,
@@ -486,9 +522,12 @@ namespace encke
             device_ = VK_NULL_HANDLE;
         }
 
-        physical_       = VK_NULL_HANDLE;
-        graphics_queue_ = VK_NULL_HANDLE;
-        present_queue_  = VK_NULL_HANDLE;
-        families_       = QueueFamilies{};
+        physical_                 = VK_NULL_HANDLE;
+        graphics_queue_           = VK_NULL_HANDLE;
+        present_queue_            = VK_NULL_HANDLE;
+        families_                 = QueueFamilies{};
+        properties_               = VkPhysicalDeviceProperties{};
+        timestamp_valid_bits_     = 0;
+        mutable_swapchain_format_ = false;
     }
 }

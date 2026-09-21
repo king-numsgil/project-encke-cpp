@@ -14,6 +14,9 @@ namespace encke
         // Digit key 1..9 pressed this frame, as 0..8; -1 when none. Drives
         // the renderer's debug views.
         i32 debug_view = -1;
+
+        // F1 pressed this frame: show or hide the UI overlay.
+        bool toggle_ui = false;
     };
 
     class Window
@@ -32,6 +35,10 @@ namespace encke
 
         FrameEvents poll();
 
+        // Sees every event poll() drains, before poll() interprets it. This is
+        // how the UI gets its input without the window knowing about it.
+        void set_event_hook(function<void(SDL_Event const&)> hook) { hook_ = std::move(hook); }
+
         SDL_Window* handle() const { return window_; }
 
         // Pixels, not logical units -- these differ on a scaled display and
@@ -46,5 +53,7 @@ namespace encke
         SDL_Window* window_        = nullptr;
         bool        sdl_started_   = false;
         bool        minimized_     = false;
+
+        function<void(SDL_Event const&)> hook_;
     };
 }

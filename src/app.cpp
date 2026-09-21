@@ -107,6 +107,13 @@ namespace encke
             return false;
         }
 
+        if (!ui_.init(window_, allocator_, device_, renderer_.bindless(), swapchain_,
+                      Renderer::kFramesInFlight))
+        {
+            return false;
+        }
+        window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
+
         scene_.build_test_corridor();
         log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
 
@@ -117,8 +124,15 @@ namespace encke
         }
 
         renderer_.set_debug_view(initial_debug_view());
-        log::info("debug view: %s (keys 1-%u to switch)", debug_view_name(renderer_.debug_view()),
-                  kDebugViewCount);
+        log::info("debug view: %s (keys 1-%u to switch, F1 toggles the UI)",
+                  debug_view_name(renderer_.debug_view()), kDebugViewCount);
+
+        // Any overlay makes two captures differ, which defeats comparing the
+        // clustered and brute-force views byte for byte.
+        if (std::getenv("ENCKE_NO_UI") != nullptr)
+        {
+            show_ui_ = false;
+        }
 
         last_report_ms_ = log::elapsed_ms();
         return true;
@@ -170,6 +184,22 @@ namespace encke
         last_report_ms_ = now;
     }
 
+    void App::draw_ui()
+    {
+        ui_.begin_frame();
+
+        if (show_ui_)
+        {
+            stats_.draw(StatsWindow::Info{
+                .device       = device_.properties().deviceName,
+                .present_mode = swapchain_.present_mode_name(),
+                .extent       = swapchain_.extent(),
+            });
+        }
+
+        ui_.end_frame();
+    }
+
     void App::run()
     {
         bool running = true;
@@ -184,7 +214,14 @@ namespace encke
                 continue;
             }
 
-            if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugViewCount)
+            if (events.toggle_ui)
+            {
+                show_ui_ = !show_ui_;
+            }
+
+            // A digit typed into a UI text field is not a view switch.
+            if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugViewCount &&
+                !ui_.wants_keyboard())
             {
                 renderer_.set_debug_view(static_cast<DebugView>(events.debug_view));
                 log::info("debug view: %s", debug_view_name(renderer_.debug_view()));
@@ -192,8 +229,10 @@ namespace encke
 
             if (window_.minimized())
             {
-                // Nothing presentable; block rather than spin.
+                // Nothing presentable; block rather than spin. The gap is not
+                // a frame, so do not let it register as one.
                 SDL_WaitEvent(nullptr);
+                last_frame_.reset();
                 continue;
             }
 
@@ -215,12 +254,32 @@ namespace encke
                 fixed_time_.value_or(static_cast<f64>(log::elapsed_ms()) / 1000.0);
             scene_.update(seconds);
 
-            switch (renderer_.draw(swapchain_, scene_))
+            draw_ui();
+
+            FrameResult const result = renderer_.draw(swapchain_, scene_, &ui_);
+
+            switch (result)
             {
             case FrameResult::Ok:
+            {
                 ++frames_;
                 report_throughput();
+
+                // Wall clock, not `seconds`: ENCKE_FIXED_TIME pins animation,
+                // not the passage of real time the stats are measuring.
+                auto const now = std::chrono::steady_clock::now();
+                if (last_frame_.has_value())
+                {
+                    f64 const frame_ms =
+                        std::chrono::duration<f64, std::milli>(now - *last_frame_).count();
+                    f64 const stamp =
+                        std::chrono::duration<f64>(now.time_since_epoch()).count();
+                    stats_.record(stamp, frame_ms, renderer_.blocked_ms(),
+                                  renderer_.gpu_timings());
+                }
+                last_frame_ = now;
                 break;
+            }
 
             case FrameResult::OutOfDate:
                 device_.wait_idle();
