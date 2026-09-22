@@ -150,6 +150,7 @@ add_executable(encke
     src/render/pipeline.cpp
     src/render/renderer.cpp
     src/render/scene.cpp
+    src/render/shadows.cpp
 
     src/ui/image_window.cpp
     src/ui/imgui_layer.cpp
@@ -198,7 +199,10 @@ function(encke_add_shader out_spv source)
                 # 41012 is "profile implicitly upgraded": Slang's own capability
                 # bookkeeping, not extra SPIR-V capabilities. The emitted module
                 # is unchanged.
-                -warnings-disable 41012
+                # 39001 is "explicit binding overlap": lib/bindless.slang views
+                # the sampler binding as both plain and comparison samplers on
+                # purpose, which is legal descriptor aliasing in Vulkan.
+                -warnings-disable 41012,39001
                 -depfile "${spv}.d"
                 -o "${spv}"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
@@ -218,11 +222,13 @@ encke_add_shader(ENCKE_LIGHTING_SPV shaders/lighting.slang)
 encke_add_shader(ENCKE_TONEMAP_SPV shaders/tonemap.slang)
 encke_add_shader(ENCKE_DEBUG_VIEWS_SPV shaders/debug_views.slang)
 encke_add_shader(ENCKE_IMGUI_SPV shaders/imgui.slang)
+encke_add_shader(ENCKE_SHADOW_DEPTH_SPV shaders/shadow_depth.slang)
 
 add_custom_target(encke_shaders DEPENDS
     "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
     "${ENCKE_LIGHTING_SPV}" "${ENCKE_TONEMAP_SPV}"
     "${ENCKE_DEBUG_VIEWS_SPV}" "${ENCKE_IMGUI_SPV}"
+    "${ENCKE_SHADOW_DEPTH_SPV}"
 )
 add_dependencies(encke encke_shaders)
 

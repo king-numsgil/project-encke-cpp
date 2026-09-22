@@ -1,7 +1,9 @@
 #pragma once
 
+#include "render/config.hpp"
 #include "render/mesh.hpp"
 #include "render/pipeline.hpp"
+#include "render/shadows.hpp"
 #include "vulkan/bindless.hpp"
 #include "vulkan/buffer.hpp"
 #include "vulkan/image.hpp"
@@ -39,21 +41,24 @@ namespace encke
         ClusterHeat = 0,
         Normals     = 1,
         Motion      = 2,
+        Cascades    = 3,
     };
 
-    inline constexpr u32 kDebugWindowCount      = 3;
+    inline constexpr u32 kDebugWindowCount      = 4;
     inline constexpr u32 kFirstDebugWindowView  = 2;
 
-    // Clustered deferred, first draft. Per frame:
+    // Clustered deferred. Per frame:
     //
-    //   1. G-buffer   raster  albedo, normal, material, motion, depth; emissive
+    //   1. shadows    raster  depth only: the sun's cascades, then the chosen
+    //                         spot lights' maps
+    //   2. G-buffer   raster  albedo, normal, material, motion, depth; emissive
     //                         seeds the HDR target
-    //   2. clusters   compute assign lights to a 16x9x24 froxel grid
-    //   3. lighting   compute shade each pixel against its cluster's lights,
+    //   3. clusters   compute assign lights to the froxel grid
+    //   4. lighting   compute shade each pixel against its cluster's lights,
     //                         adding onto the HDR target
-    //   4. debug      compute one visualisation image per open debug window
-    //   5. tonemap    raster  HDR -> swapchain
-    //   6. overlay    raster  caller-recorded UI, through the swapchain's UI view
+    //   5. debug      compute one visualisation image per open debug window
+    //   6. tonemap    raster  HDR -> swapchain
+    //   7. overlay    raster  caller-recorded UI, through the swapchain's UI view
     class Renderer
     {
     public:
@@ -137,15 +142,22 @@ namespace encke
             Buffer frame;
             Buffer objects;
             Buffer lights;
+            Buffer shadow_views;
+            Buffer shadow_matrices;
 
-            u32 frame_handle   = BindlessSet::kInvalid;
-            u32 objects_handle = BindlessSet::kInvalid;
-            u32 lights_handle  = BindlessSet::kInvalid;
+            u32 frame_handle           = BindlessSet::kInvalid;
+            u32 objects_handle         = BindlessSet::kInvalid;
+            u32 lights_handle          = BindlessSet::kInvalid;
+            u32 shadow_views_handle    = BindlessSet::kInvalid;
+            u32 shadow_matrices_handle = BindlessSet::kInvalid;
         };
 
         bool create_targets(VkExtent2D extent);
         void register_targets(bool first_time);
-        void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources) const;
+        bool create_shadow_maps();
+
+        // Also plans this frame's shadows, which record() then draws.
+        void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources);
         bool record(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index,
                     Scene const& scene, Overlay* overlay);
         void destroy_image_semaphores();
@@ -187,13 +199,27 @@ namespace encke
 
         array<FrameResources, kFramesInFlight> frames_;
 
+        // Cascades first, then spots; fixed size, so not rebuilt on resize.
+        // Single-copy like the G-buffer: each frame's entry barrier waits on
+        // the previous frame's compute reads.
+        array<Image, config::kShadowViewCount> shadow_maps_;
+        array<u32, config::kShadowViewCount>   shadow_map_handles_{};
+        VkSampler                              shadow_sampler_        = VK_NULL_HANDLE;
+        u32                                    shadow_sampler_handle_ = BindlessSet::kInvalid;
+
+        // This frame's shadow views and, per view, the objects that may cast
+        // into it. Written by upload(), read by record().
+        ShadowPlan                                     shadow_plan_;
+        array<vector<u32>, config::kShadowViewCount>   shadow_casters_;
+
         GraphicsPipeline gbuffer_pipeline_;
+        GraphicsPipeline shadow_pipeline_;
         GraphicsPipeline tonemap_pipeline_;
         ComputePipeline  cluster_pipeline_;
         ComputePipeline  lighting_pipeline_;
         ComputePipeline  debug_pipeline_;
 
-        Mesh cube_;
+        array<Mesh, kMeshKindCount> meshes_;
 
         VkCommandPool command_pool_ = VK_NULL_HANDLE;
 

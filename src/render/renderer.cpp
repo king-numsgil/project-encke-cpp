@@ -4,6 +4,7 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "render/config.hpp"
 #include "render/gpu_types.hpp"
 #include "render/scene.hpp"
 #include "vulkan/allocator.hpp"
@@ -33,7 +34,7 @@ namespace encke
         constexpr VkFormat kDebugFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
         constexpr char const* kDebugImageNames[kDebugWindowCount]{
-            "debug: cluster heat", "debug: normals", "debug: motion",
+            "debug: cluster heat", "debug: normals", "debug: motion", "debug: cascades",
         };
 
         constexpr VkFormat kGBufferFormats[]{
@@ -45,27 +46,19 @@ namespace encke
         constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
         constexpr f32      kClearDepth  = 0.0f;
 
-        // -- clusters -------------------------------------------------------------
-        // Tuned for ship interiors: 16x9 tiles match a 16:9 screen, and 24
-        // logarithmic slices between 10 cm and 400 m put most of the depth
-        // resolution in the first few tens of metres, where a corridor or a
-        // bridge actually has lights. Past 400 m everything shares the last
-        // slice; lights that far away are exterior and will be handled
-        // differently anyway.
-        constexpr u32 kClustersX           = 16;
-        constexpr u32 kClustersY           = 9;
-        constexpr u32 kClustersZ           = 24;
-        constexpr u32 kClusterCount        = kClustersX * kClustersY * kClustersZ;
-        constexpr u32 kMaxLightsPerCluster = 64;
-        constexpr f32 kClusterNear         = 0.1f;
-        constexpr f32 kClusterFar          = 400.0f;
+        // Shadow maps are reversed-Z too, on the same format and clear.
+        constexpr VkFormat kShadowFormat = VK_FORMAT_D32_SFLOAT;
 
-        constexpr u32 kMaxObjects = 256;
-        constexpr u32 kMaxLights  = 1024;
-
-        // Placeholder until there is a proper exposure model. Chosen by eye
-        // for the test corridor.
-        constexpr f32 kExposure = 0.06f;
+        using config::kClusterCount;
+        using config::kClusterFar;
+        using config::kClusterNear;
+        using config::kClustersX;
+        using config::kClustersY;
+        using config::kClustersZ;
+        using config::kMaxLights;
+        using config::kMaxLightsPerCluster;
+        using config::kMaxObjects;
+        using config::kShadowViewCount;
 
         constexpr u64 kNoTimeout = ~0ULL;
 
@@ -88,7 +81,7 @@ namespace encke
         void barrier(VkCommandBuffer command, span<Transition const> transitions,
                      span<VkMemoryBarrier2 const> memory = {})
         {
-            array<VkImageMemoryBarrier2, 8> images{};
+            array<VkImageMemoryBarrier2, 16> images{};
             size_t const count = transitions.size();
 
             for (size_t i = 0; i < count; ++i)
@@ -153,6 +146,30 @@ namespace encke
             };
         }
 
+        VkRenderingAttachmentInfo depth_attachment(VkImageView view)
+        {
+            return VkRenderingAttachmentInfo{
+                .sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .pNext              = nullptr,
+                .imageView          = view,
+                .imageLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                .resolveMode        = VK_RESOLVE_MODE_NONE,
+                .resolveImageView   = VK_NULL_HANDLE,
+                .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .loadOp             = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                // Read later by lighting, so kept.
+                .storeOp            = VK_ATTACHMENT_STORE_OP_STORE,
+                .clearValue         = {.depthStencil = {kClearDepth, 0}},
+            };
+        }
+
+        // 1 / (1.2 * 2^EV100): the saturation-based exposure for a camera set
+        // to that EV at ISO 100.
+        f32 exposure_from_ev100(f32 ev100)
+        {
+            return 1.0f / (1.2f * std::exp2(ev100));
+        }
+
         void set_viewport(VkCommandBuffer command, VkExtent2D extent)
         {
             VkViewport const viewport = flipped_viewport(static_cast<f32>(extent.width),
@@ -179,6 +196,19 @@ namespace encke
             {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
              .offset = offsetof(Vertex, colour)},
         };
+
+        // The shadow pass reads position only, from the same vertex buffers.
+        constexpr VkVertexInputAttributeDescription kShadowAttributes[]{
+            {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
+             .offset = offsetof(Vertex, position)},
+        };
+
+        // Tessellation of the built-in meshes.
+        constexpr u32 kSphereSlices     = 48;
+        constexpr u32 kSphereStacks     = 24;
+        constexpr u32 kPlanetSlices     = 192;
+        constexpr f64 kPlanetFirstRing  = 0.25;   // metres of arc from the pole
+        constexpr f64 kPlanetRingGrowth = 1.08;
     }
 
     Renderer::~Renderer()
@@ -236,12 +266,44 @@ namespace encke
                 bindless_.add_storage_buffer(resources.objects.handle(), resources.objects.size());
             resources.lights_handle =
                 bindless_.add_storage_buffer(resources.lights.handle(), resources.lights.size());
+
+            if (!resources.shadow_views.init_mapped(
+                    allocator, kShadowViewCount * sizeof(gpu::ShadowView), storage) ||
+                !resources.shadow_matrices.init_mapped(
+                    allocator, u64{kShadowViewCount} * kMaxObjects * sizeof(f32mat4), storage))
+            {
+                return false;
+            }
+
+            resources.shadow_views_handle = bindless_.add_storage_buffer(
+                resources.shadow_views.handle(), resources.shadow_views.size());
+            resources.shadow_matrices_handle = bindless_.add_storage_buffer(
+                resources.shadow_matrices.handle(), resources.shadow_matrices.size());
+        }
+
+        if (!create_shadow_maps())
+        {
+            return false;
         }
 
         vector<Vertex> vertices;
         vector<u32>    indices;
+
         build_cube(vertices, indices);
-        if (!cube_.init(allocator, device, vertices, indices))
+        if (!meshes_[static_cast<u32>(MeshKind::Cube)].init(allocator, device, vertices, indices))
+        {
+            return false;
+        }
+
+        build_sphere(vertices, indices, kSphereSlices, kSphereStacks);
+        if (!meshes_[static_cast<u32>(MeshKind::Sphere)].init(allocator, device, vertices, indices))
+        {
+            return false;
+        }
+
+        build_planet(vertices, indices, kEarthRadius, kPlanetSlices, kPlanetFirstRing,
+                     kPlanetRingGrowth);
+        if (!meshes_[static_cast<u32>(MeshKind::Planet)].init(allocator, device, vertices, indices))
         {
             return false;
         }
@@ -273,6 +335,23 @@ namespace encke
             .push_constant_size = sizeof(gpu::Push),
         };
 
+        // Depth only. Clamped, so cascade casters nearer the sun than the near
+        // plane flatten onto it and still cast; biased per pass.
+        GraphicsPipeline::Config const shadow_config{
+            .spirv_name         = "shadow_depth.spv",
+            .fragment_entry     = nullptr,
+            .colour_formats     = {},
+            .depth_format       = kShadowFormat,
+            .bindings           = kVertexBindings,
+            .attributes         = kShadowAttributes,
+            .cull_mode          = VK_CULL_MODE_BACK_BIT,
+            .depth_clamp        = true,
+            .depth_bias         = true,
+            .alpha_blend        = false,
+            .set_layout         = bindless_.layout(),
+            .push_constant_size = sizeof(gpu::Push),
+        };
+
         ComputePipeline::Config const cluster_config{
             .spirv_name         = "cluster_build.spv",
             .set_layout         = bindless_.layout(),
@@ -292,6 +371,7 @@ namespace encke
         };
 
         if (!gbuffer_pipeline_.init(device, gbuffer_config) ||
+            !shadow_pipeline_.init(device, shadow_config) ||
             !tonemap_pipeline_.init(device, tonemap_config) ||
             !cluster_pipeline_.init(device, cluster_config) ||
             !lighting_pipeline_.init(device, lighting_config) ||
@@ -370,8 +450,70 @@ namespace encke
 
         log::info("renderer: clustered deferred, %ux%ux%u clusters, %u lights/cluster max",
                   kClustersX, kClustersY, kClustersZ, kMaxLightsPerCluster);
+        log::info("shadows: %u sun cascades at %u^2 to %.0f m, up to %u spots at %u^2",
+                  config::kCascadeCount, config::kCascadeResolution,
+                  static_cast<f64>(config::kShadowDistance), config::kMaxShadowedSpots,
+                  config::kSpotShadowResolution);
 
         return on_swapchain_changed(swapchain);
+    }
+
+    bool Renderer::create_shadow_maps()
+    {
+        for (u32 index = 0; index < kShadowViewCount; ++index)
+        {
+            bool const cascade = index < config::kCascadeCount;
+            u32 const  size    = cascade ? config::kCascadeResolution : config::kSpotShadowResolution;
+
+            if (!shadow_maps_[index].init(
+                    *allocator_, *device_,
+                    {kShadowFormat,
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                     VK_IMAGE_ASPECT_DEPTH_BIT, cascade ? "shadow cascade" : "shadow spot"},
+                    VkExtent2D{size, size}))
+            {
+                return false;
+            }
+
+            shadow_map_handles_[index] =
+                bindless_.add_sampled_image(shadow_maps_[index].view(),
+                                            VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+        }
+
+        // Hardware PCF: each tap is a bilinear blend of four comparisons.
+        // GREATER_OR_EQUAL because depth is reversed; the black border reads
+        // as depth 0, infinitely far, so off-map lookups come out lit.
+        VkSamplerCreateInfo const info{
+            .sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext                   = nullptr,
+            .flags                   = 0,
+            .magFilter               = VK_FILTER_LINEAR,
+            .minFilter               = VK_FILTER_LINEAR,
+            .mipmapMode              = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU            = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .addressModeV            = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .addressModeW            = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+            .mipLodBias              = 0.0f,
+            .anisotropyEnable        = VK_FALSE,
+            .maxAnisotropy           = 1.0f,
+            .compareEnable           = VK_TRUE,
+            .compareOp               = VK_COMPARE_OP_GREATER_OR_EQUAL,
+            .minLod                  = 0.0f,
+            .maxLod                  = 0.0f,
+            .borderColor             = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+
+        VkResult const result = vkCreateSampler(device_->handle(), &info,
+                                                memory::vulkan_callbacks(), &shadow_sampler_);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkCreateSampler (shadow)", result);
+            return false;
+        }
+        shadow_sampler_handle_ = bindless_.add_sampler(shadow_sampler_);
+
+        return true;
     }
 
     bool Renderer::create_targets(VkExtent2D extent)
@@ -502,7 +644,7 @@ namespace encke
         return true;
     }
 
-    void Renderer::upload(Scene const& scene, VkExtent2D extent, FrameResources& resources) const
+    void Renderer::upload(Scene const& scene, VkExtent2D extent, FrameResources& resources)
     {
         f64 const aspect = static_cast<f64>(extent.width) / static_cast<f64>(extent.height);
 
@@ -517,14 +659,19 @@ namespace encke
         f32 const scale     = static_cast<f32>(kClustersZ) / log_ratio;
         f32 const bias      = -static_cast<f32>(kClustersZ) * std::log(kClusterNear) / log_ratio;
 
-        // The sun is off: nothing casts shadows yet, so a directional light
-        // would leak through every wall of an enclosed corridor. The path is
-        // wired and ready for when shadows exist.
-        f64vec3 const sun_world = glm::normalize(f64vec3{0.3, 0.8, 0.5});
-        f64vec3 const sun_view  = f64vec3{view * f64vec4{sun_world, 0.0}};
+        // Direction and strength of the star from where the camera is: the
+        // whole scene is small against an astronomical unit, so one direction
+        // and one illuminance serve every pixel.
+        f64vec3 const sun_world   = scene.star.direction_from(scene.camera.position);
+        f64vec3 const sun_view    = f64vec3{view * f64vec4{sun_world, 0.0}};
+        f32 const     illuminance = static_cast<f32>(scene.star.illuminance_at(scene.camera.position));
 
         u32 const light_count  = static_cast<u32>(std::min<size_t>(scene.lights.size(), kMaxLights));
         u32 const object_count = static_cast<u32>(std::min<size_t>(scene.objects.size(), kMaxObjects));
+
+        plan_shadows(scene, aspect, shadow_plan_);
+
+        f32 const shadow_far = config::kShadowDistance;
 
         gpu::Frame const frame{
             .projection    = f32mat4{projection},
@@ -534,12 +681,53 @@ namespace encke
             .cluster_depth = f32vec4{kClusterNear, kClusterFar, scale, bias},
             .cluster_grid  = u32vec4{kClustersX, kClustersY, kClustersZ, kMaxLightsPerCluster},
             .sun_direction = f32vec4{f32vec3{glm::normalize(sun_view)}, 0.0f},
-            .sun_radiance  = f32vec4{0.0f},
-            // Stand-in for bounce light until there is any GI.
-            .ambient       = f32vec4{1.2f, 1.3f, 1.5f, 0.0f},
-            .counts        = u32vec4{light_count, 0u, 0u, 0u},
+            .sun_radiance  = f32vec4{scene.star.colour * illuminance, 0.0f},
+            .ambient       = f32vec4{scene.ambient, 0.0f},
+            .counts        = u32vec4{light_count, shadow_plan_.cascade_count, 0u, 0u},
+            .shadow        = f32vec4{shadow_far, shadow_far * (1.0f - config::kShadowFadeFraction),
+                                     config::kShadowNormalOffset, 0.0f},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
+
+        // Each map's lookup goes view -> world -> light clip. The inverse view
+        // carries the camera's large world position, which the light's view
+        // cancels; composed in f64, only the small result is narrowed.
+        f64mat4 const view_to_world = glm::inverse(view);
+
+        u32 const shadow_view_count = shadow_plan_.cascade_count + shadow_plan_.spot_count;
+        auto* const shadow_views = static_cast<gpu::ShadowView*>(resources.shadow_views.mapped());
+        auto* const shadow_matrices = static_cast<f32mat4*>(resources.shadow_matrices.mapped());
+
+        for (u32 index = 0; index < shadow_view_count; ++index)
+        {
+            ShadowMapView const& map = shadow_plan_.views[index];
+            f64mat4 const world_to_clip = map.projection * map.light_view;
+
+            gpu::ShadowView const gpu_view{
+                .view_to_clip = f32mat4{world_to_clip * view_to_world},
+                .params       = f32vec4{static_cast<f32>(map.far_distance),
+                                        static_cast<f32>(map.texel), map.strength,
+                                        map.perspective ? 1.0f : 0.0f},
+                .image        = u32vec4{shadow_map_handles_[index], 0u, 0u, 0u},
+            };
+            std::memcpy(&shadow_views[index], &gpu_view, sizeof(gpu_view));
+
+            vector<u32>& casters = shadow_casters_[index];
+            casters.clear();
+            for (u32 object = 0; object < object_count; ++object)
+            {
+                SceneObject const& scene_object = scene.objects[object];
+                if (!map.may_cast(scene_object.bounds_centre, scene_object.bounds_radius))
+                {
+                    continue;
+                }
+
+                casters.push_back(object);
+                f32mat4 const matrix{world_to_clip * scene_object.model};
+                std::memcpy(&shadow_matrices[index * kMaxObjects + object], &matrix,
+                            sizeof(matrix));
+            }
+        }
 
         // Composing view * model in f64 cancels the large world translations
         // against each other; only then is the result narrowed.
@@ -566,11 +754,27 @@ namespace encke
         for (u32 index = 0; index < light_count; ++index)
         {
             SceneLight const& light = scene.lights[index];
-            f64vec4 const     view_position = view * f64vec4{light.position, 1.0};
+            f64vec4 const     view_position  = view * f64vec4{light.position, 1.0};
+            f64vec3 const     view_direction = f64vec3{view * f64vec4{light.direction, 0.0}};
+
+            u32 shadow = gpu::kNoShadow;
+            for (u32 slot = 0; slot < shadow_plan_.spot_count; ++slot)
+            {
+                if (shadow_plan_.spot_lights[slot] == index)
+                {
+                    shadow = config::kCascadeCount + slot;
+                }
+            }
 
             gpu::Light const gpu_light{
-                .position_radius  = f32vec4{f32vec3{view_position}, light.radius},
-                .colour_intensity = f32vec4{light.colour, light.intensity},
+                .position_radius     = f32vec4{f32vec3{view_position}, light.radius},
+                .colour_intensity    = f32vec4{light.colour, light.intensity},
+                .direction_cos_outer = f32vec4{f32vec3{glm::normalize(view_direction)},
+                                               light.cos_outer},
+                .cos_inner           = light.cos_inner,
+                .shadow              = shadow,
+                .pad0                = 0,
+                .pad1                = 0,
             };
             std::memcpy(&lights[index], &gpu_light, sizeof(gpu_light));
         }
@@ -614,7 +818,7 @@ namespace encke
             .hdr_storage      = hdr_storage_handle_,
             .hdr_sampled      = hdr_sampled_handle_,
             .object_index     = 0,
-            .exposure         = kExposure,
+            .exposure         = exposure_from_ev100(scene.ev100),
             .debug_view       = static_cast<u32>(debug_view_),
             .gbuffer_motion   = motion_handle_,
             .debug_target     = BindlessSet::kInvalid,
@@ -623,7 +827,13 @@ namespace encke
             .ui_sampler       = BindlessSet::kInvalid,
             .ui_encode_srgb   = 0,
             .debug_gain       = motion_gain_,
+            .shadow_views     = resources.shadow_views_handle,
+            .shadow_matrices  = resources.shadow_matrices_handle,
+            .shadow_sampler   = shadow_sampler_handle_,
+            .pad0             = 0,
         };
+
+        u32 const shadow_view_count = shadow_plan_.cascade_count + shadow_plan_.spot_count;
 
         // The pipeline layouts are identical in their set and push ranges, so
         // binding the set once per bind point serves every pipeline after it.
@@ -644,31 +854,88 @@ namespace encke
             constexpr VkPipelineStageFlags2 kWrite = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             constexpr VkAccessFlags2 kWriteAccess  = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
             constexpr VkPipelineStageFlags2 kCompute = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            constexpr VkPipelineStageFlags2 kDepthTests =
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            constexpr VkAccessFlags2 kDepthWrite = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-            Transition const entry[]{
-                {albedo_.handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 kCompute, 0, kWrite, kWriteAccess},
-                {normal_.handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 kCompute, 0, kWrite, kWriteAccess},
-                {material_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kCompute, 0, kWrite, kWriteAccess},
-                {motion_.handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 kCompute, 0, kWrite, kWriteAccess},
-                {hdr_.handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, kWrite, kWriteAccess},
-                {depth_.handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                 kCompute, 0,
-                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                     VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_DEPTH_BIT},
-            };
-            barrier(command, entry);
+            array<Transition, 6 + kShadowViewCount> entry{};
+            entry[0] = {albedo_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kCompute, 0, kWrite, kWriteAccess};
+            entry[1] = {normal_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kCompute, 0, kWrite, kWriteAccess};
+            entry[2] = {material_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kCompute, 0, kWrite, kWriteAccess};
+            entry[3] = {motion_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kCompute, 0, kWrite, kWriteAccess};
+            entry[4] = {hdr_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, kWrite, kWriteAccess};
+            entry[5] = {depth_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kCompute, 0, kDepthTests,
+                        kDepthWrite, VK_IMAGE_ASPECT_DEPTH_BIT};
+            size_t count = 6;
+
+            // Shadow maps this frame draws. Last frame's lighting and debug
+            // views sampled them in compute.
+            for (u32 index = 0; index < shadow_view_count; ++index)
+            {
+                entry[count++] = {shadow_maps_[index].handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kCompute, 0,
+                                  kDepthTests, kDepthWrite, VK_IMAGE_ASPECT_DEPTH_BIT};
+            }
+
+            barrier(command, span<Transition const>{entry.data(), count});
         }
 
-        // -- 2. G-buffer -----------------------------------------------------
+        // -- 2. shadow maps --------------------------------------------------
+        // Depth only, before the G-buffer. Nothing here waits on the acquire
+        // semaphore, which gates colour output only.
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_.handle());
+        for (u32 index = 0; index < shadow_view_count; ++index)
         {
-            // Linear space-black: the corridor is sealed, but anything left
-            // uncovered should read as void rather than a debug colour.
+            u32 const  size = index < config::kCascadeCount ? config::kCascadeResolution
+                                                            : config::kSpotShadowResolution;
+            VkExtent2D const map_extent{size, size};
+
+            VkRenderingAttachmentInfo const depth = depth_attachment(shadow_maps_[index].view());
+
+            VkRenderingInfo const rendering{
+                .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .pNext                = nullptr,
+                .flags                = 0,
+                .renderArea           = {.offset = {0, 0}, .extent = map_extent},
+                .layerCount           = 1,
+                .viewMask             = 0,
+                .colorAttachmentCount = 0,
+                .pColorAttachments    = nullptr,
+                .pDepthAttachment     = &depth,
+                .pStencilAttachment   = nullptr,
+            };
+
+            vkCmdBeginRendering(command, &rendering);
+            // Flipped like the frame, so lookups share ndc_to_uv with it.
+            set_viewport(command, map_extent);
+            vkCmdSetDepthBias(command, config::kShadowBiasConstant, 0.0f,
+                              config::kShadowBiasSlope);
+
+            for (u32 const object : shadow_casters_[index])
+            {
+                push.object_index = index * kMaxObjects + object;
+                vkCmdPushConstants(command, shadow_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
+                                   sizeof(push), &push);
+                meshes_[static_cast<u32>(scene.objects[object].mesh)].draw(command);
+            }
+
+            vkCmdEndRendering(command);
+        }
+
+        timestamps_.mark(command, "shadows");
+
+        // -- 3. G-buffer -----------------------------------------------------
+        {
+            // Linear space-black: empty sky reads as void rather than a debug
+            // colour. At daylight exposure it tonemaps to pure black.
             VkRenderingAttachmentInfo const colours[]{
                 colour_attachment(albedo_.view(), {{0.0f, 0.0f, 0.0f, 0.0f}}),
                 colour_attachment(normal_.view(), {{0.5f, 0.5f, 0.0f, 0.0f}}),
@@ -677,19 +944,8 @@ namespace encke
                 colour_attachment(hdr_.view(), {{0.0005f, 0.0007f, 0.0012f, 1.0f}}),
             };
 
-            VkRenderingAttachmentInfo const depth{
-                .sType              = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                .pNext              = nullptr,
-                .imageView          = depth_.view(),
-                .imageLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                .resolveMode        = VK_RESOLVE_MODE_NONE,
-                .resolveImageView   = VK_NULL_HANDLE,
-                .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                .loadOp             = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                // Lighting reads depth to rebuild positions, so it is kept.
-                .storeOp            = VK_ATTACHMENT_STORE_OP_STORE,
-                .clearValue         = {.depthStencil = {kClearDepth, 0}},
-            };
+            // Lighting reads depth to rebuild positions, so it is kept.
+            VkRenderingAttachmentInfo const depth = depth_attachment(depth_.view());
 
             VkRenderingInfo const rendering{
                 .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -715,7 +971,7 @@ namespace encke
                 push.object_index = index;
                 vkCmdPushConstants(command, gbuffer_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                                    sizeof(push), &push);
-                cube_.draw(command);
+                meshes_[static_cast<u32>(scene.objects[index].mesh)].draw(command);
             }
 
             vkCmdEndRendering(command);
@@ -723,31 +979,38 @@ namespace encke
 
         timestamps_.mark(command, "G-buffer");
 
-        // -- 3. G-buffer -> readable, HDR -> storage --------------------------
+        // -- 4. G-buffer and shadow maps -> readable, HDR -> storage ----------
         {
             constexpr VkPipelineStageFlags2 kWrite = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             constexpr VkAccessFlags2 kWriteAccess  = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
             constexpr VkPipelineStageFlags2 kCompute = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             constexpr VkAccessFlags2 kSampled      = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
             constexpr VkImageLayout kReadOnly      = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+            constexpr VkPipelineStageFlags2 kDepthStored = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+            constexpr VkAccessFlags2 kDepthWrite = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-            Transition const reads[]{
-                {albedo_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly, kWrite,
-                 kWriteAccess, kCompute, kSampled},
-                {normal_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly, kWrite,
-                 kWriteAccess, kCompute, kSampled},
-                {material_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly, kWrite,
-                 kWriteAccess, kCompute, kSampled},
-                {motion_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly, kWrite,
-                 kWriteAccess, kCompute, kSampled},
-                {hdr_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-                 kWrite, kWriteAccess, kCompute,
-                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT},
-                {depth_.handle(), VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kReadOnly,
-                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, kCompute, kSampled,
-                 VK_IMAGE_ASPECT_DEPTH_BIT},
-            };
+            array<Transition, 6 + kShadowViewCount> reads{};
+            reads[0] = {albedo_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly,
+                        kWrite, kWriteAccess, kCompute, kSampled};
+            reads[1] = {normal_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly,
+                        kWrite, kWriteAccess, kCompute, kSampled};
+            reads[2] = {material_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly,
+                        kWrite, kWriteAccess, kCompute, kSampled};
+            reads[3] = {motion_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kReadOnly,
+                        kWrite, kWriteAccess, kCompute, kSampled};
+            reads[4] = {hdr_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        VK_IMAGE_LAYOUT_GENERAL, kWrite, kWriteAccess, kCompute,
+                        VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+            reads[5] = {depth_.handle(), VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kReadOnly,
+                        kDepthStored, kDepthWrite, kCompute, kSampled, VK_IMAGE_ASPECT_DEPTH_BIT};
+            size_t count = 6;
+
+            for (u32 index = 0; index < shadow_view_count; ++index)
+            {
+                reads[count++] = {shadow_maps_[index].handle(),
+                                  VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kReadOnly, kDepthStored,
+                                  kDepthWrite, kCompute, kSampled, VK_IMAGE_ASPECT_DEPTH_BIT};
+            }
 
             // The cluster lists were read by last frame's lighting; this
             // frame's build overwrites them. Execution-only for the hazard,
@@ -755,10 +1018,11 @@ namespace encke
             VkMemoryBarrier2 const war = compute_to_compute(VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
                                                             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 
-            barrier(command, reads, span<VkMemoryBarrier2 const>{&war, 1});
+            barrier(command, span<Transition const>{reads.data(), count},
+                    span<VkMemoryBarrier2 const>{&war, 1});
         }
 
-        // -- 4. clusters -----------------------------------------------------
+        // -- 5. clusters -----------------------------------------------------
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, cluster_pipeline_.handle());
         vkCmdPushConstants(command, cluster_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                            sizeof(push), &push);
@@ -772,7 +1036,7 @@ namespace encke
             barrier(command, {}, span<VkMemoryBarrier2 const>{&raw, 1});
         }
 
-        // -- 5. lighting -----------------------------------------------------
+        // -- 6. lighting -----------------------------------------------------
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, lighting_pipeline_.handle());
         vkCmdPushConstants(command, lighting_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                            sizeof(push), &push);
@@ -780,7 +1044,7 @@ namespace encke
 
         timestamps_.mark(command, "lighting");
 
-        // -- 6. debug visualisations -----------------------------------------
+        // -- 7. debug visualisations -----------------------------------------
         // Only for open windows. The inputs -- G-buffer, depth, cluster counts
         // -- were already made visible to compute for lighting. The images
         // themselves were sampled by last frame's UI, so the write here waits
@@ -828,7 +1092,7 @@ namespace encke
         // fixed and the stats history does not reset on every toggle.
         timestamps_.mark(command, "debug views");
 
-        // -- 7. HDR and debug images -> sampled, swapchain -> attachment -----
+        // -- 8. HDR and debug images -> sampled, swapchain -> attachment -----
         {
             VkImage const target = swapchain.image(image_index);
 
@@ -870,7 +1134,7 @@ namespace encke
             barrier(command, span<Transition const>{handoff.data(), count});
         }
 
-        // -- 8. tonemap ------------------------------------------------------
+        // -- 9. tonemap ------------------------------------------------------
         {
             VkRenderingAttachmentInfo colour =
                 colour_attachment(swapchain.view(image_index), {{0.0f, 0.0f, 0.0f, 1.0f}});
@@ -901,7 +1165,7 @@ namespace encke
 
         timestamps_.mark(command, "tonemap");
 
-        // -- 9. overlay ------------------------------------------------------
+        // -- 10. overlay -----------------------------------------------------
         // A separate rendering scope because it may write through a different
         // view: UNORM over the same sRGB image, so the UI can blend in the
         // space it was designed in. Loading what tonemap stored is a read of
@@ -950,7 +1214,7 @@ namespace encke
 
         timestamps_.mark(command, "UI");
 
-        // -- 10. present -----------------------------------------------------
+        // -- 11. present -----------------------------------------------------
         {
             Transition const present[]{
                 {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1137,18 +1401,35 @@ namespace encke
         timestamps_.shutdown();
 
         gbuffer_pipeline_.shutdown();
+        shadow_pipeline_.shutdown();
         tonemap_pipeline_.shutdown();
         cluster_pipeline_.shutdown();
         lighting_pipeline_.shutdown();
         debug_pipeline_.shutdown();
 
-        cube_.shutdown();
+        for (Mesh& mesh : meshes_)
+        {
+            mesh.shutdown();
+        }
 
         for (FrameResources& resources : frames_)
         {
             resources.frame.shutdown();
             resources.objects.shutdown();
             resources.lights.shutdown();
+            resources.shadow_views.shutdown();
+            resources.shadow_matrices.shutdown();
+        }
+
+        for (Image& map : shadow_maps_)
+        {
+            map.shutdown();
+        }
+
+        if (shadow_sampler_ != VK_NULL_HANDLE)
+        {
+            vkDestroySampler(device, shadow_sampler_, memory::vulkan_callbacks());
+            shadow_sampler_ = VK_NULL_HANDLE;
         }
 
         cluster_counts_.shutdown();

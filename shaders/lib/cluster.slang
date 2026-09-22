@@ -58,6 +58,16 @@ public uint cluster_of(uint2 pixel, float distance, GpuFrame frame)
     return flatten(uint3(tile, depth_slice(distance, frame)), frame);
 }
 
+// View distance from a reversed-Z depth sample. The infinite projection maps
+// distance d to depth = near / d, where near is the CAMERA's near plane, held
+// in the projection itself (GLM m[3][2], row-first [2][3] here). Not the
+// cluster grid's near distance, which is a separate and larger number: using
+// that put every reconstructed position at twice its real distance.
+public float distance_from_depth(float depth, GpuFrame frame)
+{
+    return frame.projection[2][3] / depth;
+}
+
 // View-space point at a given distance along the ray through an NDC position.
 // Specific to the infinite reversed-Z projection: only its two focal terms
 // matter, [0][0] = f / aspect and [1][1] = f.

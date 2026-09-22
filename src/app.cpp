@@ -31,7 +31,7 @@ namespace encke
         constexpr f32 kMotionGainMax = 100000.0f;
 
         // Where each debug window first opens: beside the stats window and
-        // clear of one another at the default 1280x720, so opening all three
+        // clear of one another at the default 1280x720, so opening them all
         // does not stack them.
         f32vec2 debug_window_position(u32 index)
         {
@@ -61,6 +61,7 @@ namespace encke
             case DebugWindow::ClusterHeat: return "Lights per cluster";
             case DebugWindow::Normals:     return "Normals";
             case DebugWindow::Motion:      return "Motion vectors";
+            case DebugWindow::Cascades:    return "Shadow cascades";
             }
             return "unknown";
         }
@@ -148,7 +149,7 @@ namespace encke
         }
         window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
 
-        scene_.build_test_corridor();
+        scene_.build_test_planet();
         log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
 
         fixed_time_ = fixed_time();

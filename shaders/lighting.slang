@@ -1,6 +1,8 @@
 // Deferred lighting. One thread per pixel: rebuild the view-space position
 // from depth, find the pixel's cluster, shade against that cluster's lights,
-// and add the result onto the emissive already in the HDR target.
+// and add the result onto the emissive already in the HDR target. The sun is
+// shadowed through its cascades, and a spot through its own map when the CPU
+// picked it as one of the shadowed few.
 //
 // debug_view:
 //   0  clustered lighting
@@ -16,8 +18,9 @@ import lib.gpu_types;
 import lib.normal;
 import lib.pbr;
 import lib.screen;
+import lib.shadow;
 
-float3 shade_light(Surface surface, float3 position, GpuLight light)
+float3 shade_light(Surface surface, float3 position, GpuLight light, GpuFrame frame)
 {
     float3 to_light = light.position_radius.xyz - position;
     float  distance = length(to_light);
@@ -27,9 +30,21 @@ float3 shade_light(Surface surface, float3 position, GpuLight light)
         return 0.0f;
     }
 
+    float3 direction = to_light / distance;
+    float  cone      = spot_cone(-direction, light.direction_cos_outer.xyz,
+                                 light.direction_cos_outer.w, light.cos_inner);
+    if (cone <= 0.0f || dot(surface.normal, direction) <= 0.0f)
+    {
+        return 0.0f;
+    }
+
+    float shadow = light.shadow == kNoShadow
+                       ? 1.0f
+                       : spot_visibility(light.shadow, position, surface.normal, frame);
+
     float3 radiance = light.colour_intensity.rgb * light.colour_intensity.w *
-                      point_attenuation(distance, radius);
-    return shade(surface, to_light / distance, radiance);
+                      point_attenuation(distance, radius) * cone * shadow;
+    return shade(surface, direction, radiance);
 }
 
 [shader("compute")]
@@ -56,8 +71,7 @@ void compute_main(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // Infinite reversed-Z maps view distance d to depth = near / d.
-    float  distance = frame.cluster_depth.x / depth;
+    float  distance = distance_from_depth(depth, frame);
     float2 ndc      = fragment_to_ndc(float2(pixel) + 0.5f, frame.screen.xy);
     float3 position = view_at(ndc, distance, frame);
 
@@ -75,14 +89,20 @@ void compute_main(uint3 id : SV_DispatchThreadID)
 
     uint cluster = cluster_of(pixel, distance, frame);
 
-    float3 lit = shade(surface, frame.sun_direction.xyz, frame.sun_radiance.rgb);
-    lit += frame.ambient.rgb * surface.albedo * surface.ao;
+    float3 lit = frame.ambient.rgb * surface.albedo * surface.ao;
+
+    float3 sun = frame.sun_direction.xyz;
+    if (any(frame.sun_radiance.rgb > 0.0f) && dot(surface.normal, sun) > 0.0f)
+    {
+        lit += shade(surface, sun, frame.sun_radiance.rgb) *
+               sun_visibility(position, surface.normal, frame);
+    }
 
     if (push.debug_view == 1u)
     {
         for (uint light = 0; light < frame.counts.x; ++light)
         {
-            lit += shade_light(surface, position, load_light(light));
+            lit += shade_light(surface, position, load_light(light), frame);
         }
     }
     else
@@ -94,7 +114,7 @@ void compute_main(uint3 id : SV_DispatchThreadID)
         for (uint i = 0; i < count; ++i)
         {
             uint light = lists.Load((cluster * max_lights + i) * 4u);
-            lit += shade_light(surface, position, load_light(light));
+            lit += shade_light(surface, position, load_light(light), frame);
         }
     }
 

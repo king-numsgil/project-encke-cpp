@@ -21,6 +21,12 @@ import lib.gpu_types;
 [[vk::binding(3, 0)]] public SamplerState        g_samplers[];
 [[vk::binding(4, 0)]] public RWByteAddressBuffer g_rw_buffers[];
 
+// The same sampler binding seen as comparison samplers. Comparison is a
+// property of the VkSampler, not of the descriptor type, so one binding holds
+// both kinds; a handle must only be read through the view matching how its
+// sampler was created.
+[[vk::binding(3, 0)]] public SamplerComparisonState g_compare_samplers[];
+
 [[vk::push_constant]] public Push push;
 
 public GpuFrame load_frame()
@@ -36,4 +42,16 @@ public GpuLight load_light(uint index)
 public GpuObject load_object(uint index)
 {
     return g_buffers[NonUniformResourceIndex(push.objects)].Load<GpuObject>(index * kObjectStride);
+}
+
+public GpuShadowView load_shadow_view(uint index)
+{
+    return g_buffers[NonUniformResourceIndex(push.shadow_views)]
+        .Load<GpuShadowView>(index * kShadowViewStride);
+}
+
+public float4x4 load_shadow_matrix(uint index)
+{
+    return g_buffers[NonUniformResourceIndex(push.shadow_matrices)]
+        .Load<float4x4>(index * kMatrixStride);
 }

@@ -1,0 +1,21 @@
+// Depth-only pass into one shadow map: a sun cascade or a spot light. No
+// fragment stage; the rasteriser writes depth by itself.
+//
+// object_index is (shadow view * max objects + object), pre-flattened on the
+// CPU, and addresses the object -> map clip matrix directly. That matrix was
+// composed in f64 from the light's view and the object's model, so the large
+// world translations cancelled before anything was narrowed.
+
+import lib.bindless;
+import lib.gpu_types;
+
+struct VertexIn
+{
+    float3 position : POSITION;
+};
+
+[shader("vertex")]
+float4 vertex_main(VertexIn input) : SV_Position
+{
+    return mul(load_shadow_matrix(push.object_index), float4(input.position, 1.0f));
+}

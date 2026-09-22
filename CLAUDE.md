@@ -54,12 +54,15 @@ This is the **second** Encke. The first was built on a custom TypeScript-to-
 native compiler; this one is C++. Design decisions carried over from v1 will not
 be visible in this repository's code or history, so ask rather than infer intent.
 
-`encke` is a Vulkan renderer with a working clustered deferred pipeline: a
-G-buffer pass, compute light clustering, compute lighting and a tonemap pass,
-drawing a procedural ship corridor lit by a few dozen point lights. No textures,
-shadows or asset loading yet — all geometry is generated in code from one cube
-mesh, and every material is flat. A Dear ImGui overlay shows frame and per-pass
-GPU timings, graphed with ImPlot.
+`encke` is a Vulkan renderer with a working clustered deferred pipeline: shadow
+maps, a G-buffer pass, compute light clustering, compute lighting and a tonemap
+pass. The test scene is the north pole of an Earth-sized planet, strewn with
+boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
+cascades), shadowed spot lights on masts and a ring of point lamps, with the
+Moon overhead at its real distance. No textures or asset loading yet — all
+geometry is generated in code (cube, UV sphere, planet), and every material is
+flat. A Dear ImGui overlay shows frame and per-pass GPU timings, graphed with
+ImPlot.
 
 ```
 src/
@@ -87,23 +90,27 @@ src/
     stats_window.{hpp,cpp} frame timing history and the window graphing it
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
-    scene.{hpp,cpp}      f64 world: test corridor, objects, lights
-    mesh.{hpp,cpp}       Vertex, Mesh, procedural cube
+    scene.{hpp,cpp}      f64 world: test planet, star, objects, lights
+    mesh.{hpp,cpp}       Vertex, Mesh, procedural cube, sphere, pole-relative planet
+    config.hpp           every renderer capacity and tuning constant
+    shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
     gpu_types.hpp        structs shared with the shaders
     pipeline.{hpp,cpp}   graphics and compute pipeline construction
     renderer.{hpp,cpp}   the passes, barriers, per-frame upload
 shaders/
+  shadow_depth.slang     depth only: one shadow map, cascade or spot
   gbuffer.slang          geometry -> G-buffer + emissive into HDR
   cluster_build.slang    compute: lights -> froxels
-  lighting.slang         compute: shade from the cluster's lights
-  debug_views.slang      compute: cluster heat, normals, motion, into window images
+  lighting.slang         compute: shade from the cluster's lights, shadowed
+  debug_views.slang      compute: cluster heat, normals, motion, cascades, into window images
   tonemap.slang          HDR -> swapchain
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
   lib/
     bindless.slang       the descriptor arrays; mirrors vulkan/bindless.hpp
     gpu_types.slang      mirrors render/gpu_types.hpp
-    cluster.slang        cluster addressing, shared by build and lighting
-    pbr.slang            GGX / Smith / Schlick
+    cluster.slang        cluster addressing and depth -> view position, shared
+    shadow.slang         cascade choice, PCF lookups, sun and spot visibility
+    pbr.slang            GGX / Smith / Schlick, spot cone
     normal.slang         octahedral encode and decode
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
@@ -194,10 +201,11 @@ a relative signal within a single session, never as figures worth recording.
 
 ## Clustered deferred — built, first draft
 
-Four passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
+The passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 
 | Pass | Kind | Does |
 | --- | --- | --- |
+| shadows | raster | depth only: the sun's cascades, then each chosen spot's map |
 | G-buffer | raster | albedo/ao, octahedral normal, roughness/metallic, motion, depth; emissive seeds the HDR target |
 | clusters | compute | one thread per froxel, tests every light against its view-space AABB |
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
@@ -208,9 +216,10 @@ Four passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 ### Debug views
 
 Keys 1 and 2 choose how the frame is shaded: clustered or brute force
-(`DebugView`). Keys 3 to 5 toggle a UI window each — lights per cluster,
-normals, motion vectors (`DebugWindow`) — and opening one while the UI is
-hidden brings the UI back. `ENCKE_DEBUG_VIEW` uses the same numbering from
+(`DebugView`). Keys 3 to 6 toggle a UI window each — lights per cluster,
+normals, motion vectors, shadow cascades (`DebugWindow`) — and opening one
+while the UI is hidden brings the UI back. The cascade window tints each pixel
+by the cascade it reads and darkens it where the sun is shadowed. `ENCKE_DEBUG_VIEW` uses the same numbering from
 zero, so `ENCKE_DEBUG_VIEW=2` starts with the heat map open.
 
 The windows do not show render targets directly. `shaders/debug_views.slang`
@@ -301,10 +310,18 @@ in the fence wait, acquire and present.
 - **`DebugView::BruteForce` (key 2) is the correctness test.** It shades every
   light with no clusters at all. Clustered and brute force must be
   byte-identical; they were verified so over a full frame. Any divergence is a
-  cluster assignment bug, and this is far easier than eyeballing it.
+  cluster assignment bug, and this is far easier than eyeballing it. It cannot
+  catch anything both paths share, such as position reconstruction.
+- **View distance from depth is `distance_from_depth` in `lib/cluster.slang`,
+  and nowhere else.** It divides the *camera's* near plane, read from the
+  projection, by the depth sample. Lighting once divided the cluster grid's
+  near distance instead — 0.1 m against the camera's 0.05 m — which put every
+  reconstructed position at twice its distance. Brute force matched because it
+  shared the mistake; what exposed it was the sun's shadow, where receivers on
+  the ground landed a camera height below it and the ground shadowed itself.
 - **The lights-per-cluster window (key 3) proves the clusters are doing work.**
   Identical output would also happen if every froxel held every light. The heat
-  map must show variation — it currently runs 6 to 16 of 29 lights per froxel.
+  map must show variation.
 - **A byte comparison captures the client area only.** Grabbing the window
   rectangle picks up Windows 11's invisible resize border, and even the client
   rectangle shows the desktop through the rounded bottom corners, so a few
@@ -319,11 +336,15 @@ in the fence wait, acquire and present.
 
 ### Parameters, and why these
 
+Every capacity and tuning constant lives in `render/config.hpp`, compile-time,
+so it can be edited and rebuilt while testing. Shaders read the counts they
+need from the Frame buffer, so none of them is duplicated in Slang.
+
 16x9x24 froxels, logarithmic in depth between 10 cm and 400 m, 64 lights per
 froxel. The 16:9 tiling matches the screen; the log depth distribution puts
-most slices inside the first tens of metres, which is where a corridor or a
-bridge has lights. Beyond 400 m everything shares the last slice — those are
-exterior lights and want different treatment anyway.
+most slices inside the first tens of metres, which is where a ship interior or
+a landing site has lights. Beyond 400 m everything shares the last slice —
+those are exterior lights and want different treatment anyway.
 
 ### Known gaps, deliberately
 
@@ -336,9 +357,75 @@ exterior lights and want different treatment anyway.
 - The acquire semaphore is waited at `COLOR_ATTACHMENT_OUTPUT`, which stalls
   the G-buffer pass on the swapchain image even though only the tonemap needs
   it. Splitting the submission would fix it.
-- No shadows, so the sun is switched off: a directional light with no occlusion
-  lights the inside of a sealed corridor. The code path is wired and ready.
-- Exposure is a hand-tuned constant, not an exposure model.
+- Exposure is a fixed EV100 set by the scene (`Scene::ev100`), not automatic.
+  The Sun is real-magnitude, so it is set for daylight.
+
+## Shadows — built, first draft
+
+The sun is a directional light with `config::kCascadeCount` cascades; local
+shadows are spot lights, at most `config::kMaxShadowedSpots` per frame, each
+with one perspective map and a range past which it is unshadowed. Spots go
+through the same clustered path as point lights — a point light is a spot
+whose `cos_outer` is below -1, so the cone never cuts off. Spots were chosen
+over shadowed point lights because a spot is one map, one view and one
+culling pass where a point light is a cube of six.
+
+`render/shadows.cpp` plans each frame on the CPU in f64: it fits the cascades
+and picks the spots, and the renderer composes each map's `world -> clip` with
+every model matrix, and with the camera's inverse view for the lighting
+lookup, before narrowing. The GPU never sees a world position here either.
+
+- **The sun's direction and illuminance come from `Scene::star`** and the
+  camera's position, per frame. Flying across a system, or moving the star,
+  needs nothing else changed.
+- **Cascades are bounding spheres of their frustum slice, snapped to whole
+  texels in f64 world space.** The sphere's radius depends only on the split
+  distances and the field of view, so turning the camera does not resize the
+  map, and snapping against a fixed world anchor stops the texel grid sliding
+  with the camera. Snapping in camera-relative space would not work: that space
+  moves with the camera.
+- **Shadow maps are reversed-Z like everything else**, D32, cleared to 0,
+  compared `GREATER_OR_EQUAL`. Rasterisation bias is therefore *negative*.
+  The comparison sampler's border is transparent black, depth 0, so a lookup
+  off the map reads as lit.
+- **Maps render through the same negative-height viewport as the frame**, so
+  lookups use `ndc_to_uv` like any screen-space read.
+- **Depth clamp is on for the shadow pass** (`depthClamp` is required at device
+  selection), so a caster nearer the sun than a cascade's near plane flattens
+  onto it and still casts instead of being clipped away.
+- **The sampler binding is aliased** as `SamplerState` and
+  `SamplerComparisonState` in `lib/bindless.slang`. Comparison is a property of
+  the `VkSampler`, not of the descriptor type, so this is legal; slangc's
+  overlap warning 39001 is disabled for it.
+- **Spot selection:** shadow-casting spots within their `shadow_range` of the
+  camera whose reach is in view, nearest first. The strength fades over the
+  last `kShadowFadeFraction` of the range.
+
+Known gaps:
+
+- No blending between cascades; the seam can show as a change in softness.
+- Caster culling is a bounding-sphere test against each map. The planet always
+  passes and fills every map, so the shadow pass is fill-bound on it.
+- When a spot loses its slot to a nearer one, its shadow switches off in one
+  frame. Only the range limit fades.
+- Shadowed spots are limited to about 120 degrees of cone; one map cannot
+  cover wider without stretching badly.
+- Shadow maps are single-copy, like the G-buffer: each frame's entry barrier
+  waits on the previous frame's lighting reads.
+
+## The test planet
+
+`Scene::build_test_planet`: the ground is the north pole of an Earth-radius
+sphere, with `kWorldOrigin` at the pole. The planet mesh's local origin is the
+pole, not the centre, because an f32 vertex 6,371 km from its origin is good
+to about half a metre. Measured from the pole, vertices underfoot are small
+numbers with full precision. Rings are spaced geometrically, so the facets are
+centimetres underfoot and hundreds of kilometres at the horizon.
+
+The Moon is a sphere of its real radius at its real distance straight up. It
+is a few pixels across, as it should be. The camera orbits the field and,
+every couple of minutes, tilts far enough up to show it; `ENCKE_FIXED_TIME=31.4`
+is the top of the first tilt.
 
 ## CPU-written buffers are host-coherent, required
 
@@ -397,7 +484,7 @@ re-uploaded every frame rather than living in a static buffer.
 
 A shader that receives a world-space position is a bug.
 
-The test corridor is built at (1e6, 2.5e5, -7e5) metres on purpose. Set
+The test planet's pole is at (1e6, 2.5e5, -7e5) metres on purpose. Set
 `kWorldOrigin` in `render/scene.cpp` to zero and the render must not change.
 Measured: a 1 mm offset 3 m ahead of a camera at 1,000 km survives exactly
 camera-relative, and collapses to 0.000000 if world positions are narrowed to

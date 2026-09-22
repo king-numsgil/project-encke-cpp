@@ -4,16 +4,27 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 namespace encke
 {
     namespace
     {
-        // A kilometre-scale offset in every axis, so the corridor sits where f32
-        // world coordinates would already be jittering. Set to zero to compare:
-        // the rendered image must not change.
+        // Where the north pole sits in the world: a kilometre-scale offset in
+        // every axis, so the scene is where f32 world coordinates would
+        // already be jittering. Set to zero to compare: the rendered image
+        // must not change.
         f64vec3 const kWorldOrigin{1'000'000.0, 250'000.0, -700'000.0};
+
+        // The Sun: 3.75e28 lm spread over 4 pi sr, which gives ~1.3e5 lux at
+        // 1 AU. Low over the horizon so shadows are long enough to cross every
+        // cascade.
+        constexpr f64 kSunIntensity = 2.98e27;
+        constexpr f64 kSunElevation = 0.21;   // radians, ~12 degrees
+        constexpr f64 kSunAzimuth   = 0.6;
+
+        constexpr f64 kPi = 3.14159265358979323846;
 
         f32 srgb_to_linear(f32 c)
         {
@@ -36,16 +47,17 @@ namespace encke
             return glm::scale(m, scale);
         }
 
-        // Corridor dimensions, metres. Roughly a cramped ship passageway.
-        constexpr f64 kHalfWidth = 2.0;
-        constexpr f64 kHeight    = 2.8;
-        constexpr f64 kLength    = 30.0;
+        f32 cos_degrees(f64 degrees)
+        {
+            return static_cast<f32>(std::cos(degrees * kPi / 180.0));
+        }
     }
 
-    void Scene::add_box(f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb, f32 roughness,
-                        f32 metallic, f32vec3 emissive)
+    SceneObject& Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
+                            f32 roughness, f32 metallic, f32vec3 emissive)
     {
         SceneObject object;
+        object.mesh      = mesh;
         object.position  = origin_ + position;
         object.scale     = scale;
         object.albedo    = srgb_to_linear(albedo_srgb);
@@ -54,113 +66,187 @@ namespace encke
         object.emissive  = emissive;
         object.model     = compose(object.position, 0.0, object.spin_axis, scale);
         object.previous_model = object.model;
+
+        // Both meshes are unit-sized: the cube's half-diagonal bounds it at
+        // any rotation, the sphere's largest half-axis does.
+        object.bounds_centre = object.position;
+        object.bounds_radius = mesh == MeshKind::Sphere
+                                   ? 0.5 * std::max({scale.x, scale.y, scale.z})
+                                   : 0.5 * glm::length(scale);
+
         objects.push_back(object);
+        return objects.back();
     }
 
-    void Scene::build_test_corridor()
+    void Scene::build_test_planet()
     {
         objects.clear();
         lights.clear();
         origin_       = kWorldOrigin;
         first_update_ = true;
 
-        f64 const mid_z = -kLength * 0.5;
+        ev100   = 14.0f;
+        ambient = f32vec3{1400.0f, 1500.0f, 1700.0f};
 
-        f32vec3 const hull_grey{0.42f, 0.44f, 0.47f};
-        f32vec3 const deck_grey{0.26f, 0.27f, 0.29f};
-        f32vec3 const rib_dark{0.18f, 0.19f, 0.21f};
-
-        // Shell. Slabs overlap at the edges so no seam leaks the background.
-        add_box({0.0, -0.05, mid_z}, {kHalfWidth * 2.0 + 0.2, 0.1, kLength}, deck_grey, 0.55f,
-                0.7f);
-        add_box({0.0, kHeight + 0.05, mid_z}, {kHalfWidth * 2.0 + 0.2, 0.1, kLength}, hull_grey,
-                0.7f, 0.0f);
-        add_box({-kHalfWidth - 0.05, kHeight * 0.5, mid_z}, {0.1, kHeight, kLength}, hull_grey,
-                0.5f, 0.0f);
-        add_box({kHalfWidth + 0.05, kHeight * 0.5, mid_z}, {0.1, kHeight, kLength}, hull_grey,
-                0.5f, 0.0f);
-        add_box({0.0, kHeight * 0.5, 0.05}, {kHalfWidth * 2.0 + 0.2, kHeight + 0.2, 0.1},
-                hull_grey, 0.5f, 0.0f);
-        add_box({0.0, kHeight * 0.5, -kLength - 0.05}, {kHalfWidth * 2.0 + 0.2, kHeight + 0.2, 0.1},
-                hull_grey, 0.5f, 0.0f);
-
-        // Bulkhead ribs every 5 m.
-        for (f64 z = -5.0; z > -kLength; z -= 5.0)
+        // Local frame at the pole: +Y is up, the ground is y = 0. The planet
+        // curves away by d^2 / 2R, a tenth of a millimetre at 30 m, so the
+        // object field can treat it as flat.
         {
-            add_box({-kHalfWidth + 0.15, kHeight * 0.5, z}, {0.3, kHeight, 0.25}, rib_dark, 0.4f,
-                    0.9f);
-            add_box({kHalfWidth - 0.15, kHeight * 0.5, z}, {0.3, kHeight, 0.25}, rib_dark, 0.4f,
-                    0.9f);
-            add_box({0.0, kHeight - 0.15, z}, {kHalfWidth * 2.0, 0.3, 0.25}, rib_dark, 0.4f, 0.9f);
+            SceneObject planet;
+            planet.mesh          = MeshKind::Planet;
+            planet.position      = origin_;
+            planet.albedo        = srgb_to_linear(f32vec3{0.46f, 0.43f, 0.39f});
+            planet.roughness     = 0.92f;
+            planet.model         = glm::translate(f64mat4{1.0}, origin_);
+            planet.previous_model = planet.model;
+            planet.bounds_centre = origin_ - f64vec3{0.0, kEarthRadius, 0.0};
+            planet.bounds_radius = kEarthRadius;
+            objects.push_back(planet);
         }
 
-        // Cargo and consoles.
-        add_box({1.35, 0.4, -7.0}, {0.8, 0.8, 0.8}, {0.62f, 0.38f, 0.14f}, 0.85f, 0.0f);
-        add_box({-1.45, 0.3, -12.5}, {0.6, 0.6, 1.1}, {0.36f, 0.40f, 0.22f}, 0.8f, 0.0f);
-        add_box({1.3, 0.55, -17.5}, {0.9, 1.1, 0.7}, {0.30f, 0.33f, 0.38f}, 0.35f, 0.8f);
-        add_box({-1.4, 0.45, -22.0}, {0.7, 0.9, 0.7}, {0.62f, 0.38f, 0.14f}, 0.85f, 0.0f);
+        // The Moon, straight up at its real distance from the Earth's centre.
+        // Half a degree across: a few pixels.
+        add(MeshKind::Sphere, f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
+            f64vec3{2.0 * kMoonRadius}, {0.36f, 0.35f, 0.33f}, 0.95f, 0.0f);
 
-        // Spinning showpiece: polished metal, to show off the specular lobe.
         {
-            SceneObject object;
-            object.position  = origin_ + f64vec3{0.0, 1.25, -9.5};
-            object.scale     = f64vec3{0.6};
-            object.albedo    = srgb_to_linear(f32vec3{0.92f, 0.78f, 0.52f});
-            object.roughness = 0.25f;
-            object.metallic  = 1.0f;
-            object.spin_rate = 0.5;
-            object.spin_axis = f64vec3{0.35, 1.0, 0.15};
-            object.model     = compose(object.position, 0.0, object.spin_axis, object.scale);
-            object.previous_model = object.model;
-            objects.push_back(object);
+            f64vec3 const direction{std::cos(kSunElevation) * std::cos(kSunAzimuth),
+                                    std::sin(kSunElevation),
+                                    std::cos(kSunElevation) * std::sin(kSunAzimuth)};
+            star.position           = origin_ + direction * kAstronomicalUnit;
+            star.luminous_intensity = kSunIntensity;
+            star.colour             = f32vec3{1.0f, 0.97f, 0.93f};
         }
 
-        // Ceiling panels: an emissive strip with a point light beneath each.
-        f32vec3 const panel_white = srgb_to_linear(f32vec3{1.0f, 0.95f, 0.86f});
-        for (f64 z = -1.0; z > -kLength; z -= 2.0)
+        f32vec3 const concrete{0.62f, 0.60f, 0.57f};
+        f32vec3 const rust{0.55f, 0.30f, 0.16f};
+        f32vec3 const olive{0.40f, 0.44f, 0.26f};
+        f32vec3 const slate{0.30f, 0.33f, 0.38f};
+        f32vec3 const white{0.85f, 0.85f, 0.85f};
+
+        // A tower: its shadow runs ~50 m across the field at this sun angle,
+        // through every cascade.
+        add(MeshKind::Cube, {-9.0, 6.0, -7.0}, {1.6, 12.0, 1.6}, concrete, 0.8f, 0.0f);
+
+        // A colonnade: striped shadows, and fine detail for the near cascade.
+        for (i32 index = 0; index < 8; ++index)
         {
-            add_box({0.0, kHeight - 0.02, z}, {1.2, 0.04, 0.4}, {0.9f, 0.9f, 0.9f}, 0.3f, 0.0f,
-                    panel_white * 60.0f);
+            f64 const x = -6.0 + 1.6 * static_cast<f64>(index);
+            add(MeshKind::Cube, {x, 1.5, 6.0}, {0.35, 3.0, 0.35}, white, 0.6f, 0.0f);
+        }
+        add(MeshKind::Cube, {-0.4, 3.15, 6.0}, {12.0, 0.3, 0.8}, white, 0.6f, 0.0f);
+
+        // A gateway.
+        add(MeshKind::Cube, {7.0, 2.0, -3.0}, {0.8, 4.0, 0.8}, slate, 0.4f, 0.8f);
+        add(MeshKind::Cube, {7.0, 2.0, 1.0}, {0.8, 4.0, 0.8}, slate, 0.4f, 0.8f);
+        add(MeshKind::Cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, slate, 0.4f, 0.8f);
+
+        // A table: a slab on legs, whose underside only a spot can light.
+        add(MeshKind::Cube, {-3.0, 1.0, -2.0}, {3.0, 0.12, 1.8}, rust, 0.7f, 0.0f);
+        for (f64 const x : {-4.3, -1.7})
+        {
+            for (f64 const z : {-2.75, -1.25})
+            {
+                add(MeshKind::Cube, {x, 0.47, z}, {0.12, 0.94, 0.12}, rust, 0.7f, 0.0f);
+            }
+        }
+
+        // Crates.
+        add(MeshKind::Cube, {2.0, 0.5, -6.0}, {1.0, 1.0, 1.0}, rust, 0.85f, 0.0f);
+        add(MeshKind::Cube, {3.1, 0.4, -6.4}, {0.8, 0.8, 0.8}, olive, 0.85f, 0.0f);
+        add(MeshKind::Cube, {2.5, 1.3, -6.1}, {0.6, 0.6, 0.6}, olive, 0.85f, 0.0f);
+        add(MeshKind::Cube, {-6.0, 0.75, 1.5}, {1.5, 1.5, 1.5}, concrete, 0.8f, 0.0f);
+        add(MeshKind::Cube, {11.0, 1.0, 5.0}, {2.0, 2.0, 3.0}, slate, 0.5f, 0.3f);
+
+        // Spheres, rough to mirror.
+        add(MeshKind::Sphere, {0.0, 1.0, 0.0}, f64vec3{2.0}, {0.92f, 0.78f, 0.52f}, 0.2f, 1.0f);
+        add(MeshKind::Sphere, {-2.0, 0.4, 2.5}, f64vec3{0.8}, {0.8f, 0.2f, 0.15f}, 0.5f, 0.0f);
+        add(MeshKind::Sphere, {4.0, 0.6, 2.0}, f64vec3{1.2}, white, 0.1f, 0.0f);
+        add(MeshKind::Sphere, {-11.0, 2.5, 3.0}, f64vec3{5.0}, concrete, 0.9f, 0.0f);
+        add(MeshKind::Sphere, {5.5, 0.3, -8.0}, f64vec3{0.6}, {0.2f, 0.5f, 0.9f}, 0.3f, 0.0f);
+
+        // A spinning showpiece on a plinth, so some shadow moves.
+        add(MeshKind::Cube, {-4.0, 0.5, -9.0}, {1.2, 1.0, 1.2}, concrete, 0.8f, 0.0f);
+        {
+            SceneObject& spinner = add(MeshKind::Cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
+                                       {0.92f, 0.78f, 0.52f}, 0.25f, 1.0f);
+            spinner.spin_rate = 0.5;
+            spinner.spin_axis = f64vec3{0.35, 1.0, 0.15};
+        }
+
+        // Spot masts: four in the field, each aimed at something, and two far
+        // out whose shadows only switch on as the camera comes within range.
+        struct Mast
+        {
+            f64vec3 base;
+            f64vec3 target;
+            f32vec3 colour_srgb;
+            f64     shadow_range;
+        };
+
+        Mast const masts[]{
+            {{-1.0, 0.0, -12.0}, {-3.0, 0.0, -2.0}, {1.0f, 0.95f, 0.85f}, 40.0},
+            {{10.0, 0.0, 9.0}, {3.0, 0.0, 5.0}, {0.55f, 0.75f, 1.0f}, 40.0},
+            {{-12.0, 0.0, 10.0}, {-5.0, 0.0, 5.0}, {1.0f, 0.7f, 0.35f}, 40.0},
+            {{12.0, 0.0, -9.0}, {6.0, 0.0, -2.0}, {1.0f, 0.95f, 0.85f}, 40.0},
+            {{40.0, 0.0, -30.0}, {30.0, 0.0, -22.0}, {1.0f, 0.4f, 0.3f}, 35.0},
+            {{-38.0, 0.0, -32.0}, {-28.0, 0.0, -24.0}, {0.4f, 1.0f, 0.5f}, 35.0},
+        };
+
+        constexpr f64 kMastHeight = 8.0;
+
+        for (Mast const& mast : masts)
+        {
+            add(MeshKind::Cube, mast.base + f64vec3{0.0, kMastHeight * 0.5, 0.0},
+                {0.2, kMastHeight, 0.2}, slate, 0.5f, 0.6f);
+
+            f64vec3 const head = mast.base + f64vec3{0.0, kMastHeight + 0.3, 0.0};
+            f32vec3 const tint = srgb_to_linear(mast.colour_srgb);
+            add(MeshKind::Cube, head, f64vec3{0.5, 0.4, 0.5}, {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f,
+                tint * 2.0e5f);
 
             SceneLight light;
-            light.position  = origin_ + f64vec3{0.0, kHeight - 0.2, z};
-            light.colour    = panel_white;
-            light.intensity = 450.0f;
+            light.position     = origin_ + head - f64vec3{0.0, 0.3, 0.0};
+            light.direction    = glm::normalize(mast.target - (head - f64vec3{0.0, 0.3, 0.0}));
+            light.colour       = tint;
+            light.intensity    = 2.0e6f;
+            light.radius       = 30.0f;
+            light.cos_inner    = cos_degrees(20.0);
+            light.cos_outer    = cos_degrees(30.0);
+            light.casts_shadow = true;
+            light.shadow_range = mast.shadow_range;
+            lights.push_back(light);
+        }
+
+        // Low coloured lamps in a ring, for the clusters to sort. Dim against
+        // the sun; they show in the shade.
+        f32vec3 const lamp_colours[]{
+            srgb_to_linear(f32vec3{1.0f, 0.12f, 0.08f}),
+            srgb_to_linear(f32vec3{0.15f, 0.85f, 1.0f}),
+            srgb_to_linear(f32vec3{1.0f, 0.8f, 0.3f}),
+        };
+
+        constexpr u32 kLamps = 24;
+        for (u32 index = 0; index < kLamps; ++index)
+        {
+            f64 const angle  = 2.0 * kPi * static_cast<f64>(index) / static_cast<f64>(kLamps);
+            f64 const ring   = index % 2 == 0 ? 14.0 : 18.0;
+            f64vec3 const at{ring * std::cos(angle), 0.0, ring * std::sin(angle)};
+            f32vec3 const colour = lamp_colours[index % 3];
+
+            add(MeshKind::Cube, at + f64vec3{0.0, 0.4, 0.0}, {0.1, 0.8, 0.1}, slate, 0.5f, 0.6f);
+            add(MeshKind::Sphere, at + f64vec3{0.0, 0.9, 0.0}, f64vec3{0.2}, {0.1f, 0.1f, 0.1f},
+                0.5f, 0.0f, colour * 1.0e5f);
+
+            SceneLight light;
+            light.position  = origin_ + at + f64vec3{0.0, 0.9, 0.0};
+            light.colour    = colour;
+            light.intensity = 8000.0f;
             light.radius    = 7.0f;
             lights.push_back(light);
         }
 
-        // Red emergency lights low on the walls, and cyan console glow, so the
-        // clusters see a mix of wide and tight lights.
-        f32vec3 const emergency_red = srgb_to_linear(f32vec3{1.0f, 0.12f, 0.08f});
-        f32vec3 const console_cyan  = srgb_to_linear(f32vec3{0.15f, 0.85f, 1.0f});
-
-        for (f64 z = -3.0; z > -kLength; z -= 6.0)
-        {
-            for (f64 side : {-1.0, 1.0})
-            {
-                SceneLight light;
-                light.position  = origin_ + f64vec3{side * (kHalfWidth - 0.1), 0.25, z};
-                light.colour    = emergency_red;
-                light.intensity = 40.0f;
-                light.radius    = 2.5f;
-                lights.push_back(light);
-            }
-        }
-
-        for (f64 z : {-7.0, -12.5, -17.5, -22.0})
-        {
-            SceneLight light;
-            light.position  = origin_ + f64vec3{z < -15.0 ? 0.8 : -0.9, 1.1, z + 0.6};
-            light.colour    = console_cyan;
-            light.intensity = 35.0f;
-            light.radius    = 2.0f;
-            lights.push_back(light);
-        }
-
-        camera.position    = origin_ + f64vec3{0.0, 1.7, -1.2};
-        camera.orientation = f64quat{1.0, 0.0, 0.0, 0.0};
-        previous_camera    = camera;
+        previous_camera = camera;
     }
 
     void Scene::update(f64 seconds)
@@ -186,13 +272,19 @@ namespace encke
             }
         }
 
-        // A slow dolly down the corridor with a gentle yaw, so motion vectors
-        // carry both components and the clusters sweep across the geometry.
-        f64 const travel = 3.0 * (1.0 - std::cos(seconds * 0.25));
-        f64 const yaw    = 0.12 * std::sin(seconds * 0.4);
+        // A slow orbit around the field, facing its centre. Once every couple
+        // of minutes the camera tilts up far enough to put the zenith, and so
+        // the Moon, in view: ENCKE_FIXED_TIME=31.4 is the top of the first.
+        f64 const orbit  = seconds * 0.05;
+        f64 const radius = 16.0;
+        f64 const glance = std::pow(std::max(std::sin(seconds * 0.05), 0.0), 6.0);
+        f64 const pitch  = -0.08 + 1.2 * glance;
 
-        camera.position    = origin_ + f64vec3{0.4 * std::sin(seconds * 0.3), 1.7, -1.2 - travel};
-        camera.orientation = glm::angleAxis(yaw, f64vec3{0.0, 1.0, 0.0});
+        camera.position    = origin_ + f64vec3{radius * std::sin(orbit),
+                                               1.7 + 0.4 * std::sin(seconds * 0.3),
+                                               radius * std::cos(orbit)};
+        camera.orientation = glm::angleAxis(orbit, f64vec3{0.0, 1.0, 0.0}) *
+                             glm::angleAxis(pitch, f64vec3{1.0, 0.0, 0.0});
 
         if (first_update_)
         {

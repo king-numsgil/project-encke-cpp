@@ -23,15 +23,39 @@ namespace encke::gpu
         f32vec4 cluster_depth;       // x near, y far, z log scale, w log bias
         u32vec4 cluster_grid;        // xyz grid dims, w max lights per cluster
         f32vec4 sun_direction;       // view space, pointing toward the sun
-        f32vec4 sun_radiance;        // linear rgb
+        f32vec4 sun_radiance;        // linear rgb, illuminance (lux) folded in
         f32vec4 ambient;             // linear rgb
-        u32vec4 counts;              // x light count
+        u32vec4 counts;              // x light count, y cascade count
+        f32vec4 shadow;              // x shadow distance, y fade start, z normal offset (texels)
     };
 
+    // Point and spot lights share one struct and one clustered path. A point
+    // light is a spot whose cone never cuts off: cos_outer below -1.
     struct Light
     {
         f32vec4 position_radius;     // view-space xyz, w influence radius (m)
         f32vec4 colour_intensity;    // linear rgb, w luminous intensity (cd)
+        f32vec4 direction_cos_outer; // view-space unit axis, w cos(outer half-angle)
+        f32     cos_inner;           // cos(inner half-angle); full intensity inside
+        u32     shadow;              // index into the shadow views, or kNoShadow
+        u32     pad0;
+        u32     pad1;
+    };
+
+    inline constexpr u32 kNoShadow = ~0u;
+
+    // One shadow map: a sun cascade (orthographic) or a spot (perspective).
+    // The lighting pass takes a view-space position straight to the map's clip
+    // space with view_to_clip; the world never appears.
+    struct ShadowView
+    {
+        f32mat4 view_to_clip;
+        // x: cascade far view distance (unused for spots)
+        // y: texel footprint in metres; for a spot, per metre from the light
+        // z: strength, 0 to 1, for fading out at the range limit
+        // w: 1 for perspective (spot), 0 for orthographic (cascade)
+        f32vec4 params;
+        u32vec4 image;               // x bindless sampled image
     };
 
     struct Object
@@ -74,10 +98,18 @@ namespace encke::gpu
         u32     ui_sampler;          // bindless sampler
         u32     ui_encode_srgb;      // nonzero: target is UNORM, encode in-shader
         f32     debug_gain;          // motion view magnification
+
+        u32 shadow_views;            // ShadowView per map, cascades first
+        u32 shadow_matrices;         // f32mat4 per (shadow view, object): object -> map clip.
+                                     // The shadow pass sets object_index to
+                                     // view * kMaxObjects + object and reads it directly.
+        u32 shadow_sampler;          // comparison sampler
+        u32 pad0;
     };
 
-    static_assert(sizeof(Frame) == 176);
-    static_assert(sizeof(Light) == 32);
+    static_assert(sizeof(Frame) == 192);
+    static_assert(sizeof(Light) == 64);
+    static_assert(sizeof(ShadowView) == 96);
     static_assert(sizeof(Object) == 224);
-    static_assert(sizeof(Push) == 96, "must fit the 128-byte guaranteed minimum");
+    static_assert(sizeof(Push) == 112, "must fit the 128-byte guaranteed minimum");
 }

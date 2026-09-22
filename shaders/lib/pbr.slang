@@ -72,3 +72,12 @@ public float point_attenuation(float distance, float radius)
     float window = saturate(1.0f - ratio * ratio * ratio * ratio);
     return window * window / max(distance * distance, 1e-4f);
 }
+
+// Spot cone falloff: 1 inside the inner half-angle, 0 outside the outer, a
+// squared ramp between. `from_light` is the unit direction from the light to
+// the surface. A point light passes cos_outer < -1, which is never reached.
+public float spot_cone(float3 from_light, float3 axis, float cos_outer, float cos_inner)
+{
+    float ramp = saturate((dot(from_light, axis) - cos_outer) / max(cos_inner - cos_outer, 1e-4f));
+    return ramp * ramp;
+}

@@ -16,6 +16,7 @@ namespace encke
             // Resolved against `shaders/` beside the executable.
             char const* spirv_name     = nullptr;
             char const* vertex_entry   = "vertex_main";
+            // Null for a depth-only pipeline with no fragment stage.
             char const* fragment_entry = "fragment_main";
 
             // One entry per colour attachment, in location order. Dynamic
@@ -32,6 +33,14 @@ namespace encke
             span<VkVertexInputAttributeDescription const> attributes;
 
             VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
+
+            // Clamp depth to the viewport range instead of clipping at the
+            // near and far planes. Shadow cascades use it so casters between
+            // the sun and the cascade's near plane still cast.
+            bool depth_clamp = false;
+
+            // Enables depth bias, set per draw with vkCmdSetDepthBias.
+            bool depth_bias = false;
 
             // Straight (non-premultiplied) alpha over every colour attachment:
             // rgb = src * a + dst * (1 - a), alpha accumulates coverage.

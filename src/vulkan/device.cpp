@@ -130,6 +130,8 @@ namespace encke
         //      non-uniform indexing, partially bound, update-after-bind.
         //  storage image read/write without format -- bindless storage images
         //      are declared without a format qualifier.
+        //  depthClamp -- shadow cascades clamp casters nearer the sun than
+        //      the near plane instead of clipping them away.
         bool require_features(FeatureChain const& have, FeatureChain& want, char const*& missing)
         {
             bool ok = true;
@@ -150,6 +152,7 @@ namespace encke
 #define ENCKE_REQUIRE(field) ok = need(have.field, want.field, #field) && ok
             ENCKE_REQUIRE(core.features.shaderStorageImageReadWithoutFormat);
             ENCKE_REQUIRE(core.features.shaderStorageImageWriteWithoutFormat);
+            ENCKE_REQUIRE(core.features.depthClamp);
 
             ENCKE_REQUIRE(v11.shaderDrawParameters);
 

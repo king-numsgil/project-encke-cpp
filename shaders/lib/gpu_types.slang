@@ -19,13 +19,29 @@ public struct GpuFrame
     public float4   sun_direction;   // view space, toward the sun
     public float4   sun_radiance;
     public float4   ambient;
-    public uint4    counts;          // x light count
+    public uint4    counts;          // x light count, y cascade count
+    public float4   shadow;          // x shadow distance, y fade start, z normal offset (texels)
 };
 
+// A point light is a spot whose cone never cuts off: cos_outer below -1.
 public struct GpuLight
 {
-    public float4 position_radius;   // view-space xyz, w radius (m)
-    public float4 colour_intensity;  // linear rgb, w intensity (cd)
+    public float4 position_radius;     // view-space xyz, w radius (m)
+    public float4 colour_intensity;    // linear rgb, w intensity (cd)
+    public float4 direction_cos_outer; // view-space unit axis, w cos(outer half-angle)
+    public float  cos_inner;
+    public uint   shadow;              // shadow view index, or kNoShadow
+    public uint   pad0;
+    public uint   pad1;
+};
+
+public static const uint kNoShadow = 0xFFFFFFFFu;
+
+public struct GpuShadowView
+{
+    public float4x4 view_to_clip;
+    public float4   params;   // x cascade far, y texel metres (per metre for spots), z strength, w perspective
+    public uint4    image;    // x bindless sampled image
 };
 
 public struct GpuObject
@@ -65,9 +81,17 @@ public struct Push
     public uint   ui_sampler;      // bindless sampler
     public uint   ui_encode_srgb;  // nonzero: target is UNORM, encode in-shader
     public float  debug_gain;      // motion view magnification
+
+    public uint shadow_views;      // GpuShadowView per map, cascades first
+    public uint shadow_matrices;   // float4x4 per (shadow view, object); the shadow
+                                   // pass indexes it with object_index directly
+    public uint shadow_sampler;    // comparison sampler
+    public uint pad0;
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride  = 176;
-public static const uint kLightStride  = 32;
-public static const uint kObjectStride = 224;
+public static const uint kFrameStride      = 192;
+public static const uint kLightStride      = 64;
+public static const uint kShadowViewStride = 96;
+public static const uint kObjectStride     = 224;
+public static const uint kMatrixStride     = 64;

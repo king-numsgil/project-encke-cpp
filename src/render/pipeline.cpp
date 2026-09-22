@@ -147,6 +147,8 @@ namespace encke
             return false;
         }
 
+        bool const has_fragment = config.fragment_entry != nullptr;
+
         VkPipelineShaderStageCreateInfo const stages[]{
             {
                 .sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -201,7 +203,7 @@ namespace encke
             .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .pNext                   = nullptr,
             .flags                   = 0,
-            .depthClampEnable        = VK_FALSE,
+            .depthClampEnable        = config.depth_clamp ? VK_TRUE : VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
             .polygonMode             = VK_POLYGON_MODE_FILL,
             .cullMode                = config.cull_mode,
@@ -210,7 +212,7 @@ namespace encke
             // negative height reverses it. Geometry wound counter-clockwise in
             // NDC with +Y up therefore stays front-facing here.
             .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            .depthBiasEnable         = VK_FALSE,
+            .depthBiasEnable         = config.depth_bias ? VK_TRUE : VK_FALSE,
             .depthBiasConstantFactor = 0.0f,
             .depthBiasClamp          = 0.0f,
             .depthBiasSlopeFactor    = 0.0f,
@@ -284,13 +286,14 @@ namespace encke
         VkDynamicState const dynamic_states[]{
             VK_DYNAMIC_STATE_VIEWPORT,
             VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_DEPTH_BIAS,
         };
 
         VkPipelineDynamicStateCreateInfo const dynamic{
             .sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
             .pNext             = nullptr,
             .flags             = 0,
-            .dynamicStateCount = static_cast<u32>(std::size(dynamic_states)),
+            .dynamicStateCount = config.depth_bias ? 3u : 2u,
             .pDynamicStates    = dynamic_states,
         };
 
@@ -317,7 +320,7 @@ namespace encke
             .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .pNext               = &rendering,
             .flags               = 0,
-            .stageCount          = static_cast<u32>(std::size(stages)),
+            .stageCount          = has_fragment ? 2u : 1u,
             .pStages             = stages,
             .pVertexInputState   = &vertex_input,
             .pInputAssemblyState = &input_assembly,

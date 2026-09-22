@@ -6,6 +6,7 @@
 //   2  lights per cluster, as a heat map
 //   3  view-space normals
 //   4  motion vectors, magnified by push.debug_gain
+//   5  sun shadow cascades, tinted per cascade and darkened where shadowed
 //
 // Output is linear, like every texture the UI samples. Every pixel is
 // written, so the image needs no clear.
@@ -14,6 +15,8 @@ import lib.bindless;
 import lib.cluster;
 import lib.gpu_types;
 import lib.normal;
+import lib.screen;
+import lib.shadow;
 
 float3 heat(float t)
 {
@@ -60,16 +63,39 @@ void compute_main(uint3 id : SV_DispatchThreadID)
         return;
     }
 
+    float distance = distance_from_depth(depth, frame);
+
     if (push.debug_view == 2u)
     {
-        // Infinite reversed-Z maps view distance d to depth = near / d.
-        float distance = frame.cluster_depth.x / depth;
-        uint  cluster  = cluster_of(pixel, distance, frame);
-        uint  count = g_rw_buffers[NonUniformResourceIndex(push.cluster_counts)].Load(cluster * 4u);
+        uint cluster = cluster_of(pixel, distance, frame);
+        uint count = g_rw_buffers[NonUniformResourceIndex(push.cluster_counts)].Load(cluster * 4u);
         target[pixel] = float4(heat(float(count) / 16.0f), 1.0f);
         return;
     }
 
     float2 encoded = g_textures[NonUniformResourceIndex(push.gbuffer_normal)].Load(texel).rg;
-    target[pixel]  = float4(decode_normal(encoded) * 0.5f + 0.5f, 1.0f);
+    float3 normal  = decode_normal(encoded);
+
+    if (push.debug_view == 5u)
+    {
+        // Cascade index as a hue, darkened where the sun is shadowed. Past
+        // the shadow distance: grey.
+        static const float3 kCascadeColours[4] = {
+            float3(1.0f, 0.25f, 0.2f), float3(0.25f, 1.0f, 0.3f),
+            float3(0.3f, 0.45f, 1.0f), float3(1.0f, 0.9f, 0.25f),
+        };
+
+        float2 ndc      = fragment_to_ndc(float2(pixel) + 0.5f, frame.screen.xy);
+        float3 position = view_at(ndc, distance, frame);
+        uint   cascade  = cascade_of(distance, frame);
+
+        float3 colour = cascade < frame.counts.y ? kCascadeColours[cascade % 4u] : float3(0.5f);
+        float  lit    = dot(normal, frame.sun_direction.xyz) > 0.0f
+                            ? sun_visibility(position, normal, frame)
+                            : 0.0f;
+        target[pixel] = float4(colour * (0.2f + 0.8f * lit), 1.0f);
+        return;
+    }
+
+    target[pixel] = float4(normal * 0.5f + 0.5f, 1.0f);
 }
