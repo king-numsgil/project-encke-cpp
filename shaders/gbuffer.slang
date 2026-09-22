@@ -46,10 +46,10 @@ VertexOut vertex_main(VertexIn input)
     float4    local  = float4(input.position, 1.0f);
 
     VertexOut output;
-    output.position = transform(object.mvp, local);
+    output.position = mul(object.mvp, local);
     output.current  = output.position;
-    output.previous = transform(object.prev_mvp, local);
-    output.normal   = transform(object.normal_view, float4(input.normal, 0.0f)).xyz;
+    output.previous = mul(object.prev_mvp, local);
+    output.normal   = mul(object.normal_view, float4(input.normal, 0.0f)).xyz;
     output.colour   = input.colour;
     return output;
 }

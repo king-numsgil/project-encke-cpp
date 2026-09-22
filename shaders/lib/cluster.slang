@@ -60,10 +60,10 @@ public uint cluster_of(uint2 pixel, float distance, GpuFrame frame)
 
 // View-space point at a given distance along the ray through an NDC position.
 // Specific to the infinite reversed-Z projection: only its two focal terms
-// matter, c0.x = f / aspect and c1.y = f.
+// matter, [0][0] = f / aspect and [1][1] = f.
 public float3 view_at(float2 ndc, float distance, GpuFrame frame)
 {
-    return float3(ndc.x * distance / frame.projection.c0.x,
-                  ndc.y * distance / frame.projection.c1.y,
+    return float3(ndc.x * distance / frame.projection[0][0],
+                  ndc.y * distance / frame.projection[1][1],
                   -distance);
 }

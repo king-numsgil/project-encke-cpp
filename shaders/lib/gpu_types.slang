@@ -1,39 +1,25 @@
 // Mirrors src/render/gpu_types.hpp member for member. Change one side, change
 // the other.
 //
-// Matrices arrive as four float4 COLUMNS, matching GLM's column-major memory
-// order, and are applied with transform() below rather than a float4x4. That
-// keeps them immune to whichever matrix-layout convention ByteAddressBuffer
-// Load<T> would otherwise apply.
+// Matrices are float4x4 read from GLM's column-major memory, which
+// -matrix-layout-column-major makes correct for ByteAddressBuffer Load<T> too.
+// Two traps: M * v is mul(m, v), since * is component-wise; and indexing is
+// row-first, so GLM's m[c][r] is m[r][c] here.
 //
 // Everything here is view space.
 
 module gpu_types;
 
-public struct Mat4
-{
-    public float4 c0;
-    public float4 c1;
-    public float4 c2;
-    public float4 c3;
-};
-
-// Column-major M * v, spelled out.
-public float4 transform(Mat4 m, float4 v)
-{
-    return m.c0 * v.x + m.c1 * v.y + m.c2 * v.z + m.c3 * v.w;
-}
-
 public struct GpuFrame
 {
-    public Mat4   projection;
-    public float4 screen;          // xy size in px, zw 1/size
-    public float4 cluster_depth;   // x near, y far, z log scale, w log bias
-    public uint4  cluster_grid;    // xyz dims, w max lights per cluster
-    public float4 sun_direction;   // view space, toward the sun
-    public float4 sun_radiance;
-    public float4 ambient;
-    public uint4  counts;          // x light count
+    public float4x4 projection;
+    public float4   screen;          // xy size in px, zw 1/size
+    public float4   cluster_depth;   // x near, y far, z log scale, w log bias
+    public uint4    cluster_grid;    // xyz dims, w max lights per cluster
+    public float4   sun_direction;   // view space, toward the sun
+    public float4   sun_radiance;
+    public float4   ambient;
+    public uint4    counts;          // x light count
 };
 
 public struct GpuLight
@@ -44,11 +30,11 @@ public struct GpuLight
 
 public struct GpuObject
 {
-    public Mat4   mvp;
-    public Mat4   prev_mvp;
-    public Mat4   normal_view;
-    public float4 albedo_roughness;
-    public float4 emissive_metallic;
+    public float4x4 mvp;
+    public float4x4 prev_mvp;
+    public float4x4 normal_view;
+    public float4   albedo_roughness;
+    public float4   emissive_metallic;
 };
 
 public struct Push
