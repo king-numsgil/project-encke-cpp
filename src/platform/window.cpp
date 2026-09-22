@@ -66,6 +66,21 @@ namespace encke
         return i32vec2{width, height};
     }
 
+    void Window::set_relative_mouse(bool relative)
+    {
+        if (window_ != nullptr && !SDL_SetWindowRelativeMouseMode(window_, relative))
+        {
+            log::sdl_error("SDL_SetWindowRelativeMouseMode");
+        }
+    }
+
+    bool Window::key_down(SDL_Scancode key) const
+    {
+        int         count = 0;
+        bool const* keys  = SDL_GetKeyboardState(&count);
+        return static_cast<int>(key) < count && keys[static_cast<size_t>(key)];
+    }
+
     FrameEvents Window::poll()
     {
         FrameEvents events;
@@ -106,6 +121,32 @@ namespace encke
             case SDL_EVENT_WINDOW_MAXIMIZED:
                 minimized_ = false;
                 events.resized = true;
+                break;
+
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                events.look_released = true;
+                break;
+
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                if (event.button.button == SDL_BUTTON_RIGHT)
+                {
+                    events.look_pressed = true;
+                }
+                break;
+
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (event.button.button == SDL_BUTTON_RIGHT)
+                {
+                    events.look_released = true;
+                }
+                break;
+
+            case SDL_EVENT_MOUSE_MOTION:
+                events.mouse_delta += f32vec2{event.motion.xrel, event.motion.yrel};
+                break;
+
+            case SDL_EVENT_MOUSE_WHEEL:
+                events.wheel += event.wheel.y;
                 break;
 
             case SDL_EVENT_KEY_DOWN:

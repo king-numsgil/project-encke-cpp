@@ -27,6 +27,12 @@ namespace encke::gpu
         f32vec4 ambient;             // linear rgb
         u32vec4 counts;              // x light count, y cascade count
         f32vec4 shadow;              // x shadow distance, y fade start, z normal offset (texels)
+
+        // Auto-exposure; see render/config.hpp for what each one means.
+        f32vec4 exposure_range;      // x log2 min luminance, y log2 range, z low, w high percentile
+        f32vec4 exposure_adapt;      // x frame seconds, y speed brighter, z darker, w compensation EV
+        f32vec4 exposure_limits;     // x min EV100, y max EV100, z 1 = jump to target,
+                                     // w EV100 to start from when jumping
     };
 
     // Point and spot lights share one struct and one clustered path. A point
@@ -104,12 +110,20 @@ namespace encke::gpu
                                      // The shadow pass sets object_index to
                                      // view * kMaxObjects + object and reads it directly.
         u32 shadow_sampler;          // comparison sampler
-        u32 pad0;
+
+        // 1x1 R32F holding the adapted EV100. Patched per pass like
+        // debug_target: its storage handle for the exposure pass, its sampled
+        // handle for tonemap. kInvalid in tonemap means use `exposure` above,
+        // the scene's fixed value.
+        u32 exposure_image;
+
+        // Only the exposure passes read this.
+        u32 exposure_histogram;      // u32 per bin, writable
     };
 
-    static_assert(sizeof(Frame) == 192);
+    static_assert(sizeof(Frame) == 240);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
     static_assert(sizeof(Object) == 224);
-    static_assert(sizeof(Push) == 112, "must fit the 128-byte guaranteed minimum");
+    static_assert(sizeof(Push) == 116, "must fit the 128-byte guaranteed minimum");
 }

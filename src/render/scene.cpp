@@ -246,7 +246,12 @@ namespace encke
             lights.push_back(light);
         }
 
-        previous_camera = camera;
+        // Standing 16 m from the pole at eye height, facing across the field.
+        f64 const facing   = 0.25;
+        camera.position    = origin_ + f64vec3{16.0 * std::sin(facing), 1.7, 16.0 * std::cos(facing)};
+        camera.orientation = glm::angleAxis(facing, f64vec3{0.0, 1.0, 0.0}) *
+                             glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0});
+        previous_camera    = camera;
     }
 
     void Scene::update(f64 seconds)
@@ -272,19 +277,8 @@ namespace encke
             }
         }
 
-        // A slow orbit around the field, facing its centre. Once every couple
-        // of minutes the camera tilts up far enough to put the zenith, and so
-        // the Moon, in view: ENCKE_FIXED_TIME=31.4 is the top of the first.
-        f64 const orbit  = seconds * 0.05;
-        f64 const radius = 16.0;
-        f64 const glance = std::pow(std::max(std::sin(seconds * 0.05), 0.0), 6.0);
-        f64 const pitch  = -0.08 + 1.2 * glance;
-
-        camera.position    = origin_ + f64vec3{radius * std::sin(orbit),
-                                               1.7 + 0.4 * std::sin(seconds * 0.3),
-                                               radius * std::cos(orbit)};
-        camera.orientation = glm::angleAxis(orbit, f64vec3{0.0, 1.0, 0.0}) *
-                             glm::angleAxis(pitch, f64vec3{1.0, 0.0, 0.0});
+        // The camera is not animated: the app flies it (render/fly_camera),
+        // after this has rolled it into previous_camera.
 
         if (first_update_)
         {

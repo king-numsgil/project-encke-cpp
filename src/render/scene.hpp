@@ -85,20 +85,22 @@ namespace encke
         // An Earth-sized planet whose north pole is the floor, strewn with
         // boxes, spheres and pillars, lit by a Sun low on the horizon and a
         // handful of spot and point lights, with the Moon overhead at its real
-        // distance. Built far from the world origin on purpose, so any
+        // distance. Places the camera at the edge of the field. Built far from the world origin on purpose, so any
         // regression in camera-relative rendering shows up as visible jitter.
         void build_test_planet();
 
-        // Advances animation and rolls this frame's transforms into last
-        // frame's, which is what motion vectors are measured against.
+        // Advances animation and rolls this frame's transforms, camera
+        // included, into last frame's, which is what motion vectors are
+        // measured against. Move the camera after this, not before.
         void update(f64 seconds);
 
         vector<SceneObject> objects;
         vector<SceneLight>  lights;
         Star                star;
 
-        // Exposure as EV100: the scene is lit by a real-magnitude sun, so the
-        // camera has to be set for daylight.
+        // Exposure as EV100: the fixed value when auto-exposure is off, and
+        // where it starts when on. The scene is lit by a real-magnitude sun,
+        // so it is set for daylight.
         f32 ev100 = 14.0f;
 
         // Stand-in for bounce light until there is any GI, in the same

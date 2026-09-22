@@ -56,9 +56,10 @@ namespace encke
     //   3. clusters   compute assign lights to the froxel grid
     //   4. lighting   compute shade each pixel against its cluster's lights,
     //                         adding onto the HDR target
-    //   5. debug      compute one visualisation image per open debug window
-    //   6. tonemap    raster  HDR -> swapchain
-    //   7. overlay    raster  caller-recorded UI, through the swapchain's UI view
+    //   5. exposure   compute luminance histogram, then meter and adapt EV100
+    //   6. debug      compute one visualisation image per open debug window
+    //   7. tonemap    raster  HDR -> swapchain, at the adapted exposure
+    //   8. overlay    raster  caller-recorded UI, through the swapchain's UI view
     class Renderer
     {
     public:
@@ -118,6 +119,15 @@ namespace encke
         // Magnification for the motion visualisation. Motion is per-frame
         // displacement, so the right gain depends on the frame rate.
         void set_motion_gain(f32 gain) { motion_gain_ = gain; }
+
+        // Wall-clock seconds since the previous frame, which auto-exposure
+        // adapts over. `jump` skips adaptation and goes straight to the
+        // metered value, so pinned-time captures come out identical.
+        void set_frame_time(f64 seconds, bool jump)
+        {
+            frame_seconds_ = seconds;
+            exposure_jump_ = jump;
+        }
 
         // Bindless sampled-image handle of a visualisation, in
         // READ_ONLY_OPTIMAL by the time the overlay runs. Stable across
@@ -212,12 +222,28 @@ namespace encke
         ShadowPlan                                     shadow_plan_;
         array<vector<u32>, config::kShadowViewCount>   shadow_casters_;
 
+        // Auto-exposure. The histogram is GPU-only and zeroed by the adapt
+        // pass after reading, so it starts each frame empty. The EV100 image
+        // persists across frames, which is the adaptation state; it is
+        // registered twice, like HDR, because compute writes it in GENERAL and
+        // tonemap samples it in READ_ONLY_OPTIMAL.
+        Buffer exposure_histogram_;
+        u32    exposure_histogram_handle_ = BindlessSet::kInvalid;
+        Image  exposure_image_;
+        u32    exposure_storage_handle_ = BindlessSet::kInvalid;
+        u32    exposure_sampled_handle_ = BindlessSet::kInvalid;
+        bool   exposure_written_        = false;   // image holds a value, in READ_ONLY_OPTIMAL
+        f64    frame_seconds_           = 0.0;
+        bool   exposure_jump_           = true;
+
         GraphicsPipeline gbuffer_pipeline_;
         GraphicsPipeline shadow_pipeline_;
         GraphicsPipeline tonemap_pipeline_;
         ComputePipeline  cluster_pipeline_;
         ComputePipeline  lighting_pipeline_;
         ComputePipeline  debug_pipeline_;
+        ComputePipeline  histogram_pipeline_;
+        ComputePipeline  adapt_pipeline_;
 
         array<Mesh, kMeshKindCount> meshes_;
 

@@ -21,6 +21,9 @@ public struct GpuFrame
     public float4   ambient;
     public uint4    counts;          // x light count, y cascade count
     public float4   shadow;          // x shadow distance, y fade start, z normal offset (texels)
+    public float4   exposure_range;  // x log2 min luminance, y log2 range, z low, w high percentile
+    public float4   exposure_adapt;  // x frame seconds, y speed brighter, z darker, w compensation EV
+    public float4   exposure_limits; // x min EV100, y max EV100, z 1 = jump to target, w EV100 to start from
 };
 
 // A point light is a spot whose cone never cuts off: cos_outer below -1.
@@ -86,11 +89,15 @@ public struct Push
     public uint shadow_matrices;   // float4x4 per (shadow view, object); the shadow
                                    // pass indexes it with object_index directly
     public uint shadow_sampler;    // comparison sampler
-    public uint pad0;
+    public uint exposure_image;    // 1x1 R32F adapted EV100: storage handle in the exposure
+                                   // pass, sampled in tonemap, where ~0 means use push.exposure
+
+    // Only the exposure passes read these.
+    public uint exposure_histogram; // u32 per bin, writable
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 192;
+public static const uint kFrameStride      = 240;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
 public static const uint kObjectStride     = 224;

@@ -56,4 +56,32 @@ namespace encke::config
     inline constexpr f32 kShadowNormalOffset = 1.5f;
 
     inline constexpr u32 kShadowViewCount = kCascadeCount + kMaxShadowedSpots;
+
+    // -- auto-exposure ----------------------------------------------------------------
+    // Off: the scene's fixed Scene::ev100 is used instead.
+    inline constexpr bool kAutoExposure = true;
+
+    // The luminance histogram covers log2 luminance from kExposureLogMin over
+    // kExposureLogRange stops. Anything darker -- empty sky, whose clear
+    // colour is far below it -- lands in bin 0 and is ignored, so staring
+    // into space does not drag the exposure up without limit.
+    inline constexpr u32 kExposureBins     = 256;
+    inline constexpr f32 kExposureLogMin   = -8.0f;
+    inline constexpr f32 kExposureLogRange = 30.0f;
+
+    // The average skips the darkest and brightest pixels, as fractions of the
+    // counted ones, so a lamp or a pool of shade does not swing it.
+    inline constexpr f32 kExposureLowPercentile  = 0.10f;
+    inline constexpr f32 kExposureHighPercentile = 0.95f;
+
+    // Limits on the EV100 the camera will adapt to, and a bias applied after
+    // metering: positive brightens the image.
+    inline constexpr f32 kExposureMinEv        = -2.0f;
+    inline constexpr f32 kExposureMaxEv        = 18.0f;
+    inline constexpr f32 kExposureCompensation = 0.0f;
+
+    // Adaptation rate, per second, toward the metered EV. Like an eye,
+    // faster when the scene gets brighter than when it gets darker.
+    inline constexpr f32 kExposureSpeedBrighter = 3.0f;
+    inline constexpr f32 kExposureSpeedDarker   = 1.0f;
 }

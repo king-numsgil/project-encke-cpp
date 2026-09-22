@@ -90,6 +90,7 @@ src/
     stats_window.{hpp,cpp} frame timing history and the window graphing it
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
+    fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
     scene.{hpp,cpp}      f64 world: test planet, star, objects, lights
     mesh.{hpp,cpp}       Vertex, Mesh, procedural cube, sphere, pole-relative planet
     config.hpp           every renderer capacity and tuning constant
@@ -103,7 +104,8 @@ shaders/
   cluster_build.slang    compute: lights -> froxels
   lighting.slang         compute: shade from the cluster's lights, shadowed
   debug_views.slang      compute: cluster heat, normals, motion, cascades, into window images
-  tonemap.slang          HDR -> swapchain
+  exposure.slang         compute: luminance histogram, then metered and adapted EV100
+  tonemap.slang          HDR -> swapchain, at the adapted exposure
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
   lib/
     bindless.slang       the descriptor arrays; mirrors vulkan/bindless.hpp
@@ -209,6 +211,7 @@ The passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 | G-buffer | raster | albedo/ao, octahedral normal, roughness/metallic, motion, depth; emissive seeds the HDR target |
 | clusters | compute | one thread per froxel, tests every light against its view-space AABB |
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
+| exposure | compute | luminance histogram of HDR, then one group meters and adapts EV100 |
 | debug views | compute | one visualisation image per open debug window; skipped when none is open |
 | tonemap | raster | full-screen triangle, exposure + ACES, into the sRGB swapchain |
 | overlay | raster | caller-recorded UI, its own rendering scope on the UI view, `LOAD` |
@@ -328,8 +331,10 @@ in the fence wait, acquire and present.
   corner pixels differ between runs whatever the renderer does. Last verified
   with the debug views split out: identical apart from a 4x4 corner.
 - **`ENCKE_FIXED_TIME` pins animation** so two captures can be compared. The
-  camera animates on wall-clock, so without it a comparison across runs is
-  comparing camera positions, not renderer changes.
+  spinning showpiece animates on wall-clock, so without it a comparison across
+  runs compares its rotation, not renderer changes. The camera starts at the
+  same pose every run and only moves when flown, so a capture must not touch
+  the mouse.
 - **`ENCKE_NO_UI` (or F1) hides the overlay**, and a byte comparison needs it:
   the stats window's numbers change every frame, so two captures with it
   showing never match.
@@ -357,8 +362,37 @@ those are exterior lights and want different treatment anyway.
 - The acquire semaphore is waited at `COLOR_ATTACHMENT_OUTPUT`, which stalls
   the G-buffer pass on the swapchain image even though only the tonemap needs
   it. Splitting the submission would fix it.
-- Exposure is a fixed EV100 set by the scene (`Scene::ev100`), not automatic.
-  The Sun is real-magnitude, so it is set for daylight.
+
+## Auto-exposure
+
+`shaders/exposure.slang` runs after lighting. `histogram_main` bins every
+pixel's log2 luminance into `config::kExposureBins` bins; bin 0 takes
+everything below the range and is ignored, which keeps empty sky from
+dragging the exposure to its limit. `adapt_main` is one group: it averages
+log luminance between two percentiles, meters EV100 as `log2(L) + 3` (the
+ISO 100, K = 12.5 convention), clamps it, moves the stored EV100 toward it
+over wall-clock time, faster when the scene brightens, and zeroes the
+histogram for the next frame. Tonemap's exposure is `1 / (1.2 * 2^EV100)`,
+the same formula the CPU uses for a fixed EV. Every knob is in
+`render/config.hpp`; `kAutoExposure = false` falls back to `Scene::ev100`.
+
+- **The state is a 1x1 R32F image, registered twice like HDR**: storage for
+  the adapt pass in `GENERAL`, sampled for tonemap in `READ_ONLY_OPTIMAL`.
+  A buffer would need the read-only binding in the fragment stage and the
+  writable one in compute, and a buffer lives in exactly one of those. It
+  keeps its contents across frames, so after the first frame its transition
+  comes from `READ_ONLY_OPTIMAL`, never `UNDEFINED`. `push.exposure_image` is
+  patched per pass: the storage handle for the exposure passes, the sampled
+  one for tonemap.
+- **The first frame, and every frame under `ENCKE_FIXED_TIME`, jumps straight
+  to the metered value**, starting from `Scene::ev100` if nothing was metered.
+  Pinned-time captures therefore match across runs, and the average is summed
+  serially in a fixed order for the same reason.
+- **Metering averages; it does not weight.** With only a couple of emissive
+  lamp heads on screen against empty sky, the camera exposes for the lamps and
+  anything dimmer darkens. Centre weighting would change that; there is none.
+
+The push constants are at 116 of the guaranteed 128 bytes.
 
 ## Shadows — built, first draft
 
@@ -423,9 +457,33 @@ numbers with full precision. Rings are spaced geometrically, so the facets are
 centimetres underfoot and hundreds of kilometres at the horizon.
 
 The Moon is a sphere of its real radius at its real distance straight up. It
-is a few pixels across, as it should be. The camera orbits the field and,
-every couple of minutes, tilts far enough up to show it; `ENCKE_FIXED_TIME=31.4`
-is the top of the first tilt.
+is a few pixels across, as it should be; look straight up to find it.
+
+## Camera control
+
+`render/fly_camera` flies the camera, editor-style: everything happens while
+the right mouse button is held. Mouse looks (yaw about world +Y, pitch
+clamped, no roll), WASD moves along the view, E/Q go up and down, Shift is
+5x, Ctrl is 0.2x, and the wheel scales the base speed by 1.25 per notch
+between 2 m/s and 10,000 km/s. Position is f64 like the rest of the world.
+
+The time step is wall clock from one fixed point in the loop to the same
+point next iteration, clamped to 0.1 s. It was once measured from where the
+previous `draw()` returned, which leaves out the fence wait, acquire and
+present -- most of a frame -- and made movement slow and violently uneven.
+
+- **Holding the button hands mouse and keyboard to the camera**: relative
+  mouse mode hides the cursor, and the UI gets `ImGuiConfigFlags_NoMouse |
+  NoKeyboard` until release. A right click that lands on a UI window stays
+  with the UI.
+- **Up and down are E/Q, not Space/Ctrl**, because ImGui's keyboard
+  navigation activates the focused widget on Space.
+- **Losing focus counts as release**, since the button-up may never arrive.
+- **The camera moves after `Scene::update`**, which rolls this frame's camera
+  into `previous_camera` for motion vectors. Moving it before would make every
+  frame's motion zero.
+- **World +Y as up is a test-planet assumption.** Anywhere else on a planet,
+  or in a ship, wants a local up; `FlyCamera` is where it goes.
 
 ## CPU-written buffers are host-coherent, required
 

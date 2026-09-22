@@ -6,6 +6,7 @@
 #include "core/memory.hpp"
 #include "ui/image_window.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 
 #include <imgui.h>
@@ -29,6 +30,9 @@ namespace encke
         // the bottom a frame-limited 60.
         constexpr f32 kMotionGainMin = 10.0f;
         constexpr f32 kMotionGainMax = 100000.0f;
+
+        // Longest frame the camera and exposure will integrate over at once.
+        constexpr f64 kMaxFrameSeconds = 0.1;
 
         // Where each debug window first opens: beside the stats window and
         // clear of one another at the default 1280x720, so opening them all
@@ -150,6 +154,7 @@ namespace encke
         window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
 
         scene_.build_test_planet();
+        fly_.reset(scene_.camera);
         log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
 
         fixed_time_ = fixed_time();
@@ -171,6 +176,8 @@ namespace encke
         }
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
+        log::info("camera: hold right mouse to look; WASD move, E/Q up/down, "
+                  "Shift fast, Ctrl slow, wheel scales speed");
 
         return true;
     }
@@ -220,6 +227,52 @@ namespace encke
         {
             show_ui_ = true;
         }
+    }
+
+    void App::set_looking(bool looking)
+    {
+        if (looking == looking_)
+        {
+            return;
+        }
+
+        looking_ = looking;
+        window_.set_relative_mouse(looking);
+        ui_.set_input_blocked(looking);
+    }
+
+    void App::fly(FrameEvents const& events, f64 seconds)
+    {
+        // A right click on a UI window belongs to the UI.
+        if (events.look_pressed && !ui_.wants_mouse())
+        {
+            set_looking(true);
+        }
+        if (events.look_released)
+        {
+            set_looking(false);
+        }
+
+        if (!looking_)
+        {
+            return;
+        }
+
+        auto axis = [this](SDL_Scancode positive, SDL_Scancode negative) {
+            return (window_.key_down(positive) ? 1.0 : 0.0) - (window_.key_down(negative) ? 1.0 : 0.0);
+        };
+
+        FlyInput const input{
+            .look  = events.mouse_delta,
+            .move  = f64vec3{axis(SDL_SCANCODE_D, SDL_SCANCODE_A),
+                             axis(SDL_SCANCODE_E, SDL_SCANCODE_Q),
+                             axis(SDL_SCANCODE_W, SDL_SCANCODE_S)},
+            .wheel = events.wheel,
+            .fast  = window_.key_down(SDL_SCANCODE_LSHIFT) || window_.key_down(SDL_SCANCODE_RSHIFT),
+            .slow  = window_.key_down(SDL_SCANCODE_LCTRL) || window_.key_down(SDL_SCANCODE_RCTRL),
+        };
+
+        fly_.update(scene_.camera, input, seconds);
     }
 
     void App::draw_ui()
@@ -297,6 +350,7 @@ namespace encke
                 // a frame, so do not let it register as one.
                 SDL_WaitEvent(nullptr);
                 last_frame_.reset();
+                last_tick_.reset();
                 continue;
             }
 
@@ -316,9 +370,32 @@ namespace encke
             // f32 seconds lose millisecond resolution after a few hours.
             f64 const seconds =
                 fixed_time_.value_or(static_cast<f64>(log::elapsed_ms()) / 1000.0);
+
+            // Wall-clock time since this same point last iteration, for flying
+            // and exposure adaptation. Stamp to stamp at one fixed point in
+            // the loop, so it spans exactly one whole frame; measuring from
+            // where the previous draw() returned would span only the poll and
+            // the UI, a jittering sliver of it. Clamped, so a hitch does not
+            // fling the camera. Not pinned by ENCKE_FIXED_TIME: a pinned
+            // camera still has to move at a real speed when flown.
+            auto const tick  = std::chrono::steady_clock::now();
+            f64        delta = 0.0;
+            if (last_tick_.has_value())
+            {
+                delta = std::min(std::chrono::duration<f64>(tick - *last_tick_).count(),
+                                 kMaxFrameSeconds);
+            }
+            last_tick_ = tick;
+
             scene_.update(seconds);
+            fly(events, delta);
 
             draw_ui();
+
+            // With animation pinned, exposure jumps straight to the metered
+            // value, so two runs' captures match however long each took to
+            // start.
+            renderer_.set_frame_time(delta, fixed_time_.has_value());
 
             FrameResult const result = renderer_.draw(swapchain_, scene_, &ui_);
 

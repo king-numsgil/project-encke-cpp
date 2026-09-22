@@ -38,5 +38,14 @@ float4 fragment_main(VertexOut input) : SV_Target
     int3   texel = int3(int2(input.position.xy), 0);
     float3 hdr   = g_textures[NonUniformResourceIndex(push.hdr_sampled)].Load(texel).rgb;
 
-    return float4(aces(hdr * push.exposure), 1.0f);
+    // Auto-exposure leaves an adapted EV100 in a 1x1 image; otherwise the
+    // CPU pushed the scene's fixed exposure.
+    float exposure = push.exposure;
+    if (push.exposure_image != 0xFFFFFFFFu)
+    {
+        float ev100 = g_textures[NonUniformResourceIndex(push.exposure_image)].Load(int3(0, 0, 0)).r;
+        exposure    = 1.0f / (1.2f * exp2(ev100));
+    }
+
+    return float4(aces(hdr * exposure), 1.0f);
 }

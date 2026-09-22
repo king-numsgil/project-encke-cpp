@@ -286,6 +286,26 @@ namespace encke
             return false;
         }
 
+        // Zeroed once here; after that the adapt pass clears it each frame.
+        vector<u32> const empty_histogram(config::kExposureBins, 0u);
+        if (!exposure_histogram_.init_device(allocator, device,
+                                             config::kExposureBins * sizeof(u32), storage,
+                                             empty_histogram.data()) ||
+            !exposure_image_.init(allocator, device,
+                                  {VK_FORMAT_R32_SFLOAT,
+                                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                   VK_IMAGE_ASPECT_COLOR_BIT, "exposure"},
+                                  VkExtent2D{1, 1}))
+        {
+            return false;
+        }
+
+        exposure_histogram_handle_ =
+            bindless_.add_writable_buffer(exposure_histogram_.handle(), exposure_histogram_.size());
+        exposure_storage_handle_ = bindless_.add_storage_image(exposure_image_.view());
+        exposure_sampled_handle_ =
+            bindless_.add_sampled_image(exposure_image_.view(), VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+
         vector<Vertex> vertices;
         vector<u32>    indices;
 
@@ -370,12 +390,28 @@ namespace encke
             .push_constant_size = sizeof(gpu::Push),
         };
 
+        ComputePipeline::Config const histogram_config{
+            .spirv_name         = "exposure.spv",
+            .entry              = "histogram_main",
+            .set_layout         = bindless_.layout(),
+            .push_constant_size = sizeof(gpu::Push),
+        };
+
+        ComputePipeline::Config const adapt_config{
+            .spirv_name         = "exposure.spv",
+            .entry              = "adapt_main",
+            .set_layout         = bindless_.layout(),
+            .push_constant_size = sizeof(gpu::Push),
+        };
+
         if (!gbuffer_pipeline_.init(device, gbuffer_config) ||
             !shadow_pipeline_.init(device, shadow_config) ||
             !tonemap_pipeline_.init(device, tonemap_config) ||
             !cluster_pipeline_.init(device, cluster_config) ||
             !lighting_pipeline_.init(device, lighting_config) ||
-            !debug_pipeline_.init(device, debug_config))
+            !debug_pipeline_.init(device, debug_config) ||
+            !histogram_pipeline_.init(device, histogram_config) ||
+            !adapt_pipeline_.init(device, adapt_config))
         {
             return false;
         }
@@ -686,6 +722,16 @@ namespace encke
             .counts        = u32vec4{light_count, shadow_plan_.cascade_count, 0u, 0u},
             .shadow        = f32vec4{shadow_far, shadow_far * (1.0f - config::kShadowFadeFraction),
                                      config::kShadowNormalOffset, 0.0f},
+            .exposure_range  = f32vec4{config::kExposureLogMin, config::kExposureLogRange,
+                                       config::kExposureLowPercentile,
+                                       config::kExposureHighPercentile},
+            .exposure_adapt  = f32vec4{static_cast<f32>(frame_seconds_),
+                                       config::kExposureSpeedBrighter, config::kExposureSpeedDarker,
+                                       config::kExposureCompensation},
+            // Nothing stored yet on the first frame, so it jumps too.
+            .exposure_limits = f32vec4{config::kExposureMinEv, config::kExposureMaxEv,
+                                       exposure_jump_ || !exposure_written_ ? 1.0f : 0.0f,
+                                       scene.ev100},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 
@@ -829,8 +875,9 @@ namespace encke
             .debug_gain       = motion_gain_,
             .shadow_views     = resources.shadow_views_handle,
             .shadow_matrices  = resources.shadow_matrices_handle,
-            .shadow_sampler   = shadow_sampler_handle_,
-            .pad0             = 0,
+            .shadow_sampler     = shadow_sampler_handle_,
+            .exposure_image     = BindlessSet::kInvalid,
+            .exposure_histogram = exposure_histogram_handle_,
         };
 
         u32 const shadow_view_count = shadow_plan_.cascade_count + shadow_plan_.spot_count;
@@ -1044,7 +1091,50 @@ namespace encke
 
         timestamps_.mark(command, "lighting");
 
-        // -- 7. debug visualisations -----------------------------------------
+        // -- 7. exposure -----------------------------------------------------
+        // The histogram reads the HDR target lighting just wrote, and adds
+        // into bins last frame's adapt pass zeroed: one compute-to-compute
+        // memory barrier covers both, since its first scope reaches back
+        // through earlier submissions. The EV100 image keeps its contents, so
+        // after the first frame it comes from READ_ONLY_OPTIMAL, where last
+        // frame's tonemap sampled it, not UNDEFINED.
+        if (config::kAutoExposure)
+        {
+            VkMemoryBarrier2 const hdr_written = compute_to_compute(
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+            Transition const to_storage[]{
+                {exposure_image_.handle(),
+                 exposure_written_ ? VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT},
+            };
+            barrier(command, to_storage, span<VkMemoryBarrier2 const>{&hdr_written, 1});
+
+            push.exposure_image = exposure_storage_handle_;
+
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, histogram_pipeline_.handle());
+            vkCmdPushConstants(command, histogram_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
+                               sizeof(push), &push);
+            vkCmdDispatch(command, groups(extent.width, 16), groups(extent.height, 16), 1);
+
+            VkMemoryBarrier2 const binned = compute_to_compute(
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            barrier(command, {}, span<VkMemoryBarrier2 const>{&binned, 1});
+
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, adapt_pipeline_.handle());
+            vkCmdDispatch(command, 1, 1, 1);
+
+            // From here on the handle is the sampled view, for tonemap.
+            push.exposure_image = exposure_sampled_handle_;
+        }
+
+        timestamps_.mark(command, "exposure");
+
+        // -- 8. debug visualisations -----------------------------------------
         // Only for open windows. The inputs -- G-buffer, depth, cluster counts
         // -- were already made visible to compute for lighting. The images
         // themselves were sampled by last frame's UI, so the write here waits
@@ -1092,13 +1182,13 @@ namespace encke
         // fixed and the stats history does not reset on every toggle.
         timestamps_.mark(command, "debug views");
 
-        // -- 8. HDR and debug images -> sampled, swapchain -> attachment -----
+        // -- 9. HDR, exposure and debug images -> sampled, swapchain -> attachment
         {
             VkImage const target = swapchain.image(image_index);
 
             // Filled by assignment: a std::array brace-initialised with only
             // some of its elements draws GCC's -Wmissing-braces.
-            array<Transition, 2 + kDebugWindowCount> handoff{};
+            array<Transition, 3 + kDebugWindowCount> handoff{};
 
             handoff[0] = Transition{hdr_.handle(), VK_IMAGE_LAYOUT_GENERAL,
                                     VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
@@ -1117,6 +1207,16 @@ namespace encke
                                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT};
             size_t count = 2;
 
+            if (config::kAutoExposure)
+            {
+                handoff[count++] = Transition{
+                    exposure_image_.handle(), VK_IMAGE_LAYOUT_GENERAL,
+                    VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+                exposure_written_ = true;
+            }
+
             // The UI samples these in the overlay pass. A closed window's
             // image is left alone; nothing reads it.
             for (u32 index = 0; index < kDebugWindowCount; ++index)
@@ -1134,7 +1234,7 @@ namespace encke
             barrier(command, span<Transition const>{handoff.data(), count});
         }
 
-        // -- 9. tonemap ------------------------------------------------------
+        // -- 10. tonemap -----------------------------------------------------
         {
             VkRenderingAttachmentInfo colour =
                 colour_attachment(swapchain.view(image_index), {{0.0f, 0.0f, 0.0f, 1.0f}});
@@ -1165,7 +1265,7 @@ namespace encke
 
         timestamps_.mark(command, "tonemap");
 
-        // -- 10. overlay -----------------------------------------------------
+        // -- 11. overlay -----------------------------------------------------
         // A separate rendering scope because it may write through a different
         // view: UNORM over the same sRGB image, so the UI can blend in the
         // space it was designed in. Loading what tonemap stored is a read of
@@ -1214,7 +1314,7 @@ namespace encke
 
         timestamps_.mark(command, "UI");
 
-        // -- 11. present -----------------------------------------------------
+        // -- 12. present -----------------------------------------------------
         {
             Transition const present[]{
                 {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1406,6 +1506,11 @@ namespace encke
         cluster_pipeline_.shutdown();
         lighting_pipeline_.shutdown();
         debug_pipeline_.shutdown();
+        histogram_pipeline_.shutdown();
+        adapt_pipeline_.shutdown();
+
+        exposure_histogram_.shutdown();
+        exposure_image_.shutdown();
 
         for (Mesh& mesh : meshes_)
         {

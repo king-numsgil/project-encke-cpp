@@ -52,6 +52,11 @@ namespace encke
         // True while the pointer is over, or dragging, a UI window.
         bool wants_mouse() const;
 
+        // Stops the UI reacting to mouse and keyboard, for while the camera
+        // has them: otherwise the hidden cursor still hovers windows and the
+        // movement keys drive keyboard navigation.
+        void set_input_blocked(bool blocked);
+
     private:
         ImGuiVulkan renderer_;
 

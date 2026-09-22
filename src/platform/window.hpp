@@ -17,6 +17,18 @@ namespace encke
 
         // F1 pressed this frame: show or hide the UI overlay.
         bool toggle_ui = false;
+
+        // Right mouse button went down or up this frame; losing focus counts
+        // as up, since the release would otherwise never arrive.
+        bool look_pressed  = false;
+        bool look_released = false;
+
+        // Mouse motion this frame, in pixels, +x right and +y down. Raw deltas
+        // while relative mode is on.
+        f32vec2 mouse_delta{0.0f};
+
+        // Wheel notches this frame, positive away from the user.
+        f32 wheel = 0.0f;
     };
 
     class Window
@@ -48,6 +60,14 @@ namespace encke
         // A minimised window reports a zero-sized drawable, which is not a
         // legal swapchain extent. Callers skip rendering while this holds.
         bool minimized() const { return minimized_; }
+
+        // Hides the cursor and reports raw motion without it hitting the
+        // screen edge. For mouse look.
+        void set_relative_mouse(bool relative);
+
+        // Current state of a key, by physical position, so WASD stays WASD on
+        // any keyboard layout.
+        bool key_down(SDL_Scancode key) const;
 
     private:
         SDL_Window* window_        = nullptr;

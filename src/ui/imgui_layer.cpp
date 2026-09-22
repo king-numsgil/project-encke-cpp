@@ -97,6 +97,26 @@ namespace encke
         return context_ && ImGui::GetIO().WantCaptureMouse;
     }
 
+    void ImGuiLayer::set_input_blocked(bool blocked)
+    {
+        if (!context_)
+        {
+            return;
+        }
+
+        constexpr ImGuiConfigFlags kBlock = ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoKeyboard;
+
+        ImGuiIO& io = ImGui::GetIO();
+        if (blocked)
+        {
+            io.ConfigFlags |= kBlock;
+        }
+        else
+        {
+            io.ConfigFlags &= ~kBlock;
+        }
+    }
+
     void ImGuiLayer::shutdown()
     {
         // Backends first, contexts last: both backends read the context

@@ -146,6 +146,7 @@ add_executable(encke
     src/platform/window.cpp
 
     src/render/camera.cpp
+    src/render/fly_camera.cpp
     src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/renderer.cpp
@@ -223,12 +224,13 @@ encke_add_shader(ENCKE_TONEMAP_SPV shaders/tonemap.slang)
 encke_add_shader(ENCKE_DEBUG_VIEWS_SPV shaders/debug_views.slang)
 encke_add_shader(ENCKE_IMGUI_SPV shaders/imgui.slang)
 encke_add_shader(ENCKE_SHADOW_DEPTH_SPV shaders/shadow_depth.slang)
+encke_add_shader(ENCKE_EXPOSURE_SPV shaders/exposure.slang)
 
 add_custom_target(encke_shaders DEPENDS
     "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
     "${ENCKE_LIGHTING_SPV}" "${ENCKE_TONEMAP_SPV}"
     "${ENCKE_DEBUG_VIEWS_SPV}" "${ENCKE_IMGUI_SPV}"
-    "${ENCKE_SHADOW_DEPTH_SPV}"
+    "${ENCKE_SHADOW_DEPTH_SPV}" "${ENCKE_EXPOSURE_SPV}"
 )
 add_dependencies(encke encke_shaders)
 
