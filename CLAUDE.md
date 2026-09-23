@@ -76,6 +76,7 @@ src/
   platform/
     window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
     cpu.{hpp,cpp}     physical and logical core counts, via pytorch/cpuinfo
+    thread.{hpp,cpp}  calling thread's OS priority and name, via BS::thread_pool; unused yet
   vulkan/
     context.{hpp,cpp}    volk, instance, validation, surface
     device.{hpp,cpp}     device selection, queues, submit_immediate
@@ -1076,8 +1077,25 @@ backend, so it has no equivalent failure mode.
 
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
-`sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`. Three come from CPM
-instead: mimalloc (see *Allocator*), and Dear ImGui and ImPlot.
+`sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`.
+Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
+ImPlot.
+
+- **BS::thread_pool is here for its native extensions, and unused until the
+  SDF work begins.** Standard C++ has no thread priority, affinity or naming,
+  and `native_handle()` does not help: under MinGW it is a winpthreads
+  `pthread_t`, not a Win32 `HANDLE`, and Linux's per-thread nice value wants
+  a kernel thread ID. `platform/thread` wraps the library's
+  `BS::this_thread` calls, which act on the calling thread, so a `jthread`
+  sets its own priority and name from inside its function. Only
+  `platform/thread.cpp` includes the header, with
+  `BS_THREAD_POOL_NATIVE_EXTENSIONS` defined, because on Windows it pulls in
+  `<windows.h>`. The port installs no CMake package, hence the `find_path`.
+  Verified once on MinGW with a temporary call from the asset worker, since
+  removed: both priority and name succeed. Untested on Linux, where an
+  unprivileged thread may lower its priority but never raise it: lower the
+  workers, never raise the main thread. Its pool itself is unused; whether
+  it becomes the SDF job system is undecided.
 
 - **cpuinfo (pytorch/cpuinfo) is for sizing worker pools by physical core.**
   Hyperthreads share a core's vector units and caches, so heavy SIMD workers

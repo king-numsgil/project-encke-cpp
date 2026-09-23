@@ -35,6 +35,9 @@ find_package(fastgltf CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(cpuinfo CONFIG REQUIRED)
 
+# Header-only, and the port installs no CMake package: just the header.
+find_path(BS_THREAD_POOL_INCLUDE_DIR BS_thread_pool.hpp REQUIRED)
+
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
     "Shared download cache so each build directory does not refetch sources")
 include(cmake/CPM.cmake)
@@ -147,6 +150,7 @@ add_executable(encke
     src/core/memory.cpp
 
     src/platform/cpu.cpp
+    src/platform/thread.cpp
     src/platform/window.cpp
 
     src/render/camera.cpp
@@ -180,6 +184,7 @@ add_executable(encke
 )
 
 target_include_directories(encke PRIVATE src)
+target_include_directories(encke SYSTEM PRIVATE ${BS_THREAD_POOL_INCLUDE_DIR})
 
 # Textures are read from the source tree, not copied beside the executable the
 # way SPIR-V is: they are tens of megabytes, change rarely, and a copy per

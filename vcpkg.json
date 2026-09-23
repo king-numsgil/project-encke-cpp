@@ -2,6 +2,7 @@
   "name": "encke",
   "version-string": "0.1.0",
   "dependencies": [
+    "bshoshany-thread-pool",
     "cpuinfo",
     "fastgltf",
     "glm",
