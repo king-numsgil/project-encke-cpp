@@ -35,6 +35,10 @@ namespace encke
             u32  first_index  = 0;
             u32  index_count  = 0;
             bool resident     = false;   // uploaded, or its copy recorded this frame
+
+            // Mesh-space box around the vertices, for culling.
+            f32vec3 min{0.0f};
+            f32vec3 max{0.0f};
         };
 
         GeometryPool() = default;

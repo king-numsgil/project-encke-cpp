@@ -30,7 +30,7 @@ namespace encke
     static_assert(offsetof(Vertex, uv) == 40);
 
     // Every mesh the renderer builds at startup, first into the geometry
-    // pool, so each is its own mesh id. SceneObject::mesh picks one.
+    // pool, so each is its own mesh id. Renderable::mesh picks one.
     enum class MeshKind : u32
     {
         Cube   = 0,

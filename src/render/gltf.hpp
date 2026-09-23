@@ -47,13 +47,19 @@ namespace encke
         vector<GltfPrimitive> primitives;
     };
 
-    // A node of the default scene. Parents come before their children, so
-    // one pass in order composes every node's model-space transform.
+    // A node of the default scene, parents before children, converted to
+    // Transform's convention: scale is the node's own and not inherited. glTF
+    // inherits it, so each node's model-space transform is composed the glTF
+    // way, split into position, rotation and scale, and the position and
+    // rotation made relative to the parent's again. Exact unless a parent
+    // scales unevenly under a rotated child, which is shear; that is logged.
     struct GltfNode
     {
         string        name;
         optional<u32> parent;   // into GltfModel::nodes; none for a scene root
-        f32mat4       local{1.0f};
+        f32vec3       position{0.0f};   // unscaled, in the parent's rotated frame
+        f32quat       rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        f32vec3       scale{1.0f};      // own size only
         optional<u32> mesh;     // into GltfModel::meshes
     };
 
@@ -73,6 +79,6 @@ namespace encke
     // material's `decode`. Unsupported features (texture coordinate sets
     // other than 0, alpha blending and masking, double-sided materials,
     // mirroring node transforms, other primitive modes) are logged and
-    // ignored, not fatal.
+    // ignored, not fatal. So is shear, which is drawn approximately.
     bool load_gltf(string const& path, GltfModel& model);
 }

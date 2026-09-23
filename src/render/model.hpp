@@ -11,15 +11,11 @@ namespace encke
         u32 mesh     = 0;
         u32 material = 0;
 
-        // glTF factors, copied onto each SceneObject made from the part.
+        // glTF factors, copied onto each Renderable made from the part.
         f32vec3 albedo{1.0f};
         f32     roughness = 1.0f;
         f32     metallic  = 1.0f;
         f32vec3 emissive{0.0f};   // relative; the scene scales it to luminance
-
-        // In its mesh's own space, for shadow caster culling.
-        f64vec3 bounds_centre{0.0};
-        f64     bounds_radius = 0.0;
     };
 
     // One mesh, uploaded once and drawn once per node that uses it.
@@ -28,13 +24,17 @@ namespace encke
         vector<ModelPart> parts;
     };
 
-    // The file's node hierarchy, parents before children. A node's transform
-    // is relative to its parent's, or to the model when it has none.
+    // The file's node hierarchy, parents before children, already in
+    // Transform's terms: scale is the node's own and not inherited, so a
+    // position is an unscaled offset in the parent's rotated frame. glTF's
+    // inherited scale is folded in by load_gltf.
     struct ModelNode
     {
         string        name;
         optional<u32> parent;   // into Model::nodes
-        f64mat4       local{1.0};
+        f64vec3       position{0.0};
+        f64quat       rotation{1.0, 0.0, 0.0, 0.0};
+        f64vec3       scale{1.0};
         optional<u32> mesh;     // into Model::meshes
     };
 

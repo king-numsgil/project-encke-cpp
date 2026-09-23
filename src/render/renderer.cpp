@@ -847,18 +847,13 @@ namespace encke
                 }
 
                 GltfMaterial const& material = source.materials[primitive.material];
-                f64vec3 const       min{primitive.min};
-                f64vec3 const       max{primitive.max};
-
                 mesh.parts.push_back(ModelPart{
-                    .mesh          = *id,
-                    .material      = first_material + primitive.material,
-                    .albedo        = material.base_colour,
-                    .roughness     = material.roughness,
-                    .metallic      = material.metallic,
-                    .emissive      = material.emissive,
-                    .bounds_centre = (min + max) * 0.5,
-                    .bounds_radius = glm::length(max - min) * 0.5,
+                    .mesh      = *id,
+                    .material  = first_material + primitive.material,
+                    .albedo    = material.base_colour,
+                    .roughness = material.roughness,
+                    .metallic  = material.metallic,
+                    .emissive  = material.emissive,
                 });
             }
         }
@@ -866,10 +861,12 @@ namespace encke
         for (GltfNode const& node : source.nodes)
         {
             model.nodes.push_back(ModelNode{
-                .name   = node.name,
-                .parent = node.parent,
-                .local  = f64mat4{node.local},
-                .mesh   = node.mesh,
+                .name     = node.name,
+                .parent   = node.parent,
+                .position = f64vec3{node.position},
+                .rotation = f64quat{node.rotation},
+                .scale    = f64vec3{node.scale},
+                .mesh     = node.mesh,
             });
         }
 
@@ -1008,10 +1005,17 @@ namespace encke
     {
         f64 const aspect = static_cast<f64>(extent.width) / static_cast<f64>(extent.height);
 
+        // Everything below reads the list, not the scene's registry.
+        extract(scene, geometry_, render_list_);
+
+        // The first frame has no last one, so nothing has moved.
         f64mat4 const view                = scene.camera.view();
         f64mat4 const projection          = scene.camera.projection(aspect);
-        f64mat4 const previous_view       = scene.previous_camera.view();
-        f64mat4 const previous_projection = scene.previous_camera.projection(aspect);
+        f64mat4 const previous_view       = previous_view_.value_or(view);
+        f64mat4 const previous_projection = previous_view_.has_value() ? previous_projection_
+                                                                       : projection;
+        previous_view_       = view;
+        previous_projection_ = projection;
 
         // Log-depth slice mapping: slice = log(d) * scale + bias, which puts
         // kClusterNear at 0 and kClusterFar at kClustersZ.
@@ -1037,10 +1041,11 @@ namespace encke
                                   static_cast<f32>(static_cast<f64>(illuminance) * sun_up / kPi);
         f32vec3 const sky       = ground * scene.sky_fill;
 
-        u32 const light_count  = static_cast<u32>(std::min<size_t>(scene.lights.size(), kMaxLights));
-        u32 const object_count = static_cast<u32>(std::min<size_t>(scene.objects.size(), kMaxObjects));
+        // The extract has already capped both at the buffers' sizes.
+        u32 const light_count  = static_cast<u32>(render_list_.lights.size());
+        u32 const object_count = static_cast<u32>(render_list_.objects.size());
 
-        plan_shadows(scene, aspect, shadow_plan_);
+        plan_shadows(scene, render_list_.lights, aspect, shadow_plan_);
 
         f32 const shadow_far = config::kShadowDistance;
 
@@ -1102,19 +1107,18 @@ namespace encke
             casters      = 0;
             for (u32 object = 0; object < object_count; ++object)
             {
-                SceneObject const& scene_object = scene.objects[object];
-                if (!geometry_.range(scene_object.mesh).resident ||
-                    !map.may_cast(scene_object.bounds_centre, scene_object.bounds_radius))
+                RenderObject const& caster = render_list_.objects[object];
+                GeometryPool::Range const& range = geometry_.range(caster.renderable.mesh);
+                if (!range.resident || !map.may_cast(caster.bounds_centre, caster.bounds_radius))
                 {
                     continue;
                 }
 
                 u32 const slot = index * kMaxObjects + object;
-                f32mat4 const matrix{world_to_clip * scene_object.model};
+                f32mat4 const matrix{world_to_clip * caster.model};
                 std::memcpy(&shadow_matrices[slot], &matrix, sizeof(matrix));
 
-                draws[(1 + index) * kMaxObjects + casters++] =
-                    draw_command(geometry_.range(scene_object.mesh), slot);
+                draws[(1 + index) * kMaxObjects + casters++] = draw_command(range, slot);
             }
         }
         for (u32 index = shadow_view_count; index < kShadowViewCount; ++index)
@@ -1127,25 +1131,37 @@ namespace encke
         auto* const objects = static_cast<gpu::Object*>(resources.objects.mapped());
         for (u32 index = 0; index < object_count; ++index)
         {
-            SceneObject const& object = scene.objects[index];
+            RenderObject const& object     = render_list_.objects[index];
+            Renderable const&   renderable = object.renderable;
+
+            // Swapped for this frame's, which the next frame reads.
+            f64mat4 previous_model = object.model;
+            if (previous_models_.contains(object.entity))
+            {
+                std::swap(previous_model, previous_models_.get(object.entity));
+            }
+            else
+            {
+                previous_models_.emplace(object.entity, object.model);
+            }
 
             f64mat4 const model_view          = view * object.model;
-            f64mat4 const previous_model_view = previous_view * object.previous_model;
+            f64mat4 const previous_model_view = previous_view * previous_model;
             f64mat3 const normal_matrix = glm::transpose(glm::inverse(f64mat3{model_view}));
 
             u32vec4 textures{gpu::kNoTexture};
             f32vec4 texture_scale{0.0f};
             bool    hide_emission = false;
-            if (object.material != 0)
+            if (renderable.material != 0)
             {
-                MaterialTextures const& material = *materials_[object.material];
+                MaterialTextures const& material = *materials_[renderable.material];
                 textures      = material.handles;
                 hide_emission = material.hide_emission;
 
                 // (1, 1, 1, 1) makes the shader's stretch exactly 1, which
                 // leaves an atlas's UVs alone whatever the object's scale.
                 texture_scale = material.tiling
-                                    ? f32vec4{f32vec3{object.scale} / material.tile.x,
+                                    ? f32vec4{object.scale / material.tile.x,
                                               material.tile.x / material.tile.y}
                                     : f32vec4{1.0f};
             }
@@ -1155,9 +1171,9 @@ namespace encke
                 .prev_mvp          = f32mat4{previous_projection * previous_model_view},
                 .model_view        = f32mat4{model_view},
                 .normal_view       = f32mat4{f64mat4{normal_matrix}},
-                .albedo_roughness  = f32vec4{object.albedo, object.roughness},
-                .emissive_metallic = f32vec4{hide_emission ? f32vec3{0.0f} : object.emissive,
-                                             object.metallic},
+                .albedo_roughness  = f32vec4{renderable.albedo, renderable.roughness},
+                .emissive_metallic = f32vec4{hide_emission ? f32vec3{0.0f} : renderable.emissive,
+                                             renderable.metallic},
                 .textures          = textures,
                 .texture_scale     = texture_scale,
             };
@@ -1165,18 +1181,20 @@ namespace encke
 
             // A mesh still waiting for its upload is left out, not drawn
             // from memory that holds nothing yet.
-            if (geometry_.range(object.mesh).resident)
+            GeometryPool::Range const& range = geometry_.range(renderable.mesh);
+            if (range.resident)
             {
-                draws[gbuffer_draws_++] = draw_command(geometry_.range(object.mesh), index);
+                draws[gbuffer_draws_++] = draw_command(range, index);
             }
         }
 
         auto* const lights = static_cast<gpu::Light*>(resources.lights.mapped());
         for (u32 index = 0; index < light_count; ++index)
         {
-            SceneLight const& light = scene.lights[index];
-            f64vec4 const     view_position  = view * f64vec4{light.position, 1.0};
-            f64vec3 const     view_direction = f64vec3{view * f64vec4{light.direction, 0.0}};
+            RenderLight const& source = render_list_.lights[index];
+            Light const&       light  = source.light;
+            f64vec4 const      view_position  = view * f64vec4{source.position, 1.0};
+            f64vec3 const      view_direction = f64vec3{view * f64vec4{source.direction, 0.0}};
 
             u32 shadow = gpu::kNoShadow;
             for (u32 slot = 0; slot < shadow_plan_.spot_count; ++slot)

@@ -123,7 +123,8 @@ namespace encke
             plan.cascade_count = config::kCascadeCount;
         }
 
-        void plan_spots(Scene const& scene, f64 aspect, ShadowPlan& plan)
+        void plan_spots(Scene const& scene, span<RenderLight const> lights, f64 aspect,
+                        ShadowPlan& plan)
         {
             Camera const& camera = scene.camera;
             f64mat4 const view   = camera.view();
@@ -136,22 +137,23 @@ namespace encke
             };
 
             vector<Candidate> candidates;
-            for (u32 index = 0; index < scene.lights.size(); ++index)
+            for (u32 index = 0; index < lights.size(); ++index)
             {
-                SceneLight const& light = scene.lights[index];
+                RenderLight const& spot  = lights[index];
+                Light const&       light = spot.light;
                 if (!light.casts_shadow || light.cos_outer <= -1.0f)
                 {
                     continue;
                 }
 
-                f64 const distance = glm::length(light.position - camera.position);
+                f64 const distance = glm::length(spot.position - camera.position);
                 if (distance > light.shadow_range)
                 {
                     continue;
                 }
 
                 // A spot whose whole reach is out of view casts nothing seen.
-                f64vec3 const centre = f64vec3{view * f64vec4{light.position, 1.0}};
+                f64vec3 const centre = f64vec3{view * f64vec4{spot.position, 1.0}};
                 if (!sphere_in_view(centre, static_cast<f64>(light.radius), proj[0][0], proj[1][1]))
                 {
                     continue;
@@ -171,11 +173,12 @@ namespace encke
 
             for (u32 slot = 0; slot < chosen; ++slot)
             {
-                SceneLight const& light = scene.lights[candidates[slot].light];
+                RenderLight const& spot  = lights[candidates[slot].light];
+                Light const&       light = spot.light;
 
                 f64vec3 right;
                 f64vec3 up;
-                basis(light.direction, right, up);
+                basis(spot.direction, right, up);
 
                 f64 const half_angle = std::acos(static_cast<f64>(light.cos_outer));
                 f64 const fov   = std::min(2.0 * half_angle + kSpotFovMargin, kSpotMaxFov);
@@ -186,7 +189,7 @@ namespace encke
                     std::clamp((light.shadow_range - candidates[slot].distance) / fade_length, 0.0, 1.0);
 
                 ShadowMapView& map = plan.views[config::kCascadeCount + slot];
-                map.light_view = glm::lookAt(light.position, light.position + light.direction, up);
+                map.light_view = glm::lookAt(spot.position, spot.position + spot.direction, up);
                 // Near and far swapped: reversed-Z, 1.0 at the near plane.
                 map.projection   = glm::perspectiveRH_ZO(fov, 1.0, range, config::kSpotShadowNear);
                 map.extent       = range;
@@ -217,9 +220,10 @@ namespace encke
         return std::abs(p.x) - radius <= extent && std::abs(p.y) - radius <= extent;
     }
 
-    void plan_shadows(Scene const& scene, f64 aspect, ShadowPlan& plan)
+    void plan_shadows(Scene const& scene, span<RenderLight const> lights, f64 aspect,
+                      ShadowPlan& plan)
     {
         plan_cascades(scene, aspect, plan);
-        plan_spots(scene, aspect, plan);
+        plan_spots(scene, lights, aspect, plan);
     }
 }

@@ -1,9 +1,9 @@
 #pragma once
 
 #include "render/camera.hpp"
-#include "render/material.hpp"
-#include "render/mesh.hpp"
+#include "render/components.hpp"
 #include "render/model.hpp"
+#include "world/transform.hpp"
 
 namespace encke
 {
@@ -15,53 +15,13 @@ namespace encke
     inline constexpr f64 kEarthMoonDistance = 384'400'000.0;
     inline constexpr f64 kAstronomicalUnit  = 149'597'870'700.0;
 
-    struct SceneObject
+    // Turns an entity about `axis`, in its parent's frame, at `rate` rad/s.
+    // It replaces the Transform's rotation outright: the angle is rate times
+    // the scene clock, from no rotation at zero.
+    struct Spin
     {
-        f64mat4 model{1.0};
-        f64mat4 previous_model{1.0};   // last frame, for motion vectors
-
-        // Renderer ids. A MeshKind or MaterialKind converts to its own id;
-        // loaded models get ids past them. Material 0 is untextured.
-        u32 mesh     = static_cast<u32>(MeshKind::Cube);
-        u32 material = static_cast<u32>(MaterialKind::None);
-
-        // With a material these are glTF-style factors on its maps; without,
-        // they are the whole material.
-        f32vec3 albedo{1.0f};          // linear
-        f32     roughness = 0.5f;
-        f32vec3 emissive{0.0f};        // linear, HDR
-        f32     metallic  = 0.0f;
-
-        // Rotation rate in rad/s about `spin_axis`; zero for static geometry.
-        f64     spin_rate = 0.0;
-        f64vec3 spin_axis{0.0, 1.0, 0.0};
-        f64vec3 position{0.0};
-        f64vec3 scale{1.0};
-
-        // World-space bounding sphere, for shadow caster culling. Not the
-        // model origin in general: the planet's origin is its north pole.
-        f64vec3 bounds_centre{0.0};
-        f64     bounds_radius = 0.0;
-    };
-
-    // A point light, or a spot when cos_outer is above -1. Only spots cast
-    // shadows; casts_shadow on a point light is ignored.
-    struct SceneLight
-    {
-        f64vec3 position{0.0};         // world, metres
-        f64vec3 direction{0.0, -1.0, 0.0};  // world, unit; spots only
-        f32vec3 colour{1.0f};          // linear
-        f32     intensity = 1.0f;      // candela
-        f32     radius    = 5.0f;      // metres; influence cut to zero here
-
-        // Cone half-angles as cosines. The defaults make a point light.
-        f32 cos_inner = -1.0f;
-        f32 cos_outer = -2.0f;
-
-        // Shadowed only while the camera is within shadow_range of the light,
-        // and only if it wins one of the config::kMaxShadowedSpots slots.
-        bool casts_shadow = false;
-        f64  shadow_range = 40.0;
+        f64     rate = 0.0;
+        f64vec3 axis{0.0, 1.0, 0.0};
     };
 
     // The system's star. Its direction and illuminance are worked out per
@@ -92,22 +52,25 @@ namespace encke
         // An Earth-sized planet whose north pole is the floor, strewn with
         // boxes, spheres and pillars, lit by a Sun low on the horizon and a
         // handful of spot and point lights, with the Moon overhead at its real
-        // distance. Places the camera at the edge of the field. Built far from the world origin on purpose, so any
-        // regression in camera-relative rendering shows up as visible jitter.
+        // distance. Places the camera at the edge of the field. Built far from
+        // the world origin on purpose, so any regression in camera-relative
+        // rendering shows up as visible jitter.
         //
         // `helmet`, when given, is set on the table.
         void build_test_planet(Model const* helmet);
 
-        // One object per part, sharing a transform: `orientation` and a
-        // uniform `scale` about the model's origin, which lands at
-        // `position` (world). Emissive factors are relative, and `luminance`
-        // turns 1 into cd/m^2.
-        void add_model(Model const& model, f64vec3 const& position, f64quat const& orientation,
-                       f64 scale, f32 luminance);
+        // Spawns the model's node tree under a new root entity, which it
+        // returns: the root sits at `position` (world) with `orientation`, and
+        // moving it moves the model. Each node is an entity parented as in the
+        // file, and each part of a node's mesh a child of it with a
+        // Renderable. Scale is not inherited, so the model's uniform `scale`
+        // is folded into every node's offset and size here. Emissive factors
+        // are relative, and `luminance` turns 1 into cd/m^2.
+        entt::entity add_model(Model const& model, f64vec3 const& position,
+                               f64quat const& orientation, f64 scale, f32 luminance);
 
-        // Advances animation and rolls this frame's transforms, camera
-        // included, into last frame's, which is what motion vectors are
-        // measured against. Move the camera after this, not before.
+        // Advances animation to `seconds` on the scene clock, then composes
+        // every WorldTransform. Read world transforms after this.
         void update(f64 seconds);
 
         // World position of the test planet's pole, which the scene is laid
@@ -120,9 +83,11 @@ namespace encke
         // a blend, and is the scene's decision. World +Y means nothing here.
         f64vec3 up_at(f64vec3 const& position) const;
 
-        vector<SceneObject> objects;
-        vector<SceneLight>  lights;
-        Star                star;
+        // Every object and light is an entity: a Transform, plus a
+        // Renderable or a Light (render/components.hpp).
+        entt::registry registry;
+
+        Star star;
 
         // Exposure as EV100: the fixed value when auto-exposure is off, and
         // where it starts when on. The scene is lit by a real-magnitude sun,
@@ -143,18 +108,22 @@ namespace encke
         f32     sky_fill = 0.0f;
 
         Camera camera;
-        Camera previous_camera;
 
     private:
-        SceneObject& add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
+        // A built-in mesh at `position` from the pole, flat material.
+        entt::entity add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
                          f32 roughness, f32 metallic, f32vec3 emissive = f32vec3{0.0f});
 
         // Every factor 1, so the maps are the material. Metalness comes from
         // the map too: a set without one is a dielectric.
-        SceneObject& add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material);
+        entt::entity add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material);
+
+        // A light at `position` relative to `parent`'s frame, facing
+        // `direction` in that frame.
+        entt::entity add_light(entt::entity parent, f64vec3 position, f64vec3 direction,
+                               Light const& light);
 
         f64vec3 origin_{0.0};
         f64vec3 planet_centre_{0.0};
-        bool    first_update_ = true;
     };
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/config.hpp"
+#include "render/extract.hpp"
 #include "render/geometry_pool.hpp"
 #include "render/gltf.hpp"
 #include "render/gpu_types.hpp"
@@ -256,7 +257,8 @@ namespace encke
         // outside any rendering scope.
         void record_uploads(VkCommandBuffer command);
 
-        // Also plans this frame's shadows, which record() then draws.
+        // Extracts the scene into render_list_ and writes the frame's buffers
+        // from it. Also plans this frame's shadows, which record() then draws.
         void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources);
         bool record(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index,
                     Scene const& scene, Overlay* overlay);
@@ -306,6 +308,18 @@ namespace encke
         array<u32, config::kShadowViewCount>   shadow_map_handles_{};
         VkSampler                              shadow_sampler_        = VK_NULL_HANDLE;
         u32                                    shadow_sampler_handle_ = BindlessSet::kInvalid;
+
+        // What upload() took from the scene this frame; the renderer reads
+        // nothing else of it.
+        RenderList render_list_;
+
+        // Last drawn frame's world transforms, for motion vectors: each
+        // object's by entity, and the camera's view and projection. A new
+        // entity has none and moves nowhere on its first frame. Entries for
+        // destroyed entities are never removed yet; nothing destroys any.
+        entt::storage<f64mat4> previous_models_;
+        optional<f64mat4>      previous_view_;
+        f64mat4                previous_projection_{1.0};
 
         // This frame's shadow views, and how many indirect draws upload()
         // wrote for the G-buffer and for each view's casters. Read by record().
@@ -370,7 +384,7 @@ namespace encke
         ComputePipeline  histogram_pipeline_;
         ComputePipeline  adapt_pipeline_;
 
-        // SceneObject::mesh and ::material index these. The built-ins come
+        // Renderable::mesh and ::material index these. The built-ins come
         // first, in MeshKind and MaterialKind order, then whatever add_model
         // loaded. MaterialTextures is not movable, hence the pointers.
         // materials_[0] is MaterialKind::None and stays null.

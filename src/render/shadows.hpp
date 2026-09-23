@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/config.hpp"
+#include "render/extract.hpp"
 
 namespace encke
 {
@@ -38,12 +39,14 @@ namespace encke
         u32 cascade_count = 0;
         u32 spot_count    = 0;
 
-        // Scene light index behind spot view kCascadeCount + i.
+        // Index into the frame's RenderList::lights behind spot view
+        // kCascadeCount + i.
         array<u32, config::kMaxShadowedSpots> spot_lights{};
     };
 
     // Fits the sun's cascades to the camera's frustum, texel-snapped so they
-    // do not shimmer as the camera moves, and picks which shadow-casting
-    // spots get a map this frame.
-    void plan_shadows(Scene const& scene, f64 aspect, ShadowPlan& plan);
+    // do not shimmer as the camera moves, and picks which of `lights`, the
+    // frame's extracted ones, get a map this frame.
+    void plan_shadows(Scene const& scene, span<RenderLight const> lights, f64 aspect,
+                      ShadowPlan& plan);
 }

@@ -93,10 +93,14 @@ src/
     imgui_layer.{hpp,cpp}  ImGui + ImPlot contexts, backends; the renderer's Overlay
     imgui_vulkan.{hpp,cpp} forked ImGui Vulkan backend: VMA, bindless, Slang
     stats_window.{hpp,cpp} frame timing history and the window graphing it
+  world/
+    transform.{hpp,cpp}  Transform and WorldTransform components, propagation
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
-    scene.{hpp,cpp}      f64 world: test planet, star, objects, lights
+    scene.{hpp,cpp}      the EnTT registry, star, camera; builds the test planet
+    components.hpp       Renderable and Light, the components the renderer reads
+    extract.{hpp,cpp}    registry -> RenderList once a frame: the renderer's only view of it
     material.{hpp,cpp}   MaterialKind, loading and packing a texture set with SDL3_image
     material_loader.{hpp,cpp} worker thread running material decode jobs for streaming
     gltf.{hpp,cpp}       glTF -> CPU meshes, material factors and decode jobs, via fastgltf
@@ -528,6 +532,61 @@ Known gaps:
 - Shadow maps are single-copy, like the G-buffer: each frame's entry barrier
   waits on the previous frame's lighting reads.
 
+## Scene: an EnTT registry, and the extract
+
+`Scene::registry` holds every object and light as an entity. EnTT is meant
+for the sim; the renderer is kept apart from it by one boundary,
+`render/extract`, which copies what is drawn into a flat `RenderList` once a
+frame. Nothing in the renderer reads the registry otherwise, so the sim can
+later run on its own threads without the renderer seeing half an update.
+
+- **`Transform` is position (f64), rotation (f64 quat), scale (f32) and a
+  parent entity**, local to the parent. **Scale is not inherited**: it sizes
+  the entity's own mesh, and a child's position is an unscaled offset in the
+  parent's rotated frame. Inherited uneven scale under a rotated child is
+  shear, which the triple cannot hold. Scaling an assembly means scaling
+  each part and each offset, as `Scene::add_model` does. Scale must be
+  positive; propagation warns once otherwise.
+- **`propagate_transforms` writes `WorldTransform`** for every entity with a
+  `Transform`, adding it where missing. Each is composed once per pass,
+  parents first, by walking up to the nearest ancestor already done this
+  pass (a pass stamp in `WorldTransform`); no ordering of the pools is kept.
+  `Scene::update` runs it after animation, so world transforms are valid
+  from then until the next update. A chain deeper than 32 is treated as a
+  cycle and cut; a missing parent leaves its children as roots. Both warn
+  once.
+- **A spot light faces its entity's -Z** (`look_rotation` builds one from a
+  direction). The mast lights are children of their lamp heads, the ring
+  lamps' of their bulbs.
+- **An object's GPU slot is its index in this frame's `RenderList`**, and so
+  its indirect draw's `firstInstance`; a light's likewise. Neither is stable
+  across frames. Per-object renderer state is keyed by entity instead:
+  `Renderer::previous_models_`, an `entt::storage<f64mat4>` outside the
+  registry, holds last frame's model matrix for motion vectors, and the
+  renderer keeps last frame's view and projection itself. A new entity's
+  first frame has no motion.
+- **Mesh bounds come from the mesh**: `GeometryPool::Range` carries its
+  mesh-space box, and the extract turns it into a world bounding sphere for
+  shadow culling. Exact for a box at any scale, loose for the sphere.
+- **EnTT's registry header is in the PCH**, along with everything it pulls
+  in: entities, storages, views, groups.
+
+Verified when it landed: default and wide captures byte-identical to the
+flat scene's, clustered and brute force byte-identical, motion vectors on
+the spinner alone.
+
+Known gaps:
+
+- Nothing destroys entities yet, so none of the teardown is exercised:
+  children of a destroyed parent become roots, and `previous_models_` keeps
+  destroyed entities' entries.
+- The render list is rebuilt and fully re-uploaded every frame, material
+  data included. Camera-relative transforms change every frame anyway;
+  static per-object data could move to persistent slots filled on
+  `on_construct`.
+- `Renderable` holds renderer mesh and material ids directly. An asset
+  manager with generational handles is the plan.
+
 ## The test planet
 
 `Scene::build_test_planet`: the ground is the north pole of an Earth-radius
@@ -549,7 +608,7 @@ executable like SPIR-V: tens of megabytes that rarely change. A shipped build
 would need that revisited.
 
 `MaterialKind` works like `MeshKind`: a fixed list the renderer loads at
-startup, one per ambientCG set, and `SceneObject::material` picks one. Each
+startup, one per ambientCG set, and `Renderable::material` picks one. Each
 set becomes three RGBA8 textures, glTF's arrangement:
 
 | Texture | Format | Holds |
@@ -640,11 +699,19 @@ exactly 1 at any object scale. `MaterialTextures::tiling` decides which.
 `load_gltf` keeps the default scene's node tree rather than baking
 transforms into vertices. Each glTF mesh is converted and uploaded once, in
 its own space, and only if some node uses it; `Model::nodes` holds every
-node's local transform and parent, parents first. `Scene::add_model` composes
-them in one pass and makes one `SceneObject` per primitive per node, so a
-mesh used by eight nodes is eight draws from one range of the geometry pool.
-The hierarchy stops there: the scene is still flat, so moving a node means
-recomposing its subtree's objects. Node extras are not read.
+node's local transform and parent, parents first. `Scene::add_model` makes
+an entity per node, parented as in the file under one root entity, and a
+child entity per primitive carrying the `Renderable`, so a mesh used by
+eight nodes is eight draws from one range of the geometry pool. Moving the
+root moves the model. Node extras are not read.
+
+- **glTF inherits scale and `Transform` does not**, so `load_gltf` converts:
+  it composes each node's model-space matrix the glTF way, splits it into
+  position, rotation and scale, and makes position and rotation relative to
+  the parent's again. Exact unless an uneven scale sits above a rotated
+  child, which is shear; that is logged and drawn without it. The helmet
+  renders as before apart from f32 rounding: scattered single pixels of
+  specular sparkle, nothing displaced.
 
 - **A mirroring node transform is logged and drawn with the wrong winding.**
   A shared mesh cannot have its indices flipped for one instance; fixing it
@@ -692,9 +759,9 @@ present -- most of a frame -- and made movement slow and violently uneven.
   keyboard navigation activates the focused widget on Space; with
   `NoKeyboard` set for as long as the button is held, it never sees it.
 - **Losing focus counts as release**, since the button-up may never arrive.
-- **The camera moves after `Scene::update`**, which rolls this frame's camera
-  into `previous_camera` for motion vectors. Moving it before would make every
-  frame's motion zero.
+- **Last frame's camera is the renderer's**, recorded when a frame's buffers
+  are written, so when the app moves the camera relative to `Scene::update`
+  does not matter to motion vectors.
 - **The camera has no up but its own.** "+Y is up" is the convention for
   matrices and model space, not the direction away from the ground, and the
   camera is not levelled against any body: it has to fly from one planet to

@@ -155,6 +155,7 @@ add_executable(encke
     src/platform/window.cpp
 
     src/render/camera.cpp
+    src/render/extract.cpp
     src/render/fly_camera.cpp
     src/render/geometry_pool.cpp
     src/render/gltf.cpp
@@ -182,6 +183,8 @@ add_executable(encke
     src/vulkan/swapchain.cpp
     src/vulkan/texture.cpp
     src/vulkan/timestamps.cpp
+
+    src/world/transform.cpp
 )
 
 target_include_directories(encke PRIVATE src)

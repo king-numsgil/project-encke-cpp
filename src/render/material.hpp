@@ -5,7 +5,7 @@
 namespace encke
 {
     // Every textured material the renderer loads at startup, from
-    // assets/textures (see CREDITS.md there). SceneObject::material picks one;
+    // assets/textures (see CREDITS.md there). Renderable::material picks one;
     // None draws with the object's flat factors alone.
     enum class MaterialKind : u32
     {

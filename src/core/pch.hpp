@@ -11,6 +11,10 @@
 // Pulls in glm and the std headers behind the global type aliases.
 #include "core/types.hpp"
 
+// The registry, and through it entities, storages, views and groups: stable,
+// template-heavy, and wanted wherever the scene is.
+#include <entt/entity/registry.hpp>
+
 #include <cstdio>
 #include <cstdlib>
 #include <memory>

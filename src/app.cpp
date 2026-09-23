@@ -273,9 +273,10 @@ namespace encke
         {
             scene_.camera.position = scene_.origin() + pose->eye;
             fly_.aim(scene_.camera, pose->target - pose->eye, pose->up);
-            scene_.previous_camera = scene_.camera;
         }
-        log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
+        log::info("scene: %zu entities, %zu renderables, %zu lights",
+                  scene_.registry.view<Transform>().size(),
+                  scene_.registry.view<Renderable>().size(), scene_.registry.view<Light>().size());
 
         fixed_time_ = fixed_time();
         if (fixed_time_.has_value())

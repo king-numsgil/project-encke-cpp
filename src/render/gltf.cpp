@@ -374,6 +374,53 @@ namespace encke
             return result;
         }
 
+        // A model-space matrix as position, rotation and scale. A mirroring
+        // one comes back with a negative x scale, so the rotation is proper;
+        // a shearing one is split as if it were not.
+        struct Pose
+        {
+            f64vec3 position{0.0};
+            f64quat rotation{1.0, 0.0, 0.0, 0.0};
+            f64vec3 scale{1.0};
+            bool    mirrored = false;
+            bool    sheared  = false;
+        };
+
+        Pose decompose(f32mat4 const& matrix)
+        {
+            // Axes further off square than this are shear, not rounding.
+            constexpr f64 kShear = 1.0e-4;
+
+            f64mat3 const linear{f64mat4{matrix}};
+
+            Pose pose;
+            pose.position = f64vec3{f64mat4{matrix}[3]};
+            pose.scale    = f64vec3{glm::length(linear[0]), glm::length(linear[1]),
+                                    glm::length(linear[2])};
+
+            // glTF files hide nodes with a zero scale; such a node has no
+            // rotation to speak of.
+            if (pose.scale.x <= 0.0 || pose.scale.y <= 0.0 || pose.scale.z <= 0.0)
+            {
+                return pose;
+            }
+
+            f64mat3 axes{linear[0] / pose.scale.x, linear[1] / pose.scale.y,
+                         linear[2] / pose.scale.z};
+            if (glm::determinant(axes) < 0.0)
+            {
+                axes[0]       = -axes[0];
+                pose.scale.x  = -pose.scale.x;
+                pose.mirrored = true;
+            }
+
+            pose.sheared  = std::abs(glm::dot(axes[0], axes[1])) > kShear ||
+                            std::abs(glm::dot(axes[1], axes[2])) > kShear ||
+                            std::abs(glm::dot(axes[2], axes[0])) > kShear;
+            pose.rotation = glm::normalize(glm::quat_cast(axes));
+            return pose;
+        }
+
         // False only for a malformed primitive; unsupported ones are skipped
         // with a warning and leave `out` empty.
         bool convert_primitive(fastgltf::Asset const& asset, fastgltf::Primitive const& primitive,
@@ -559,6 +606,10 @@ namespace encke
 
         // Depth first, so a parent is always pushed before its children.
         // glTF forbids a node having two parents, so each is visited once.
+        // Each node's glTF transform, relative to its parent and inheriting
+        // its scale, until the nodes are converted below.
+        vector<f32mat4> locals;
+
         bool ok = true;
         auto visit = [&](size_t source_index, optional<u32> parent, auto& self) -> void {
             fastgltf::Node const& source = asset.nodes[source_index];
@@ -566,7 +617,7 @@ namespace encke
             GltfNode node;
             node.name   = string{source.name.c_str()};
             node.parent = parent;
-            node.local  = to_glm(fastgltf::getTransformMatrix(source));
+            locals.push_back(to_glm(fastgltf::getTransformMatrix(source)));
             if (source.meshIndex.has_value())
             {
                 node.mesh = load_mesh(*source.meshIndex);
@@ -599,10 +650,14 @@ namespace encke
             }
         }
 
-        // Model-space transforms, for the bounds, and to catch a mirroring
-        // one: a mirrored instance needs its winding reversed, which a mesh
-        // shared with unmirrored instances cannot have baked in.
+        // Model-space transforms the glTF way, scale inherited: for the
+        // bounds, and split into poses to convert each node to Transform's
+        // convention, where scale is not inherited. A mirrored instance
+        // needs its winding reversed, which a mesh shared with unmirrored
+        // instances cannot have baked in, so that is logged; so is shear,
+        // which a position, rotation and scale cannot hold.
         vector<f32mat4> world(model.nodes.size());
+        vector<Pose>    poses(model.nodes.size());
         model.min = f32vec3{std::numeric_limits<f32>::max()};
         model.max = f32vec3{std::numeric_limits<f32>::lowest()};
         size_t instances = 0;
@@ -610,17 +665,40 @@ namespace encke
 
         for (size_t index = 0; index < model.nodes.size(); ++index)
         {
-            GltfNode const& node = model.nodes[index];
-            world[index] = node.parent.has_value() ? world[*node.parent] * node.local : node.local;
+            GltfNode& node = model.nodes[index];
+            world[index] = node.parent.has_value() ? world[*node.parent] * locals[index] : locals[index];
+            poses[index] = decompose(world[index]);
+
+            // Relative to the parent's position and rotation, not its scale.
+            Pose const& pose = poses[index];
+            if (node.parent.has_value())
+            {
+                Pose const&   above  = poses[*node.parent];
+                f64quat const undo   = glm::conjugate(above.rotation);
+                node.position = f32vec3{undo * (pose.position - above.position)};
+                node.rotation = f32quat{undo * pose.rotation};
+            }
+            else
+            {
+                node.position = f32vec3{pose.position};
+                node.rotation = f32quat{pose.rotation};
+            }
+            node.scale = f32vec3{pose.scale};
 
             if (!node.mesh.has_value())
             {
                 continue;
             }
 
-            if (glm::determinant(f32mat3{world[index]}) < 0.0f)
+            if (pose.mirrored)
             {
                 log::warn("gltf: node \"%s\" mirrors its mesh; drawn with the wrong winding",
+                          node.name.c_str());
+            }
+            if (pose.sheared)
+            {
+                log::warn("gltf: node \"%s\" is sheared by an uneven scale above it; drawn "
+                          "without the shear",
                           node.name.c_str());
             }
 

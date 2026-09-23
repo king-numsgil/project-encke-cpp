@@ -2,8 +2,6 @@
 
 #include "render/scene.hpp"
 
-#include <glm/gtc/matrix_transform.hpp>
-
 #include <algorithm>
 #include <cmath>
 
@@ -36,107 +34,109 @@ namespace encke
             return f32vec3{srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b)};
         }
 
-        f64mat4 compose(f64vec3 const& position, f64 angle, f64vec3 const& axis,
-                        f64vec3 const& scale)
-        {
-            f64mat4 m = glm::translate(f64mat4{1.0}, position);
-            if (angle != 0.0)
-            {
-                m = glm::rotate(m, angle, glm::normalize(axis));
-            }
-            return glm::scale(m, scale);
-        }
-
         f32 cos_degrees(f64 degrees)
         {
             return static_cast<f32>(std::cos(degrees * kPi / 180.0));
         }
     }
 
-    SceneObject& Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
+    entt::entity Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
                             f32 roughness, f32 metallic, f32vec3 emissive)
     {
-        SceneObject object;
-        object.mesh      = static_cast<u32>(mesh);
-        object.position  = origin_ + position;
-        object.scale     = scale;
-        object.albedo    = srgb_to_linear(albedo_srgb);
-        object.roughness = roughness;
-        object.metallic  = metallic;
-        object.emissive  = emissive;
-        object.model     = compose(object.position, 0.0, object.spin_axis, scale);
-        object.previous_model = object.model;
-
-        // Both meshes are unit-sized: the cube's half-diagonal bounds it at
-        // any rotation, the sphere's largest half-axis does.
-        object.bounds_centre = object.position;
-        object.bounds_radius = mesh == MeshKind::Sphere
-                                   ? 0.5 * std::max({scale.x, scale.y, scale.z})
-                                   : 0.5 * glm::length(scale);
-
-        objects.push_back(object);
-        return objects.back();
+        entt::entity const entity = registry.create();
+        registry.emplace<Transform>(entity, Transform{
+                                                .position = origin_ + position,
+                                                .scale    = f32vec3{scale},
+                                            });
+        registry.emplace<Renderable>(entity, Renderable{
+                                                 .mesh      = static_cast<u32>(mesh),
+                                                 .material  = static_cast<u32>(MaterialKind::None),
+                                                 .albedo    = srgb_to_linear(albedo_srgb),
+                                                 .roughness = roughness,
+                                                 .emissive  = emissive,
+                                                 .metallic  = metallic,
+                                             });
+        return entity;
     }
 
-    SceneObject& Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material)
+    entt::entity Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material)
     {
-        SceneObject& object = add(mesh, position, scale, f32vec3{1.0f}, 1.0f, 1.0f);
-        object.material     = static_cast<u32>(material);
-        return object;
+        entt::entity const entity = add(mesh, position, scale, f32vec3{1.0f}, 1.0f, 1.0f);
+        registry.get<Renderable>(entity).material = static_cast<u32>(material);
+        return entity;
     }
 
-    void Scene::add_model(Model const& model, f64vec3 const& position, f64quat const& orientation,
-                          f64 scale, f32 luminance)
+    entt::entity Scene::add_light(entt::entity parent, f64vec3 position, f64vec3 direction,
+                                  Light const& light)
     {
-        f64mat4 const transform = glm::translate(f64mat4{1.0}, position) *
-                                  glm::mat4_cast(orientation) *
-                                  glm::scale(f64mat4{1.0}, f64vec3{scale});
+        entt::entity const entity = registry.create();
+        registry.emplace<Transform>(entity, Transform{
+                                                .position = position,
+                                                .rotation = look_rotation(direction,
+                                                                          f64vec3{0.0, 1.0, 0.0}),
+                                                .parent   = parent,
+                                            });
+        registry.emplace<Light>(entity, light);
+        return entity;
+    }
 
-        // Parents precede children, so each node's parent is already
-        // composed when it is reached.
-        vector<f64mat4> world(model.nodes.size());
+    entt::entity Scene::add_model(Model const& model, f64vec3 const& position,
+                                  f64quat const& orientation, f64 scale, f32 luminance)
+    {
+        entt::entity const root = registry.create();
+        registry.emplace<Transform>(root, Transform{.position = position, .rotation = orientation});
+
+        // Parents precede children, so each node's parent entity exists by
+        // the time it is reached.
+        vector<entt::entity> nodes(model.nodes.size(), entt::entity{entt::null});
         for (size_t index = 0; index < model.nodes.size(); ++index)
         {
             ModelNode const& node = model.nodes[index];
-            world[index] = (node.parent.has_value() ? world[*node.parent] : transform) * node.local;
+
+            // Uniform, so it commutes with every rotation above: scaling each
+            // offset and size is exactly scaling the whole model.
+            f32vec3 const size{node.scale * scale};
+
+            entt::entity const entity = registry.create();
+            registry.emplace<Transform>(entity, Transform{
+                                                    .position = node.position * scale,
+                                                    .rotation = node.rotation,
+                                                    .scale    = size,
+                                                    .parent   = node.parent.has_value()
+                                                                    ? nodes[*node.parent]
+                                                                    : root,
+                                                });
+            nodes[index] = entity;
 
             if (!node.mesh.has_value())
             {
                 continue;
             }
 
-            // A node may scale, unevenly too; the longest axis bounds it.
-            f64mat4 const& matrix  = world[index];
-            f64 const      stretch = std::max({glm::length(f64vec3{matrix[0]}),
-                                               glm::length(f64vec3{matrix[1]}),
-                                               glm::length(f64vec3{matrix[2]})});
-
+            // One entity per part, as an entity draws one mesh. Scale is not
+            // inherited, so each repeats the node's.
             for (ModelPart const& part : model.meshes[*node.mesh].parts)
             {
-                SceneObject object;
-                object.mesh           = part.mesh;
-                object.material       = part.material;
-                object.albedo         = part.albedo;
-                object.roughness      = part.roughness;
-                object.metallic       = part.metallic;
-                object.emissive       = part.emissive * luminance;
-                object.position       = f64vec3{matrix[3]};
-                object.scale          = f64vec3{scale};
-                object.model          = matrix;
-                object.previous_model = matrix;
-                object.bounds_centre  = f64vec3{matrix * f64vec4{part.bounds_centre, 1.0}};
-                object.bounds_radius  = part.bounds_radius * stretch;
-                objects.push_back(object);
+                entt::entity const drawn = registry.create();
+                registry.emplace<Transform>(drawn, Transform{.scale = size, .parent = entity});
+                registry.emplace<Renderable>(drawn, Renderable{
+                                                        .mesh      = part.mesh,
+                                                        .material  = part.material,
+                                                        .albedo    = part.albedo,
+                                                        .roughness = part.roughness,
+                                                        .emissive  = part.emissive * luminance,
+                                                        .metallic  = part.metallic,
+                                                    });
             }
         }
+
+        return root;
     }
 
     void Scene::build_test_planet(Model const* helmet)
     {
-        objects.clear();
-        lights.clear();
-        origin_       = kWorldOrigin;
-        first_update_ = true;
+        registry.clear();
+        origin_ = kWorldOrigin;
 
         ev100   = 14.0f;
         // Local up is radial from here. Ground albedo is a guess at the
@@ -148,19 +148,7 @@ namespace encke
         // Local frame at the pole: +Y is up, the ground is y = 0. The planet
         // curves away by d^2 / 2R, a tenth of a millimetre at 30 m, so the
         // object field can treat it as flat.
-        {
-            SceneObject planet;
-            planet.mesh          = static_cast<u32>(MeshKind::Planet);
-            planet.material      = static_cast<u32>(MaterialKind::Ground);
-            planet.position      = origin_;
-            planet.albedo        = f32vec3{1.0f};
-            planet.roughness     = 1.0f;
-            planet.model         = glm::translate(f64mat4{1.0}, origin_);
-            planet.previous_model = planet.model;
-            planet.bounds_centre = origin_ - f64vec3{0.0, kEarthRadius, 0.0};
-            planet.bounds_radius = kEarthRadius;
-            objects.push_back(planet);
-        }
+        add(MeshKind::Planet, f64vec3{0.0}, f64vec3{1.0}, MaterialKind::Ground);
 
         // The Moon, straight up at its real distance from the Earth's centre.
         // Half a degree across: a few pixels.
@@ -251,10 +239,9 @@ namespace encke
         // A spinning showpiece on a plinth, so some shadow moves.
         add(MeshKind::Cube, {-4.0, 0.5, -9.0}, {1.2, 1.0, 1.2}, MaterialKind::Concrete);
         {
-            SceneObject& spinner = add(MeshKind::Cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
-                                       {0.92f, 0.78f, 0.52f}, 0.25f, 1.0f);
-            spinner.spin_rate = 0.5;
-            spinner.spin_axis = f64vec3{0.35, 1.0, 0.15};
+            entt::entity const spinner = add(MeshKind::Cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
+                                             {0.92f, 0.78f, 0.52f}, 0.25f, 1.0f);
+            registry.emplace<Spin>(spinner, Spin{.rate = 0.5, .axis = f64vec3{0.35, 1.0, 0.15}});
         }
 
         // Spot masts: four in the field, each aimed at something, and two far
@@ -285,20 +272,22 @@ namespace encke
 
             f64vec3 const head = mast.base + f64vec3{0.0, kMastHeight + 0.3, 0.0};
             f32vec3 const tint = srgb_to_linear(mast.colour_srgb);
-            add(MeshKind::Cube, head, f64vec3{0.5, 0.4, 0.5}, {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f,
-                tint * 2.0e5f);
+            entt::entity const lamp = add(MeshKind::Cube, head, f64vec3{0.5, 0.4, 0.5},
+                                          {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f, tint * 2.0e5f);
 
-            SceneLight light;
-            light.position     = origin_ + head - f64vec3{0.0, 0.3, 0.0};
-            light.direction    = glm::normalize(mast.target - (head - f64vec3{0.0, 0.3, 0.0}));
-            light.colour       = tint;
-            light.intensity    = 2.0e6f;
-            light.radius       = 30.0f;
-            light.cos_inner    = cos_degrees(20.0);
-            light.cos_outer    = cos_degrees(30.0);
-            light.casts_shadow = true;
-            light.shadow_range = mast.shadow_range;
-            lights.push_back(light);
+            // Hung under the lamp head, which is unrotated, so directions in
+            // its frame are the scene's.
+            f64vec3 const hang{0.0, -0.3, 0.0};
+            add_light(lamp, hang, mast.target - (head + hang),
+                      Light{
+                          .colour       = tint,
+                          .intensity    = 2.0e6f,
+                          .radius       = 30.0f,
+                          .cos_inner    = cos_degrees(20.0),
+                          .cos_outer    = cos_degrees(30.0),
+                          .casts_shadow = true,
+                          .shadow_range = mast.shadow_range,
+                      });
         }
 
         // Low coloured lamps in a ring, for the clusters to sort. Dim against
@@ -318,22 +307,20 @@ namespace encke
             f32vec3 const colour = lamp_colours[index % 3];
 
             add(MeshKind::Cube, at + f64vec3{0.0, 0.4, 0.0}, {0.1, 0.8, 0.1}, slate, 0.5f, 0.6f);
-            add(MeshKind::Sphere, at + f64vec3{0.0, 0.9, 0.0}, f64vec3{0.2}, {0.1f, 0.1f, 0.1f},
-                0.5f, 0.0f, colour * 1.0e5f);
+            entt::entity const bulb = add(MeshKind::Sphere, at + f64vec3{0.0, 0.9, 0.0},
+                                          f64vec3{0.2}, {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f,
+                                          colour * 1.0e5f);
 
-            SceneLight light;
-            light.position  = origin_ + at + f64vec3{0.0, 0.9, 0.0};
-            light.colour    = colour;
-            light.intensity = 8000.0f;
-            light.radius    = 7.0f;
-            lights.push_back(light);
+            // A point light has no facing; any direction will do.
+            add_light(bulb, f64vec3{0.0}, f64vec3{0.0, -1.0, 0.0},
+                      Light{.colour = colour, .intensity = 8000.0f, .radius = 7.0f});
         }
 
         // Standing 16 m from the pole at eye height, facing across the field.
         f64 const facing   = 0.25;
         camera.position    = origin_ + f64vec3{16.0 * std::sin(facing), 1.7, 16.0 * std::cos(facing)};
         camera.orientation = glm::angleAxis(facing, f64vec3{0.0, 1.0, 0.0}) *
-                             glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0});        previous_camera    = camera;
+                             glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0});
     }
 
     f64vec3 Scene::up_at(f64vec3 const& position) const
@@ -343,38 +330,13 @@ namespace encke
 
     void Scene::update(f64 seconds)
     {
-        // Last frame's state becomes the motion-vector reference. On the very
-        // first frame there is no last frame, so both are the same and motion
-        // is zero rather than whatever the build-time transforms implied.
-        if (!first_update_)
-        {
-            previous_camera = camera;
-            for (SceneObject& object : objects)
-            {
-                object.previous_model = object.model;
-            }
-        }
+        registry.view<Transform, Spin const>().each([seconds](Transform& transform, Spin const& spin) {
+            transform.rotation = glm::angleAxis(seconds * spin.rate, glm::normalize(spin.axis));
+        });
 
-        for (SceneObject& object : objects)
-        {
-            if (object.spin_rate != 0.0)
-            {
-                object.model = compose(object.position, seconds * object.spin_rate,
-                                       object.spin_axis, object.scale);
-            }
-        }
-
-        // The camera is not animated: the app flies it (render/fly_camera),
-        // after this has rolled it into previous_camera.
-
-        if (first_update_)
-        {
-            previous_camera = camera;
-            for (SceneObject& object : objects)
-            {
-                object.previous_model = object.model;
-            }
-            first_update_ = false;
-        }
+        // The camera is not animated or in the registry: the app flies it
+        // (render/fly_camera). Last frame's transforms, for motion vectors,
+        // are the renderer's to keep.
+        propagate_transforms(registry);
     }
 }
