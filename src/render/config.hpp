@@ -21,7 +21,7 @@ namespace encke::config
     // -- scene capacity -----------------------------------------------------------
     // Per-frame upload buffers are sized from these; anything past them is
     // dropped from the frame, not an error.
-    inline constexpr u32 kMaxObjects = 256;
+    inline constexpr u32 kMaxObjects = 1024;
     inline constexpr u32 kMaxLights  = 1024;
 
     // -- material textures ---------------------------------------------------------
