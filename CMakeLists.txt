@@ -34,6 +34,7 @@ find_package(SDL3_image CONFIG REQUIRED)
 find_package(fastgltf CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(cpuinfo CONFIG REQUIRED)
+find_package(EnTT CONFIG REQUIRED)
 
 # Header-only, and the port installs no CMake package: just the header.
 find_path(BS_THREAD_POOL_INCLUDE_DIR BS_thread_pool.hpp REQUIRED)
@@ -277,6 +278,7 @@ target_link_libraries(encke PUBLIC
     fastgltf::fastgltf
     glm::glm
     cpuinfo::cpuinfo
+    EnTT::EnTT
     encke_imgui
 )
 

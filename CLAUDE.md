@@ -1098,7 +1098,8 @@ backend, so it has no equivalent failure mode.
 
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
-`sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`.
+`sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`,
+`entt`.
 Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
 ImPlot.
 

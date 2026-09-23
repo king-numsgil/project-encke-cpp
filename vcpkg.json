@@ -4,6 +4,7 @@
   "dependencies": [
     "bshoshany-thread-pool",
     "cpuinfo",
+    "entt",
     "fastgltf",
     "glm",
     {
