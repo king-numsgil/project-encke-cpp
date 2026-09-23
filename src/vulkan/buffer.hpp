@@ -25,7 +25,8 @@ namespace encke
                          void const* data = nullptr);
 
         // Host-visible and persistently mapped, for data rewritten every frame.
-        // Written sequentially from the CPU; never read back.
+        // Written sequentially from the CPU. Reading it back is legal but may
+        // be uncached; only the one-off frame capture does.
         bool init_mapped(VulkanAllocator const& allocator, VkDeviceSize size,
                          VkBufferUsageFlags usage);
 

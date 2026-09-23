@@ -16,6 +16,10 @@ namespace encke
     bool load_pixels(string const& path, Pixels& pixels);
     bool decode_pixels(span<byte const> encoded, char const* what, Pixels& pixels);
 
+    // Writes `pixels` as they are, no colour conversion. Logs and returns
+    // false on failure.
+    bool save_png(string const& path, Pixels const& pixels);
+
     // Where assets/ is: the source tree, baked in by CMake. See CLAUDE.md.
     string asset_path(string_view relative);
 }

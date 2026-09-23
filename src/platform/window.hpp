@@ -18,6 +18,9 @@ namespace encke
         // F1 pressed this frame: show or hide the UI overlay.
         bool toggle_ui = false;
 
+        // T pressed this frame: step to the next tonemap curve.
+        bool cycle_tonemap = false;
+
         // Right mouse button went down or up this frame; losing focus counts
         // as up, since the release would otherwise never arrive.
         bool look_pressed  = false;

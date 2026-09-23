@@ -49,6 +49,16 @@ namespace encke
         Cascades    = 3,
     };
 
+    // The display curve. Values must match the switch in shaders/tonemap.slang.
+    enum class Tonemap : u32
+    {
+        Aces       = 0,   // Narkowicz's per-channel fit
+        AgX        = 1,
+        PbrNeutral = 2,   // Khronos PBR Neutral
+    };
+
+    inline constexpr u32 kTonemapCount = 3;
+
     inline constexpr u32 kDebugWindowCount      = 4;
     inline constexpr u32 kFirstDebugWindowView  = 2;
 
@@ -139,6 +149,31 @@ namespace encke
             frame_seconds_ = seconds;
             exposure_jump_ = jump;
         }
+
+        // A finished frame, UI included, as the swapchain holds it: display
+        // encoded, rows packed, four bytes per pixel in `format`'s order.
+        struct Capture
+        {
+            vector<u8> pixels;
+            u32        width  = 0;
+            u32        height = 0;
+            VkFormat   format = VK_FORMAT_UNDEFINED;
+        };
+
+        // Copies the next frame drawn into host memory. Ignored if the
+        // swapchain cannot be copied from.
+        void request_capture() { capture_requested_ = true; }
+
+        // The copy request_capture() asked for, once the device is idle;
+        // empty if none was recorded.
+        optional<Capture> take_capture();
+
+        void    set_tonemap(Tonemap tonemap) { tonemap_ = tonemap; }
+        Tonemap tonemap() const { return tonemap_; }
+
+        // Tonemap at this EV100 instead of the adapted one. Metering still
+        // runs, so clearing it resumes from the metered value.
+        void set_fixed_ev100(optional<f32> ev100) { fixed_ev100_ = ev100; }
 
         // Bindless sampled-image handle of a visualisation, in
         // READ_ONLY_OPTIMAL by the time the overlay runs. Stable across
@@ -262,6 +297,17 @@ namespace encke
         bool   exposure_written_        = false;   // image holds a value, in READ_ONLY_OPTIMAL
         f64    frame_seconds_           = 0.0;
         bool   exposure_jump_           = true;
+        optional<f32> fixed_ev100_;
+
+        // Neutral keeps the most colour and hue of the three; see CLAUDE.md.
+        Tonemap tonemap_ = Tonemap::PbrNeutral;
+
+        // Host memory the swapchain image is copied into, created on the
+        // first capture. `capture_` describes what the copy recorded.
+        Buffer  capture_buffer_;
+        bool    capture_requested_ = false;
+        Capture capture_;
+        bool    capture_recorded_  = false;
 
         GraphicsPipeline gbuffer_pipeline_;
         GraphicsPipeline shadow_pipeline_;

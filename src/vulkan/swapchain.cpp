@@ -171,6 +171,10 @@ namespace encke
             image_count = capabilities.maxImageCount;
         }
 
+        // Copying out of the image is only for captures, so a surface that
+        // cannot is not an error; it just has none.
+        readable_ = (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+
         u32 const families[] = {*device_->families().graphics, *device_->families().present};
         bool const shared    = families[0] == families[1];
 
@@ -186,7 +190,9 @@ namespace encke
             .imageColorSpace  = surface_format.colorSpace,
             .imageExtent      = extent_,
             .imageArrayLayers = 1,
-            .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                (readable_ ? VkImageUsageFlags{VK_IMAGE_USAGE_TRANSFER_SRC_BIT}
+                                           : VkImageUsageFlags{0}),
             .imageSharingMode = shared ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT,
             .queueFamilyIndexCount = shared ? 0u : 2u,
             .pQueueFamilyIndices   = shared ? nullptr : families,

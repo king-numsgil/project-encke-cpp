@@ -65,6 +65,27 @@ namespace encke
         return to_rgba(IMG_Load_IO(stream, true), what, pixels);
     }
 
+    bool save_png(string const& path, Pixels const& pixels)
+    {
+        // SDL only reads through the pointer here, whatever its constness.
+        SDL_Surface* const surface = SDL_CreateSurfaceFrom(
+            static_cast<int>(pixels.width), static_cast<int>(pixels.height), SDL_PIXELFORMAT_RGBA32,
+            const_cast<u8*>(pixels.rgba.data()), static_cast<int>(pixels.width * 4u));
+        if (surface == nullptr)
+        {
+            log::error("%s: %s", path.c_str(), SDL_GetError());
+            return false;
+        }
+
+        bool const saved = IMG_SavePNG(surface, path.c_str());
+        if (!saved)
+        {
+            log::error("%s: %s", path.c_str(), SDL_GetError());
+        }
+        SDL_DestroySurface(surface);
+        return saved;
+    }
+
     string asset_path(string_view relative)
     {
         return string{ENCKE_ASSET_DIR} + "/" + string{relative};

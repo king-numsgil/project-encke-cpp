@@ -110,6 +110,10 @@ namespace encke
         // measured against. Move the camera after this, not before.
         void update(f64 seconds);
 
+        // World position of the test planet's pole, which the scene is laid
+        // out around.
+        f64vec3 origin() const { return origin_; }
+
         vector<SceneObject> objects;
         vector<SceneLight>  lights;
         Star                star;
@@ -119,9 +123,19 @@ namespace encke
         // so it is set for daylight.
         f32 ev100 = 14.0f;
 
-        // Stand-in for bounce light until there is any GI, in the same
-        // radiometric scale as the lights.
-        f32vec3 ambient{0.0f};
+        // The environment the lighting pass is filled by and reflects, a
+        // stand-in for bounce light until there is any GI: the ground below
+        // the horizon, lit by the star, and the sky above it. The renderer
+        // works out the ground's radiance per frame from the star, so only
+        // its albedo is set here.
+        //
+        // An airless sky is black, which leaves anything facing up in shadow
+        // black too. `sky_fill` gives the sky that fraction of the ground's
+        // radiance anyway, for the light nearby objects would bounce, which
+        // a two-colour environment cannot know about.
+        f64vec3 up{0.0, 1.0, 0.0};     // world, unit: away from the ground
+        f32vec3 ground_albedo{0.0f};   // linear
+        f32     sky_fill = 0.0f;
 
         Camera camera;
         Camera previous_camera;

@@ -18,7 +18,9 @@ public struct GpuFrame
     public uint4    cluster_grid;    // xyz dims, w max lights per cluster
     public float4   sun_direction;   // view space, toward the sun
     public float4   sun_radiance;
-    public float4   ambient;
+    public float4   env_up;          // view space, unit: away from the ground
+    public float4   env_sky;         // linear rgb radiance above the horizon
+    public float4   env_ground;      // linear rgb radiance below it
     public uint4    counts;          // x light count, y cascade count
     public float4   shadow;          // x shadow distance, y fade start, z normal offset (texels)
     public float4   exposure_range;  // x log2 min luminance, y log2 range, z low, w high percentile
@@ -104,10 +106,12 @@ public struct Push
     public uint exposure_histogram; // u32 per bin, writable
 
     public uint material_sampler;   // trilinear anisotropic repeat, every material texture
+
+    public uint tonemap;            // curve, as Tonemap in render/renderer.hpp
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 240;
+public static const uint kFrameStride      = 272;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
 public static const uint kObjectStride     = 320;

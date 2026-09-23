@@ -40,6 +40,9 @@ namespace encke
             return ui_views_.empty() ? views_[index] : ui_views_[index];
         }
 
+        // Images can be copied from (TRANSFER_SRC), for captures.
+        bool readable() const { return readable_; }
+
         VkPresentModeKHR present_mode() const { return present_mode_; }
         char const*      present_mode_name() const;
 
@@ -56,6 +59,7 @@ namespace encke
         VkFormat            ui_format_    = VK_FORMAT_UNDEFINED;
         VkPresentModeKHR    present_mode_ = VK_PRESENT_MODE_FIFO_KHR;
         VkExtent2D          extent_{};
+        bool                readable_     = false;
         vector<VkImage>     images_;
         vector<VkImageView> views_;
         vector<VkImageView> ui_views_;

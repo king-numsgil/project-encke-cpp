@@ -24,8 +24,12 @@ namespace encke::gpu
         u32vec4 cluster_grid;        // xyz grid dims, w max lights per cluster
         f32vec4 sun_direction;       // view space, pointing toward the sun
         f32vec4 sun_radiance;        // linear rgb, illuminance (lux) folded in
-        f32vec4 ambient;             // linear rgb
-        u32vec4 counts;              // x light count, y cascade count
+        // The environment, standing in for everything but the lights: sky
+        // above the horizon, ground below. Filled and reflected by lighting.
+        f32vec4 env_up;              // view space, unit: away from the ground
+        f32vec4 env_sky;             // linear rgb radiance above the horizon
+        f32vec4 env_ground;          // linear rgb radiance below it
+        u32vec4 counts;             // x light count, y cascade count
         f32vec4 shadow;              // x shadow distance, y fade start, z normal offset (texels)
 
         // Auto-exposure; see render/config.hpp for what each one means.
@@ -138,11 +142,14 @@ namespace encke::gpu
 
         // Trilinear anisotropic repeat, for every material texture.
         u32 material_sampler;
+
+        // Tonemap curve, as encke::Tonemap. Only tonemap reads it.
+        u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 240);
+    static_assert(sizeof(Frame) == 272);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
     static_assert(sizeof(Object) == 320);
-    static_assert(sizeof(Push) == 120, "must fit the 128-byte guaranteed minimum");
+    static_assert(sizeof(Push) == 124,"must fit the 128-byte guaranteed minimum");
 }

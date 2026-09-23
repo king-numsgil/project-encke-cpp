@@ -89,7 +89,8 @@ void compute_main(uint3 id : SV_DispatchThreadID)
 
     uint cluster = cluster_of(pixel, distance, frame);
 
-    float3 lit = frame.ambient.rgb * surface.albedo * surface.ao;
+    float3 lit = shade_environment(surface, frame.env_up.xyz, frame.env_sky.rgb,
+                                   frame.env_ground.rgb);
 
     float3 sun = frame.sun_direction.xyz;
     if (any(frame.sun_radiance.rgb > 0.0f) && dot(surface.normal, sun) > 0.0f)

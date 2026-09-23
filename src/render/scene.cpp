@@ -119,7 +119,12 @@ namespace encke
         first_update_ = true;
 
         ev100   = 14.0f;
-        ambient = f32vec3{1400.0f, 1500.0f, 1700.0f};
+        // The pole's local up, which the whole field is laid out along.
+        // Ground albedo is a guess at the Ground110 set's average, not
+        // measured from it.
+        up            = f64vec3{0.0, 1.0, 0.0};
+        ground_albedo = f32vec3{0.25f};
+        sky_fill      = 0.1f;
 
         // Local frame at the pole: +Y is up, the ground is y = 0. The planet
         // curves away by d^2 / 2R, a tenth of a millimetre at 30 m, so the

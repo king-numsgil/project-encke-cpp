@@ -46,6 +46,9 @@ namespace encke
         void set_looking(bool looking);
         void fly(FrameEvents const& events, f64 seconds);
 
+        // Writes the frame the renderer just captured to capture_path_.
+        void save_capture();
+
         // Declaration order is destruction order reversed: UI, renderer,
         // swapchain, allocator, device, instance, window. The allocator must
         // outlive every buffer and image the renderer owns, and the UI's
@@ -70,6 +73,12 @@ namespace encke
 
         // Set from ENCKE_FIXED_TIME; pins animation so captures are comparable.
         optional<f64> fixed_time_;
+
+        // Set from ENCKE_CAPTURE: save frame `capture_frame_` there as a PNG,
+        // then quit.
+        optional<string> capture_path_;
+        u32              capture_frame_ = 0;
+        u32              frames_drawn_  = 0;
 
         // Wall-clock stamp of the previous completed frame, for frame time.
         optional<std::chrono::steady_clock::time_point> last_frame_;

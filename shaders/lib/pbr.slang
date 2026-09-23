@@ -64,6 +64,52 @@ public float3 shade(Surface s, float3 to_light, float3 radiance)
     return (diffuse + specular) * radiance * n_dot_l;
 }
 
+// Karis's analytic fit of the split-sum environment BRDF ("Physically Based
+// Shading on Mobile", 2014): the scale and bias on F0 that the usual lookup
+// texture would give, including the Fresnel rise at grazing angles.
+float3 env_brdf(float3 f0, float roughness, float n_dot_v)
+{
+    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+
+    float4 r    = roughness * c0 + c1;
+    float  a004 = min(r.x * r.x, exp2(-9.28f * n_dot_v)) * r.x + r.y;
+    float2 ab   = float2(-1.04f, 1.04f) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+// Light from the environment: `sky` radiance above the horizon, `ground`
+// below, `up` pointing away from the ground. Stands in for bounce light and
+// reflections until there is anything better; it knows nothing of nearby
+// objects.
+//
+// Diffuse is exact for that environment: a Lambertian surface sees the two
+// halves in proportion 0.5 +- 0.5 n.up. Specular reads the environment along
+// the reflected view ray, with the horizon softened by roughness -- a hard
+// line for a mirror, the diffuse blend at full roughness -- which is a rough
+// prefilter, not a convolution with the GGX lobe.
+public float3 shade_environment(Surface s, float3 up, float3 sky, float3 ground)
+{
+    float n_dot_v = max(dot(s.normal, s.to_eye), 1e-4f);
+    float alpha   = s.roughness * s.roughness;
+
+    float3 f0      = lerp(float3(0.04f), s.albedo, s.metallic);
+    float3 scale   = env_brdf(f0, s.roughness, n_dot_v);
+
+    float3 irradiance = lerp(ground, sky, 0.5f + 0.5f * dot(s.normal, up));
+    float3 diffuse    = (1.0f - scale) * (1.0f - s.metallic) * s.albedo * irradiance * s.ao;
+
+    float3 reflected = reflect(-s.to_eye, s.normal);
+    float  width     = max(alpha, 0.01f);
+    float3 incoming  = lerp(ground, sky, saturate(0.5f + 0.5f * dot(reflected, up) / width));
+
+    // Lagarde's specular occlusion from ambient occlusion: tight lobes
+    // escape a crevice that a diffuse hemisphere would not.
+    float occlusion = saturate(pow(n_dot_v + s.ao, exp2(-16.0f * alpha - 1.0f)) - 1.0f + s.ao);
+
+    return diffuse + scale * incoming * occlusion;
+}
+
 // Inverse-square with a smooth window to zero at `radius`, so a light's
 // influence is finite and can be bounded by a cluster sphere test. Karis 2013.
 public float point_attenuation(float distance, float radius)

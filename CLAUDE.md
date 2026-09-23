@@ -222,7 +222,7 @@ The passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
 | exposure | compute | luminance histogram of HDR, then one group meters and adapts EV100 |
 | debug views | compute | one visualisation image per open debug window; skipped when none is open |
-| tonemap | raster | full-screen triangle, exposure + ACES, into the sRGB swapchain |
+| tonemap | raster | full-screen triangle, exposure + ACES, AgX or PBR Neutral, into the sRGB swapchain |
 | overlay | raster | caller-recorded UI, its own rendering scope on the UI view, `LOAD` |
 
 ### Debug views
@@ -347,6 +347,19 @@ in the fence wait, acquire and present.
 - **`ENCKE_NO_UI` (or F1) hides the overlay**, and a byte comparison needs it:
   the stats window's numbers change every frame, so two captures with it
   showing never match.
+- **`ENCKE_CAPTURE=path.png` is the way to capture.** The renderer copies the
+  finished swapchain image (UI included, so pair it with `ENCKE_NO_UI`) into
+  host memory on frame `ENCKE_CAPTURE_FRAME` (default 10), the app writes it
+  as a PNG and quits. Nothing touches the desktop, so other windows, the
+  compositor and the user's own use of the machine cannot get into it; a
+  desktop grab once captured a browser because Windows refused the
+  foreground switch. Two runs with the same settings are byte-identical.
+- **`ENCKE_CAMERA="px py pz tx ty tz"`** starts the camera at p looking at t,
+  metres from the pole. The helmet: `"-2.55 1.33 -1.62 -3 1.17 -2"`.
+- **`ENCKE_TONEMAP` (0 ACES, 1 AgX, 2 PBR Neutral, T cycles) and `ENCKE_EV100`**
+  pick the curve and pin the exposure it is applied at. Metering still runs
+  under a pinned EV, so the two separate cleanly. PBR Neutral is the
+  default.
 
 ### Parameters, and why these
 
@@ -408,15 +421,26 @@ Known gaps, seen 2026-09-22 and not yet worked on:
   raises exposure and sunlit colour goes pale; from a mostly dark view the
   same helmet looks right. sRGB was checked and ruled out: every colour map
   and target is `_SRGB` where it should be, and ORM and normals are `UNORM`.
-- **The tonemap is the likely cause.** `shaders/tonemap.slang` is Narkowicz's
-  per-channel ACES fit, which desaturates bright values toward white, and its
-  own comment calls it a placeholder for AgX or PBR Neutral. The test is two
-  captures of one view, same pinned exposure, ACES against the replacement.
-- **Ambient is flat and unshadowed.** `Scene::ambient` is one colour added
-  everywhere times albedo and AO, a stand-in for bounce light, so shade gets a
-  uniform bluish fill that lowers contrast. Normal maps do not show in it.
+- **Tested 2026-09-23: exposure is the main cause, the curve decides how
+  much colour survives it.** Every display curve desaturates as a colour
+  climbs its shoulder, since a channel at 1.0 can only get brighter by the
+  others rising to meet it. Over the helmet at the metered exposure, PBR
+  Neutral kept the most saturation, ACES less and AgX least, and Neutral
+  still led at matched brightness. ACES also skews hue toward yellow as
+  values rise (red, gold, wood); Neutral and AgX hold hue. The captures are
+  the proof, not the eye: the paleness is in the pixels.
+- **Ambient is a two-colour environment, first draft.** `shade_environment`
+  in `lib/pbr.slang` replaces the old flat ambient: sunlit ground below the
+  horizon (its radiance worked out per frame from the star and
+  `Scene::ground_albedo`), sky above it at `Scene::sky_fill` of that. Diffuse
+  is exact for it; specular reads it along the reflected ray with the horizon
+  softened by roughness, scaled by Karis's analytic environment BRDF. It
+  gives metal its shape (dark above, lit below). It knows nothing of nearby
+  objects, and there is no horizon occlusion, so normal-mapped grooves seen at
+  a grazing angle reflect "ground" they could not see and draw bright lines
+  (the planks show it).
 
-The push constants are at 120 of the guaranteed 128 bytes.
+The push constants are at 124 of the guaranteed 128 bytes.
 
 ## Shadows — built, first draft
 

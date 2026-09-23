@@ -888,6 +888,16 @@ namespace encke
         f64vec3 const sun_view    = f64vec3{view * f64vec4{sun_world, 0.0}};
         f32 const     illuminance = static_cast<f32>(scene.star.illuminance_at(scene.camera.position));
 
+        // The environment's ground is a Lambertian plane lit by the star:
+        // radiance albedo * E * cos(elevation) / pi, zero once the star sets.
+        constexpr f64 kPi = 3.14159265358979323846;
+
+        f64vec3 const up_view   = glm::normalize(f64vec3{view * f64vec4{scene.up, 0.0}});
+        f64 const     sun_up    = std::max(glm::dot(scene.up, sun_world), 0.0);
+        f32vec3 const ground    = scene.ground_albedo * scene.star.colour *
+                                  static_cast<f32>(static_cast<f64>(illuminance) * sun_up / kPi);
+        f32vec3 const sky       = ground * scene.sky_fill;
+
         u32 const light_count  = static_cast<u32>(std::min<size_t>(scene.lights.size(), kMaxLights));
         u32 const object_count = static_cast<u32>(std::min<size_t>(scene.objects.size(), kMaxObjects));
 
@@ -904,7 +914,9 @@ namespace encke
             .cluster_grid  = u32vec4{kClustersX, kClustersY, kClustersZ, kMaxLightsPerCluster},
             .sun_direction = f32vec4{f32vec3{glm::normalize(sun_view)}, 0.0f},
             .sun_radiance  = f32vec4{scene.star.colour * illuminance, 0.0f},
-            .ambient       = f32vec4{scene.ambient, 0.0f},
+            .env_up        = f32vec4{f32vec3{up_view}, 0.0f},
+            .env_sky       = f32vec4{sky, 0.0f},
+            .env_ground    = f32vec4{ground, 0.0f},
             .counts        = u32vec4{light_count, shadow_plan_.cascade_count, 0u, 0u},
             .shadow        = f32vec4{shadow_far, shadow_far * (1.0f - config::kShadowFadeFraction),
                                      config::kShadowNormalOffset, 0.0f},
@@ -1083,6 +1095,7 @@ namespace encke
             .exposure_image     = BindlessSet::kInvalid,
             .exposure_histogram = exposure_histogram_handle_,
             .material_sampler   = material_sampler_handle_,
+            .tonemap            = static_cast<u32>(tonemap_),
         };
 
         u32 const shadow_view_count = shadow_plan_.cascade_count + shadow_plan_.spot_count;
@@ -1461,6 +1474,13 @@ namespace encke
 
             vkCmdBeginRendering(command, &rendering);
             set_viewport(command, extent);
+            // A pinned EV overrides whatever was metered.
+            if (fixed_ev100_.has_value())
+            {
+                push.exposure       = exposure_from_ev100(*fixed_ev100_);
+                push.exposure_image = BindlessSet::kInvalid;
+            }
+
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, tonemap_pipeline_.handle());
             vkCmdPushConstants(command, tonemap_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                                sizeof(push), &push);
@@ -1519,12 +1539,76 @@ namespace encke
 
         timestamps_.mark(command, "UI");
 
-        // -- 12. present -----------------------------------------------------
+        // -- 12. capture, when asked for ------------------------------------
+        // Detours the image through TRANSFER_SRC and copies it out whole; the
+        // present transition below then starts from there.
+        VkImageLayout ready_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkPipelineStageFlags2 ready_stage  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkAccessFlags2        ready_access = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+        if (capture_requested_ && swapchain.readable())
+        {
+            capture_requested_ = false;
+
+            VkDeviceSize const bytes = VkDeviceSize{extent.width} * extent.height * 4u;
+            if (capture_buffer_.size() < bytes)
+            {
+                capture_buffer_.shutdown();
+                if (!capture_buffer_.init_mapped(*allocator_, bytes,
+                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+                {
+                    return false;
+                }
+            }
+
+            VkImage const target = swapchain.image(image_index);
+
+            Transition const to_copy[]{
+                {target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_READ_BIT},
+            };
+            barrier(command, to_copy);
+
+            VkBufferImageCopy const region{
+                .bufferOffset      = 0,
+                .bufferRowLength   = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .imageOffset       = {0, 0, 0},
+                .imageExtent       = {extent.width, extent.height, 1},
+            };
+            vkCmdCopyImageToBuffer(command, target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   capture_buffer_.handle(), 1, &region);
+
+            // The host reads it after the fence, which makes device writes
+            // available; this makes them visible to the host domain.
+            VkMemoryBarrier2 const to_host{
+                .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .pNext         = nullptr,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT,
+            };
+            barrier(command, {}, span<VkMemoryBarrier2 const>{&to_host, 1});
+
+            capture_.width    = extent.width;
+            capture_.height   = extent.height;
+            capture_.format   = swapchain.format();
+            capture_recorded_ = true;
+
+            ready_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            ready_stage  = VK_PIPELINE_STAGE_2_COPY_BIT;
+            ready_access = 0;
+        }
+
+        // -- 13. present -----------------------------------------------------
         {
             Transition const present[]{
-                {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE, 0},
+                {swapchain.image(image_index), ready_layout, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                 ready_stage, ready_access, VK_PIPELINE_STAGE_2_NONE, 0},
             };
             barrier(command, present);
         }
@@ -1694,6 +1778,21 @@ namespace encke
         render_finished_.clear();
     }
 
+    optional<Renderer::Capture> Renderer::take_capture()
+    {
+        if (!capture_recorded_)
+        {
+            return nullopt;
+        }
+        capture_recorded_ = false;
+
+        Capture capture = capture_;
+        size_t const bytes = size_t{capture.width} * capture.height * 4u;
+        auto const*  source = static_cast<u8 const*>(capture_buffer_.mapped());
+        capture.pixels.assign(source, source + bytes);
+        return capture;
+    }
+
     void Renderer::shutdown()
     {
         if (device_ == nullptr)
@@ -1716,6 +1815,7 @@ namespace encke
 
         exposure_histogram_.shutdown();
         exposure_image_.shutdown();
+        capture_buffer_.shutdown();
 
         meshes_.clear();
         materials_.clear();

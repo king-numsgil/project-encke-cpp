@@ -103,6 +103,87 @@ namespace encke
             }
             return static_cast<u32>(parsed);
         }
+
+        char const* tonemap_name(Tonemap tonemap)
+        {
+            switch (tonemap)
+            {
+            case Tonemap::Aces:       return "ACES (Narkowicz fit)";
+            case Tonemap::AgX:        return "AgX";
+            case Tonemap::PbrNeutral: return "PBR Neutral";
+            }
+            return "unknown";
+        }
+
+        // ENCKE_TONEMAP picks the starting curve, numbered as Tonemap; T
+        // cycles it.
+        optional<Tonemap> initial_tonemap()
+        {
+            char const* const value = std::getenv("ENCKE_TONEMAP");
+            if (value == nullptr)
+            {
+                return nullopt;
+            }
+
+            long const parsed = std::strtol(value, nullptr, 10);
+            if (parsed < 0 || parsed >= static_cast<long>(kTonemapCount))
+            {
+                return nullopt;
+            }
+            return static_cast<Tonemap>(parsed);
+        }
+
+        // ENCKE_EV100 pins the exposure the frame is tonemapped at, so two
+        // captures differ only in what is being compared.
+        optional<f32> fixed_ev100()
+        {
+            char const* const value = std::getenv("ENCKE_EV100");
+            if (value == nullptr)
+            {
+                return nullopt;
+            }
+            return static_cast<f32>(std::strtod(value, nullptr));
+        }
+
+        // ENCKE_CAMERA="px py pz tx ty tz" starts the camera at p looking at t,
+        // both in metres from the test planet's pole, so a capture can frame
+        // something other than the default view. Commas work as separators too.
+        struct CameraPose
+        {
+            f64vec3 eye;
+            f64vec3 target;
+        };
+
+        optional<CameraPose> initial_camera()
+        {
+            char const* const value = std::getenv("ENCKE_CAMERA");
+            if (value == nullptr)
+            {
+                return nullopt;
+            }
+
+            array<f64, 6> numbers{};
+            char const*   cursor = value;
+            for (f64& number : numbers)
+            {
+                while (*cursor == ' ' || *cursor == ',')
+                {
+                    ++cursor;
+                }
+
+                char* end = nullptr;
+                number    = std::strtod(cursor, &end);
+                if (end == cursor)
+                {
+                    log::warn("ENCKE_CAMERA wants six numbers, \"px py pz tx ty tz\"; ignored");
+                    return nullopt;
+                }
+                cursor = end;
+            }
+
+            return CameraPose{.eye    = f64vec3{numbers[0], numbers[1], numbers[2]},
+                              .target = f64vec3{numbers[3], numbers[4], numbers[5]}};
+        }
     }
 
     App::~App()
@@ -170,6 +251,20 @@ namespace encke
         }
 
         scene_.build_test_planet(helmet.has_value() ? &*helmet : nullptr);
+
+        // Yaw about +Y, then pitch, the way FlyCamera composes them, so
+        // flying on from here does not snap.
+        if (optional<CameraPose> const pose = initial_camera())
+        {
+            f64vec3 const forward = glm::normalize(pose->target - pose->eye);
+            f64 const     yaw     = std::atan2(-forward.x, -forward.z);
+            f64 const     pitch   = std::asin(std::clamp(forward.y, -1.0, 1.0));
+
+            scene_.camera.position    = scene_.origin() + pose->eye;
+            scene_.camera.orientation = glm::angleAxis(yaw, f64vec3{0.0, 1.0, 0.0}) *
+                                        glm::angleAxis(pitch, f64vec3{1.0, 0.0, 0.0});
+            scene_.previous_camera    = scene_.camera;
+        }
         fly_.reset(scene_.camera);
         log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
 
@@ -189,6 +284,33 @@ namespace encke
         if (optional<u32> const key = initial_debug_key())
         {
             on_debug_key(*key);
+        }
+
+        if (optional<Tonemap> const tonemap = initial_tonemap())
+        {
+            renderer_.set_tonemap(*tonemap);
+        }
+        log::info("tonemap: %s (T cycles)", tonemap_name(renderer_.tonemap()));
+
+        // Read back from the renderer rather than grabbed off the desktop, so
+        // other windows and the compositor cannot get into it.
+        if (char const* const path = std::getenv("ENCKE_CAPTURE"))
+        {
+            capture_path_ = string{path};
+
+            // Late enough for pinned exposure to have metered and every
+            // frame in flight to have been through the renderer once.
+            constexpr u32 kDefaultCaptureFrame = 10;
+            char const* const frame = std::getenv("ENCKE_CAPTURE_FRAME");
+            capture_frame_ = frame != nullptr ? static_cast<u32>(std::strtoul(frame, nullptr, 10))
+                                              : kDefaultCaptureFrame;
+            log::info("capturing frame %u to %s, then quitting", capture_frame_, path);
+        }
+
+        if (optional<f32> const ev100 = fixed_ev100())
+        {
+            renderer_.set_fixed_ev100(ev100);
+            log::info("exposure pinned to EV100 %.2f", static_cast<f64>(*ev100));
         }
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
@@ -334,6 +456,46 @@ namespace encke
         renderer_.set_motion_gain(motion_gain_);
     }
 
+    void App::save_capture()
+    {
+        // The copy is in the frame just submitted.
+        device_.wait_idle();
+
+        optional<Renderer::Capture> capture = renderer_.take_capture();
+        if (!capture.has_value())
+        {
+            log::error("no capture: the swapchain cannot be copied from");
+            return;
+        }
+
+        bool const bgra = capture->format == VK_FORMAT_B8G8R8A8_SRGB ||
+                          capture->format == VK_FORMAT_B8G8R8A8_UNORM;
+        bool const rgba = capture->format == VK_FORMAT_R8G8B8A8_SRGB ||
+                          capture->format == VK_FORMAT_R8G8B8A8_UNORM;
+        if (!bgra && !rgba)
+        {
+            log::error("no capture: swapchain format %d is not 8-bit RGBA or BGRA",
+                       static_cast<int>(capture->format));
+            return;
+        }
+
+        Pixels pixels{.width = capture->width, .height = capture->height,
+                      .rgba = std::move(capture->pixels)};
+        for (size_t at = 0; at < pixels.rgba.size(); at += 4)
+        {
+            if (bgra)
+            {
+                std::swap(pixels.rgba[at], pixels.rgba[at + 2]);
+            }
+            pixels.rgba[at + 3] = 255;   // the swapchain's alpha means nothing
+        }
+
+        if (save_png(*capture_path_, pixels))
+        {
+            log::info("captured %ux%u to %s", pixels.width, pixels.height, capture_path_->c_str());
+        }
+    }
+
     void App::run()
     {
         bool running = true;
@@ -351,6 +513,14 @@ namespace encke
             if (events.toggle_ui)
             {
                 show_ui_ = !show_ui_;
+            }
+
+            if (events.cycle_tonemap && !ui_.wants_text())
+            {
+                auto const next = static_cast<Tonemap>(
+                    (static_cast<u32>(renderer_.tonemap()) + 1u) % kTonemapCount);
+                renderer_.set_tonemap(next);
+                log::info("tonemap: %s", tonemap_name(next));
             }
 
             // A digit typed into a UI text field is not a view switch.
@@ -413,7 +583,23 @@ namespace encke
             // start.
             renderer_.set_frame_time(delta, fixed_time_.has_value());
 
+            bool const capturing = capture_path_.has_value() && frames_drawn_ == capture_frame_;
+            if (capturing)
+            {
+                renderer_.request_capture();
+            }
+
             FrameResult const result = renderer_.draw(swapchain_, scene_, &ui_);
+
+            if (result == FrameResult::Ok)
+            {
+                ++frames_drawn_;
+                if (capturing)
+                {
+                    save_capture();
+                    running = false;
+                }
+            }
 
             switch (result)
             {
