@@ -132,6 +132,7 @@ namespace encke
         //      are declared without a format qualifier.
         //  depthClamp -- shadow cascades clamp casters nearer the sun than
         //      the near plane instead of clipping them away.
+        //  samplerAnisotropy -- material textures on ground seen edge-on.
         bool require_features(FeatureChain const& have, FeatureChain& want, char const*& missing)
         {
             bool ok = true;
@@ -153,6 +154,7 @@ namespace encke
             ENCKE_REQUIRE(core.features.shaderStorageImageReadWithoutFormat);
             ENCKE_REQUIRE(core.features.shaderStorageImageWriteWithoutFormat);
             ENCKE_REQUIRE(core.features.depthClamp);
+            ENCKE_REQUIRE(core.features.samplerAnisotropy);
 
             ENCKE_REQUIRE(v11.shaderDrawParameters);
 

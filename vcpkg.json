@@ -9,6 +9,13 @@
         "vulkan"
       ]
     },
+    {
+      "name": "sdl3-image",
+      "features": [
+        "jpeg",
+        "png"
+      ]
+    },
     "vulkan",
     "vulkan-memory-allocator",
     "volk"

@@ -1,0 +1,189 @@
+#include "core/pch.hpp"
+
+#include "render/material.hpp"
+
+#include "core/log.hpp"
+
+#include <SDL3_image/SDL_image.h>
+
+#include <cstring>
+#include <utility>
+
+namespace encke
+{
+    namespace
+    {
+        // Part of every file name; see assets/textures/CREDITS.md.
+        constexpr char kResolution[] = "1K-JPG";
+
+        struct Definition
+        {
+            char const* set;    // ambientCG asset id, also the directory name
+            f32vec2     tile;   // metres per repeat, across and down
+        };
+
+        // Indexed by MaterialKind. const, not constexpr: GLM types are not
+        // constexpr-constructible here. See CLAUDE.md.
+        Definition const kDefinitions[kMaterialKindCount]{
+            {"", f32vec2{1.0f}},
+            {"Ground110", f32vec2{2.1f}},
+            {"Concrete034", f32vec2{1.1f, 0.55f}},
+            {"Planks037A", f32vec2{2.0f}},
+            {"PaintedMetal006", f32vec2{1.5f}},
+            {"Metal041B", f32vec2{1.0f}},
+            {"MetalPlates013", f32vec2{1.6f}},
+        };
+
+        Definition const& definition(MaterialKind kind)
+        {
+            return kDefinitions[static_cast<u32>(kind)];
+        }
+
+        string map_path(char const* set, char const* map)
+        {
+            return string{ENCKE_ASSET_DIR} + "/textures/" + set + "/" + set + "_" + kResolution +
+                   "_" + map + ".jpg";
+        }
+
+        struct Pixels
+        {
+            u32        width  = 0;
+            u32        height = 0;
+            vector<u8> rgba;
+        };
+
+        // Decodes any format SDL_image reads into tightly packed RGBA8. A
+        // greyscale map comes back with the grey in R, G and B.
+        bool load_rgba(string const& path, Pixels& pixels)
+        {
+            SDL_Surface* const loaded = IMG_Load(path.c_str());
+            if (loaded == nullptr)
+            {
+                log::error("%s: %s", path.c_str(), SDL_GetError());
+                return false;
+            }
+
+            SDL_Surface* const rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32);
+            SDL_DestroySurface(loaded);
+            if (rgba == nullptr)
+            {
+                log::error("%s: conversion to RGBA failed: %s", path.c_str(), SDL_GetError());
+                return false;
+            }
+
+            pixels.width  = static_cast<u32>(rgba->w);
+            pixels.height = static_cast<u32>(rgba->h);
+
+            // The surface's rows may be padded; the upload wants them packed.
+            size_t const row = size_t{pixels.width} * 4;
+            pixels.rgba.resize(row * pixels.height);
+            auto const* const source = static_cast<u8 const*>(rgba->pixels);
+            for (u32 y = 0; y < pixels.height; ++y)
+            {
+                std::memcpy(pixels.rgba.data() + row * y,
+                            source + static_cast<size_t>(rgba->pitch) * y, row);
+            }
+
+            SDL_DestroySurface(rgba);
+            return true;
+        }
+
+        bool same_size(Pixels const& a, Pixels const& b, string const& path)
+        {
+            if (a.width == b.width && a.height == b.height)
+            {
+                return true;
+            }
+
+            log::error("%s is %ux%u, the colour map %ux%u", path.c_str(), b.width, b.height,
+                       a.width, a.height);
+            return false;
+        }
+
+        // An optional single-channel map: its red channel, or nullopt when
+        // the set does not include it.
+        bool load_optional(char const* set, char const* map, Pixels const& reference,
+                           optional<Pixels>& pixels)
+        {
+            string const path = map_path(set, map);
+            if (!SDL_GetPathInfo(path.c_str(), nullptr))
+            {
+                pixels = nullopt;
+                return true;
+            }
+
+            pixels.emplace();
+            return load_rgba(path, *pixels) && same_size(reference, *pixels, path);
+        }
+    }
+
+    bool load_material(MaterialKind kind, MaterialImages& images)
+    {
+        if (kind == MaterialKind::None)
+        {
+            log::error("load_material: None has no maps");
+            return false;
+        }
+
+        char const* const set = definition(kind).set;
+
+        Pixels colour;
+        Pixels normal;
+        Pixels roughness;
+
+        string const colour_path    = map_path(set, "Color");
+        string const normal_path    = map_path(set, "NormalGL");
+        string const roughness_path = map_path(set, "Roughness");
+
+        if (!load_rgba(colour_path, colour) ||
+            !load_rgba(normal_path, normal) || !same_size(colour, normal, normal_path) ||
+            !load_rgba(roughness_path, roughness) ||
+            !same_size(colour, roughness, roughness_path))
+        {
+            return false;
+        }
+
+        optional<Pixels> occlusion;
+        optional<Pixels> metalness;
+        if (!load_optional(set, "AmbientOcclusion", colour, occlusion) ||
+            !load_optional(set, "Metalness", colour, metalness))
+        {
+            return false;
+        }
+
+        size_t const texels = size_t{colour.width} * colour.height;
+
+        images.width  = colour.width;
+        images.height = colour.height;
+        images.albedo = std::move(colour.rgba);
+        images.normal = std::move(normal.rgba);
+        images.orm.resize(texels * 4);
+
+        for (size_t texel = 0; texel < texels; ++texel)
+        {
+            size_t const at = texel * 4;
+            images.albedo[at + 3] = 255;
+            images.normal[at + 3] = 255;
+
+            images.orm[at + 0] = occlusion.has_value() ? occlusion->rgba[at] : u8{255};
+            images.orm[at + 1] = roughness.rgba[at];
+            images.orm[at + 2] = metalness.has_value() ? metalness->rgba[at] : u8{0};
+            images.orm[at + 3] = 255;
+        }
+
+        log::info("material %s: %ux%u%s%s", set, images.width, images.height,
+                  occlusion.has_value() ? ", occlusion" : "",
+                  metalness.has_value() ? ", metalness" : "");
+        return true;
+    }
+
+    char const* material_name(MaterialKind kind)
+    {
+        return kind == MaterialKind::None ? "none" : definition(kind).set;
+    }
+
+    f32vec2 material_tile_metres(MaterialKind kind)
+    {
+        return definition(kind).tile;
+    }
+}

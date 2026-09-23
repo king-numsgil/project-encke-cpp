@@ -47,14 +47,21 @@ public struct GpuShadowView
     public uint4    image;    // x bindless sampled image
 };
 
+// Material values are glTF-style factors: with textures they multiply what is
+// sampled, without they are the material.
 public struct GpuObject
 {
     public float4x4 mvp;
     public float4x4 prev_mvp;
+    public float4x4 model_view;        // 3x3 used, for tangents
     public float4x4 normal_view;
     public float4   albedo_roughness;
     public float4   emissive_metallic;
+    public uint4    textures;          // x albedo, y normal, z ORM, w sampler; x kNoTexture if untextured
+    public float4   texture_scale;     // xyz scale / tile width (m), w tile width / height
 };
+
+public static const uint kNoTexture = 0xFFFFFFFFu;
 
 public struct Push
 {
@@ -100,5 +107,5 @@ public struct Push
 public static const uint kFrameStride      = 240;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
-public static const uint kObjectStride     = 224;
+public static const uint kObjectStride     = 320;
 public static const uint kMatrixStride     = 64;

@@ -59,10 +59,10 @@ maps, a G-buffer pass, compute light clustering, compute lighting and a tonemap
 pass. The test scene is the north pole of an Earth-sized planet, strewn with
 boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
 cascades), shadowed spot lights on masts and a ring of point lamps, with the
-Moon overhead at its real distance. No textures or asset loading yet — all
-geometry is generated in code (cube, UV sphere, planet), and every material is
-flat. A Dear ImGui overlay shows frame and per-pass GPU timings, graphed with
-ImPlot.
+Moon overhead at its real distance. All geometry is generated in code (cube, UV
+sphere, planet). The ground and about half the objects carry CC0 PBR textures
+from ambientCG; the rest keep flat materials. A Dear ImGui overlay shows frame
+and per-pass GPU timings, graphed with ImPlot.
 
 ```
 src/
@@ -81,6 +81,7 @@ src/
     bindless.{hpp,cpp}   the one global descriptor set
     buffer.{hpp,cpp}     device-local (staged) and host-mapped buffers
     image.{hpp,cpp}      any screen-sized target: G-buffer, HDR, depth
+    texture.{hpp,cpp}    immutable sampled image with a blitted mip chain
     swapchain.{hpp,cpp}  swapchain, images, views (scene and UI), recreation
     timestamps.{hpp,cpp} GPU timestamp queries, one range per frame in flight
   ui/
@@ -92,6 +93,7 @@ src/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
     scene.{hpp,cpp}      f64 world: test planet, star, objects, lights
+    material.{hpp,cpp}   MaterialKind, loading and packing a texture set with SDL3_image
     mesh.{hpp,cpp}       Vertex, Mesh, procedural cube, sphere, pole-relative planet
     config.hpp           every renderer capacity and tuning constant
     shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
@@ -116,6 +118,8 @@ shaders/
     normal.slang         octahedral encode and decode
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
+assets/
+  textures/            one directory per ambientCG set; CREDITS.md says where each came from
 ```
 
 **Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
@@ -458,6 +462,79 @@ centimetres underfoot and hundreds of kilometres at the horizon.
 
 The Moon is a sphere of its real radius at its real distance straight up. It
 is a few pixels across, as it should be; look straight up to find it.
+
+## Textures
+
+Six CC0 sets from ambientCG live in `assets/textures/`, 1K JPGs, with their
+source and licence in `CREDITS.md`. They are read from the source tree through
+`ENCKE_ASSET_DIR`, which CMake bakes in, rather than copied beside the
+executable like SPIR-V: tens of megabytes that rarely change. A shipped build
+would need that revisited.
+
+`MaterialKind` works like `MeshKind`: a fixed list the renderer loads at
+startup, one per ambientCG set, and `SceneObject::material` picks one. Each
+set becomes three RGBA8 textures, glTF's arrangement:
+
+| Texture | Format | Holds |
+| --- | --- | --- |
+| albedo | `R8G8B8A8_SRGB` | colour |
+| normal | `R8G8B8A8_UNORM` | tangent space, OpenGL convention (`NormalGL`) |
+| ORM | `R8G8B8A8_UNORM` | R occlusion, G roughness, B metalness, packed on the CPU |
+
+A set without an occlusion map packs 1 there; one without a metalness map
+packs 0, since ambientCG leaves the map out of non-metals. The object's
+albedo, roughness and metallic are glTF-style factors multiplied onto what is
+sampled, so a textured object normally has all three at 1. An untextured
+object (`gpu::kNoTexture` in `Object::textures.x`) skips the samples and the
+factors are the material, exactly as before textures, so the untextured part
+of the scene renders unchanged.
+
+- **Mips are blitted at load**, level from level, in one blocking
+  `submit_immediate` per texture. An `_SRGB` blit filters in linear space, so
+  the albedo mips need no special handling. The normal map's mips average to
+  shorter vectors, which the shader's renormalise absorbs.
+- **One sampler for every material**: trilinear, repeat, anisotropic up to
+  `config::kMaxAnisotropy`. `samplerAnisotropy` is required at device
+  selection. Without anisotropy the ground a few metres out blurs to mush.
+- **Occlusion goes into the G-buffer's albedo alpha**, which was reserved for
+  it. The lighting pass applies it to the ambient term only.
+
+### UVs are metres, and the tangent frame is glTF's
+
+`Vertex` is position, normal, tangent (xyz along +u, w the bitangent sign),
+UV: 48 bytes. `cross(normal, tangent.xyz) * w` points to the *top* of the
+image. Texture v runs down the image, because row 0 of the file is uploaded as
+row 0 and Vulkan puts v = 0 there, so the top of the image is -v, and that is
+the direction a `NormalGL` map's green channel means. Settled by experiment as
+well as derivation: with albedo forced grey, the ground's pebbles read as
+raised, lit on the side facing the sun.
+
+Mesh UVs are metres of surface at the mesh's unit scale, not 0..1. The
+G-buffer vertex shader stretches them by the object's scale along the tangent
+and along the bitangent, and `Object::texture_scale` has already folded in the
+material's tile size (`xyz` scale over tile width, `w` tile width over
+height). One unit cube therefore textures a 12 m tower and a 12 cm table leg
+at the same density. The stretch is exact wherever the tangent follows a
+local axis or the scale is uniform, which covers every mesh here; a
+non-uniformly scaled sphere would smear.
+
+- **Cube**: each face maps the unit square, upright on the sides. Textures do
+  not line up across edges.
+- **Sphere**: u westward round the equator, v from the north pole, both arc
+  length. The seam column is duplicated and each pole is a vertex per slice,
+  so neither wraps nor pinches.
+- **Planet**: planar, the local x and z in metres. Exact on the flat ground
+  near the pole; far out the coordinates are large enough to lose f32
+  precision, and by then every sample comes from the smallest mips.
+
+Known gaps:
+
+- No specular antialiasing. Normal-mapped metal at a distance sparkles; that
+  wants Toksvig or similar folded into roughness, or TAA.
+- Loading is synchronous at startup, decoding JPGs on one thread. Fine for six
+  sets, not for a real asset count.
+- Materials are a compile-time list with tile sizes in `render/material.cpp`.
+  No material description files.
 
 ## Camera control
 
@@ -864,8 +941,13 @@ backend, so it has no equivalent failure mode.
 
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
-`sdl3`, `glm`. Three come from CPM instead: mimalloc (see *Allocator*), and
-Dear ImGui and ImPlot.
+`sdl3`, `sdl3-image`, `glm`. Three come from CPM instead: mimalloc (see
+*Allocator*), and Dear ImGui and ImPlot.
+
+- **sdl3-image needs its format features explicitly.** The port has no
+  default features and builds with its stb backend off, so a bare
+  `"sdl3-image"` loads no JPG or PNG at all. The manifest requests `jpeg` and
+  `png`, which bring libjpeg-turbo and libpng.
 
 - **Dear ImGui is the docking branch** (`v1.92.9b-docking`), built from bare
   sources into the `encke_imgui` static library alongside ImPlot `v1.0`.

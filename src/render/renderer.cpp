@@ -193,8 +193,10 @@ namespace encke
              .offset = offsetof(Vertex, position)},
             {.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
              .offset = offsetof(Vertex, normal)},
-            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
-             .offset = offsetof(Vertex, colour)},
+            {.location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+             .offset = offsetof(Vertex, tangent)},
+            {.location = 3, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT,
+             .offset = offsetof(Vertex, uv)},
         };
 
         // The shadow pass reads position only, from the same vertex buffers.
@@ -324,6 +326,11 @@ namespace encke
         build_planet(vertices, indices, kEarthRadius, kPlanetSlices, kPlanetFirstRing,
                      kPlanetRingGrowth);
         if (!meshes_[static_cast<u32>(MeshKind::Planet)].init(allocator, device, vertices, indices))
+        {
+            return false;
+        }
+
+        if (!create_materials())
         {
             return false;
         }
@@ -548,6 +555,82 @@ namespace encke
             return false;
         }
         shadow_sampler_handle_ = bindless_.add_sampler(shadow_sampler_);
+
+        return true;
+    }
+
+    bool Renderer::create_materials()
+    {
+        // Trilinear and anisotropic, repeating: surface textures seen at
+        // grazing angles across the ground would blur to mush without it.
+        VkSamplerCreateInfo const info{
+            .sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext                   = nullptr,
+            .flags                   = 0,
+            .magFilter               = VK_FILTER_LINEAR,
+            .minFilter               = VK_FILTER_LINEAR,
+            .mipmapMode              = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+            .addressModeU            = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeV            = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeW            = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .mipLodBias              = 0.0f,
+            .anisotropyEnable        = VK_TRUE,
+            .maxAnisotropy           = std::min(config::kMaxAnisotropy,
+                                                device_->properties().limits.maxSamplerAnisotropy),
+            .compareEnable           = VK_FALSE,
+            .compareOp               = VK_COMPARE_OP_ALWAYS,
+            .minLod                  = 0.0f,
+            .maxLod                  = VK_LOD_CLAMP_NONE,
+            .borderColor             = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+
+        VkResult const result = vkCreateSampler(device_->handle(), &info,
+                                                memory::vulkan_callbacks(), &material_sampler_);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkCreateSampler (material)", result);
+            return false;
+        }
+        material_sampler_handle_ = bindless_.add_sampler(material_sampler_);
+
+        VkImageLayout const read_only = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+
+        for (u32 index = 1; index < kMaterialKindCount; ++index)
+        {
+            auto const kind = static_cast<MaterialKind>(index);
+
+            MaterialImages images;
+            if (!load_material(kind, images))
+            {
+                return false;
+            }
+
+            MaterialTextures& material = materials_[index];
+            u32 const width  = images.width;
+            u32 const height = images.height;
+
+            if (!material.albedo.init(*allocator_, *device_,
+                                      {VK_FORMAT_R8G8B8A8_SRGB, "material albedo"}, width, height,
+                                      images.albedo) ||
+                !material.normal.init(*allocator_, *device_,
+                                      {VK_FORMAT_R8G8B8A8_UNORM, "material normal"}, width,
+                                      height, images.normal) ||
+                !material.orm.init(*allocator_, *device_,
+                                   {VK_FORMAT_R8G8B8A8_UNORM, "material orm"}, width, height,
+                                   images.orm))
+            {
+                return false;
+            }
+
+            material.handles = u32vec4{
+                bindless_.add_sampled_image(material.albedo.view(), read_only),
+                bindless_.add_sampled_image(material.normal.view(), read_only),
+                bindless_.add_sampled_image(material.orm.view(), read_only),
+                material_sampler_handle_,
+            };
+            material.tile = material_tile_metres(kind);
+        }
 
         return true;
     }
@@ -786,12 +869,25 @@ namespace encke
             f64mat4 const previous_model_view = previous_view * object.previous_model;
             f64mat3 const normal_matrix = glm::transpose(glm::inverse(f64mat3{model_view}));
 
+            u32vec4 textures{gpu::kNoTexture};
+            f32vec4 texture_scale{0.0f};
+            if (object.material != MaterialKind::None)
+            {
+                MaterialTextures const& material = materials_[static_cast<u32>(object.material)];
+                textures      = material.handles;
+                texture_scale = f32vec4{f32vec3{object.scale} / material.tile.x,
+                                        material.tile.x / material.tile.y};
+            }
+
             gpu::Object const gpu_object{
                 .mvp               = f32mat4{projection * model_view},
                 .prev_mvp          = f32mat4{previous_projection * previous_model_view},
+                .model_view        = f32mat4{model_view},
                 .normal_view       = f32mat4{f64mat4{normal_matrix}},
                 .albedo_roughness  = f32vec4{object.albedo, object.roughness},
                 .emissive_metallic = f32vec4{object.emissive, object.metallic},
+                .textures          = textures,
+                .texture_scale     = texture_scale,
             };
             std::memcpy(&objects[index], &gpu_object, sizeof(gpu_object));
         }
@@ -1515,6 +1611,19 @@ namespace encke
         for (Mesh& mesh : meshes_)
         {
             mesh.shutdown();
+        }
+
+        for (MaterialTextures& material : materials_)
+        {
+            material.albedo.shutdown();
+            material.normal.shutdown();
+            material.orm.shutdown();
+        }
+
+        if (material_sampler_ != VK_NULL_HANDLE)
+        {
+            vkDestroySampler(device, material_sampler_, memory::vulkan_callbacks());
+            material_sampler_ = VK_NULL_HANDLE;
         }
 
         for (FrameResources& resources : frames_)

@@ -57,49 +57,60 @@ namespace encke
             }
         }
 
-        // Rings of `slices` vertices, one per polar angle in `polar` (strictly
-        // between the poles), capped by a single vertex at each pole. `place`
-        // maps a unit direction from the centre to a local position.
-        template<class Place>
+        // Rings of `slices + 1` vertices, one ring per polar angle in `polar`
+        // (strictly between the poles), capped at each pole. The last column
+        // repeats the first in position but not in texture coordinate, and
+        // each pole is one vertex per slice, at the middle of its column, so
+        // a texture neither wraps backwards across the seam nor converges on
+        // a single u. `make(direction, theta, phi)` builds the vertex for a
+        // unit direction from the centre at polar angle theta, azimuth phi.
+        template<class Make>
         void build_rings(vector<Vertex>& vertices, vector<u32>& indices, span<f64 const> polar,
-                         u32 slices, Place const& place)
+                         u32 slices, Make const& make)
         {
             vertices.clear();
             indices.clear();
 
-            f32vec3 const colour{1.0f};
-
-            auto add = [&](f64vec3 const& direction) {
-                vertices.push_back({place(direction), f32vec3{direction}, colour});
-            };
-
-            add(f64vec3{0.0, 1.0, 0.0});
-
-            for (f64 const theta : polar)
-            {
-                for (u32 slice = 0; slice < slices; ++slice)
-                {
-                    f64 const phi = 2.0 * kPi * static_cast<f64>(slice) / static_cast<f64>(slices);
-                    add(f64vec3{std::sin(theta) * std::cos(phi), std::cos(theta),
-                                std::sin(theta) * std::sin(phi)});
-                }
-            }
-
-            add(f64vec3{0.0, -1.0, 0.0});
-
-            u32 const rings = static_cast<u32>(polar.size());
-            u32 const north = 0;
-            u32 const south = 1 + rings * slices;
-
-            auto ring_vertex = [slices](u32 ring, u32 slice) {
-                return 1 + ring * slices + slice % slices;
+            auto phi_at = [slices](f64 column) {
+                return 2.0 * kPi * column / static_cast<f64>(slices);
             };
 
             for (u32 slice = 0; slice < slices; ++slice)
             {
-                emit_outward(vertices, indices, north, ring_vertex(0, slice),
+                f64 const phi = phi_at(static_cast<f64>(slice) + 0.5);
+                vertices.push_back(make(f64vec3{0.0, 1.0, 0.0}, 0.0, phi));
+            }
+
+            for (f64 const theta : polar)
+            {
+                for (u32 column = 0; column <= slices; ++column)
+                {
+                    f64 const phi = phi_at(static_cast<f64>(column));
+                    vertices.push_back(make(f64vec3{std::sin(theta) * std::cos(phi), std::cos(theta),
+                                                    std::sin(theta) * std::sin(phi)},
+                                            theta, phi));
+                }
+            }
+
+            for (u32 slice = 0; slice < slices; ++slice)
+            {
+                f64 const phi = phi_at(static_cast<f64>(slice) + 0.5);
+                vertices.push_back(make(f64vec3{0.0, -1.0, 0.0}, kPi, phi));
+            }
+
+            u32 const rings   = static_cast<u32>(polar.size());
+            u32 const columns = slices + 1;
+            u32 const south   = slices + rings * columns;
+
+            auto ring_vertex = [slices, columns](u32 ring, u32 column) {
+                return slices + ring * columns + column;
+            };
+
+            for (u32 slice = 0; slice < slices; ++slice)
+            {
+                emit_outward(vertices, indices, slice, ring_vertex(0, slice),
                              ring_vertex(0, slice + 1));
-                emit_outward(vertices, indices, south, ring_vertex(rings - 1, slice + 1),
+                emit_outward(vertices, indices, south + slice, ring_vertex(rings - 1, slice + 1),
                              ring_vertex(rings - 1, slice));
             }
 
@@ -125,9 +136,6 @@ namespace encke
         vertices.reserve(24);
         indices.reserve(36);
 
-        // White: colour comes from the object's material, not the mesh.
-        f32vec3 const colour{1.0f};
-
         for (u32 face = 0; face < 6; ++face)
         {
             Face const& basis = kFaces[face];
@@ -136,12 +144,18 @@ namespace encke
             f32vec3 const u      = basis.u * 0.5f;
             f32vec3 const v      = basis.v * 0.5f;
 
+            // normal = cross(u, v) for every face, so seen from outside u is
+            // right and v is up: the tangent is u, and cross(normal, u) = v
+            // is the top of the image, sign +1. Texture v runs down, from
+            // the +v edge at 0 to the -v edge at 1.
+            f32vec4 const tangent{basis.u, 1.0f};
+
             u32 const base = static_cast<u32>(vertices.size());
 
-            vertices.push_back({centre - u - v, basis.normal, colour});
-            vertices.push_back({centre + u - v, basis.normal, colour});
-            vertices.push_back({centre + u + v, basis.normal, colour});
-            vertices.push_back({centre - u + v, basis.normal, colour});
+            vertices.push_back({centre - u - v, basis.normal, tangent, f32vec2{0.0f, 1.0f}});
+            vertices.push_back({centre + u - v, basis.normal, tangent, f32vec2{1.0f, 1.0f}});
+            vertices.push_back({centre + u + v, basis.normal, tangent, f32vec2{1.0f, 0.0f}});
+            vertices.push_back({centre - u + v, basis.normal, tangent, f32vec2{0.0f, 0.0f}});
 
             indices.push_back(base + 0);
             indices.push_back(base + 1);
@@ -160,8 +174,20 @@ namespace encke
             polar.push_back(kPi * static_cast<f64>(stack) / static_cast<f64>(stacks));
         }
 
+        // u increases westward, against phi, so the texture reads the right
+        // way round from outside; the tangent is the direction it increases
+        // in. Both coordinates are arc length on the unit-diameter sphere:
+        // radius 0.5 times the angle.
         build_rings(vertices, indices, polar, slices,
-                    [](f64vec3 const& direction) { return f32vec3{direction * 0.5}; });
+                    [](f64vec3 const& direction, f64 theta, f64 phi) {
+                        f64vec3 const tangent{std::sin(phi), 0.0, -std::cos(phi)};
+                        return Vertex{
+                            f32vec3{direction * 0.5},
+                            f32vec3{direction},
+                            f32vec4{f32vec3{tangent}, 1.0f},
+                            f32vec2{f64vec2{(2.0 * kPi - phi) * 0.5, theta * 0.5}},
+                        };
+                    });
     }
 
     void build_planet(vector<Vertex>& vertices, vector<u32>& indices, f64 radius, u32 slices,
@@ -176,9 +202,28 @@ namespace encke
         }
 
         // Composed in f64 relative to the pole, then narrowed: see mesh.hpp.
-        build_rings(vertices, indices, polar, slices, [radius](f64vec3 const& direction) {
-            return f32vec3{direction * radius - f64vec3{0.0, radius, 0.0}};
-        });
+        // Planar texture coordinates (x, z): the tangent is +x laid into the
+        // surface, and cross(normal, +x) at the pole is -z, the top of the
+        // image, since v = z runs down it.
+        build_rings(vertices, indices, polar, slices,
+                    [radius](f64vec3 const& direction, f64, f64) {
+                        f64vec3 const local = direction * radius - f64vec3{0.0, radius, 0.0};
+
+                        f64vec3 across = f64vec3{1.0, 0.0, 0.0} - direction * direction.x;
+                        if (glm::length(across) < 1e-6)
+                        {
+                            // Where the normal is +-x, a quarter of the way
+                            // round the planet; any tangent will do there.
+                            across = f64vec3{0.0, 0.0, 1.0};
+                        }
+
+                        return Vertex{
+                            f32vec3{local},
+                            f32vec3{direction},
+                            f32vec4{f32vec3{glm::normalize(across)}, 1.0f},
+                            f32vec2{f64vec2{local.x, local.z}},
+                        };
+                    });
     }
 
     bool Mesh::init(VulkanAllocator const& allocator, VulkanDevice const& device,

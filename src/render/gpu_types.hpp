@@ -64,14 +64,29 @@ namespace encke::gpu
         u32vec4 image;               // x bindless sampled image
     };
 
+    // Material values are glTF-style factors: with textures they multiply
+    // what is sampled, without they are the material.
     struct Object
     {
         f32mat4 mvp;
         f32mat4 prev_mvp;            // for motion vectors
+        f32mat4 model_view;          // view * model; 3x3 used, for tangents
         f32mat4 normal_view;         // inverse-transpose(view * model); 3x3 used
         f32vec4 albedo_roughness;    // linear rgb, a roughness
         f32vec4 emissive_metallic;   // linear HDR rgb, a metallic
+
+        // x albedo, y normal, z occlusion-roughness-metalness: bindless
+        // sampled images. w the sampler. x is kNoTexture on an untextured
+        // object, and then none of the others is read.
+        u32vec4 textures;
+
+        // xyz the object's scale divided by the tile's width in metres; w the
+        // tile's width over its height. Stretches mesh UVs, which are metres
+        // at unit scale, into tile repeats.
+        f32vec4 texture_scale;
     };
+
+    inline constexpr u32 kNoTexture = ~0u;
 
     // One struct for every pass; each pass reads the fields it needs. All
     // pipelines share one push range, so this is pushed once per pass and the
@@ -124,6 +139,6 @@ namespace encke::gpu
     static_assert(sizeof(Frame) == 240);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
-    static_assert(sizeof(Object) == 224);
+    static_assert(sizeof(Object) == 320);
     static_assert(sizeof(Push) == 116, "must fit the 128-byte guaranteed minimum");
 }

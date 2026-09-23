@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/camera.hpp"
+#include "render/material.hpp"
 #include "render/mesh.hpp"
 
 namespace encke
@@ -18,8 +19,11 @@ namespace encke
         f64mat4 model{1.0};
         f64mat4 previous_model{1.0};   // last frame, for motion vectors
 
-        MeshKind mesh = MeshKind::Cube;
+        MeshKind     mesh     = MeshKind::Cube;
+        MaterialKind material = MaterialKind::None;
 
+        // With a material these are glTF-style factors on its maps; without,
+        // they are the whole material.
         f32vec3 albedo{1.0f};          // linear
         f32     roughness = 0.5f;
         f32vec3 emissive{0.0f};        // linear, HDR
@@ -113,6 +117,10 @@ namespace encke
     private:
         SceneObject& add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
                          f32 roughness, f32 metallic, f32vec3 emissive = f32vec3{0.0f});
+
+        // Every factor 1, so the maps are the material. Metalness comes from
+        // the map too: a set without one is a dielectric.
+        SceneObject& add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material);
 
         f64vec3 origin_{0.0};
         bool    first_update_ = true;

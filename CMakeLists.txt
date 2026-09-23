@@ -30,6 +30,7 @@ find_package(Vulkan REQUIRED)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
+find_package(SDL3_image CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
@@ -147,6 +148,7 @@ add_executable(encke
 
     src/render/camera.cpp
     src/render/fly_camera.cpp
+    src/render/material.cpp
     src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/renderer.cpp
@@ -165,10 +167,18 @@ add_executable(encke
     src/vulkan/device.cpp
     src/vulkan/image.cpp
     src/vulkan/swapchain.cpp
+    src/vulkan/texture.cpp
     src/vulkan/timestamps.cpp
 )
 
 target_include_directories(encke PRIVATE src)
+
+# Textures are read from the source tree, not copied beside the executable the
+# way SPIR-V is: they are tens of megabytes, change rarely, and a copy per
+# build directory would buy nothing on a development machine.
+target_compile_definitions(encke PRIVATE
+    ENCKE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+)
 
 # --- shaders -----------------------------------------------------------------
 
@@ -250,6 +260,7 @@ target_link_libraries(encke PUBLIC
     Vulkan::Headers volk::volk
     GPUOpen::VulkanMemoryAllocator
     SDL3::SDL3
+    $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>
     glm::glm
     encke_imgui
 )

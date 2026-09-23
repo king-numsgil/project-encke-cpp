@@ -24,6 +24,10 @@ namespace encke::config
     inline constexpr u32 kMaxObjects = 256;
     inline constexpr u32 kMaxLights  = 1024;
 
+    // -- material textures ---------------------------------------------------------
+    // Capped further by the device's maxSamplerAnisotropy.
+    inline constexpr f32 kMaxAnisotropy = 16.0f;
+
     // -- sun: cascaded shadow maps ------------------------------------------------
     // Splits blend logarithmic and uniform by kCascadeSplitLambda (1 is fully
     // logarithmic). Past kShadowDistance the sun is unshadowed; the last

@@ -1,12 +1,14 @@
 #pragma once
 
 #include "render/config.hpp"
+#include "render/material.hpp"
 #include "render/mesh.hpp"
 #include "render/pipeline.hpp"
 #include "render/shadows.hpp"
 #include "vulkan/bindless.hpp"
 #include "vulkan/buffer.hpp"
 #include "vulkan/image.hpp"
+#include "vulkan/texture.hpp"
 #include "vulkan/timestamps.hpp"
 
 namespace encke
@@ -162,9 +164,21 @@ namespace encke
             u32 shadow_matrices_handle = BindlessSet::kInvalid;
         };
 
+        // Filled once at startup and read-only after, so unlike the targets
+        // they need no per-frame barriers.
+        struct MaterialTextures
+        {
+            Texture albedo;
+            Texture normal;
+            Texture orm;
+            u32vec4 handles{BindlessSet::kInvalid};   // as gpu::Object::textures
+            f32vec2 tile{1.0f};                       // metres per repeat
+        };
+
         bool create_targets(VkExtent2D extent);
         void register_targets(bool first_time);
         bool create_shadow_maps();
+        bool create_materials();
 
         // Also plans this frame's shadows, which record() then draws.
         void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources);
@@ -246,6 +260,11 @@ namespace encke
         ComputePipeline  adapt_pipeline_;
 
         array<Mesh, kMeshKindCount> meshes_;
+
+        // Indexed by MaterialKind; None's slot stays empty.
+        array<MaterialTextures, kMaterialKindCount> materials_;
+        VkSampler                                   material_sampler_        = VK_NULL_HANDLE;
+        u32                                         material_sampler_handle_ = BindlessSet::kInvalid;
 
         VkCommandPool command_pool_ = VK_NULL_HANDLE;
 

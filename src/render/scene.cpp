@@ -78,6 +78,13 @@ namespace encke
         return objects.back();
     }
 
+    SceneObject& Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material)
+    {
+        SceneObject& object = add(mesh, position, scale, f32vec3{1.0f}, 1.0f, 1.0f);
+        object.material     = material;
+        return object;
+    }
+
     void Scene::build_test_planet()
     {
         objects.clear();
@@ -94,9 +101,10 @@ namespace encke
         {
             SceneObject planet;
             planet.mesh          = MeshKind::Planet;
+            planet.material      = MaterialKind::Ground;
             planet.position      = origin_;
-            planet.albedo        = srgb_to_linear(f32vec3{0.46f, 0.43f, 0.39f});
-            planet.roughness     = 0.92f;
+            planet.albedo        = f32vec3{1.0f};
+            planet.roughness     = 1.0f;
             planet.model         = glm::translate(f64mat4{1.0}, origin_);
             planet.previous_model = planet.model;
             planet.bounds_centre = origin_ - f64vec3{0.0, kEarthRadius, 0.0};
@@ -118,15 +126,14 @@ namespace encke
             star.colour             = f32vec3{1.0f, 0.97f, 0.93f};
         }
 
-        f32vec3 const concrete{0.62f, 0.60f, 0.57f};
-        f32vec3 const rust{0.55f, 0.30f, 0.16f};
-        f32vec3 const olive{0.40f, 0.44f, 0.26f};
+        // Textured and flat objects side by side: the colonnade, the spheres
+        // but one, the showpiece and the lamps keep flat materials.
         f32vec3 const slate{0.30f, 0.33f, 0.38f};
         f32vec3 const white{0.85f, 0.85f, 0.85f};
 
         // A tower: its shadow runs ~50 m across the field at this sun angle,
         // through every cascade.
-        add(MeshKind::Cube, {-9.0, 6.0, -7.0}, {1.6, 12.0, 1.6}, concrete, 0.8f, 0.0f);
+        add(MeshKind::Cube, {-9.0, 6.0, -7.0}, {1.6, 12.0, 1.6}, MaterialKind::Concrete);
 
         // A colonnade: striped shadows, and fine detail for the near cascade.
         for (i32 index = 0; index < 8; ++index)
@@ -137,36 +144,37 @@ namespace encke
         add(MeshKind::Cube, {-0.4, 3.15, 6.0}, {12.0, 0.3, 0.8}, white, 0.6f, 0.0f);
 
         // A gateway.
-        add(MeshKind::Cube, {7.0, 2.0, -3.0}, {0.8, 4.0, 0.8}, slate, 0.4f, 0.8f);
-        add(MeshKind::Cube, {7.0, 2.0, 1.0}, {0.8, 4.0, 0.8}, slate, 0.4f, 0.8f);
-        add(MeshKind::Cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, slate, 0.4f, 0.8f);
+        add(MeshKind::Cube, {7.0, 2.0, -3.0}, {0.8, 4.0, 0.8}, MaterialKind::MetalPlates);
+        add(MeshKind::Cube, {7.0, 2.0, 1.0}, {0.8, 4.0, 0.8}, MaterialKind::MetalPlates);
+        add(MeshKind::Cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, MaterialKind::MetalPlates);
 
         // A table: a slab on legs, whose underside only a spot can light.
-        add(MeshKind::Cube, {-3.0, 1.0, -2.0}, {3.0, 0.12, 1.8}, rust, 0.7f, 0.0f);
+        add(MeshKind::Cube, {-3.0, 1.0, -2.0}, {3.0, 0.12, 1.8}, MaterialKind::Planks);
         for (f64 const x : {-4.3, -1.7})
         {
             for (f64 const z : {-2.75, -1.25})
             {
-                add(MeshKind::Cube, {x, 0.47, z}, {0.12, 0.94, 0.12}, rust, 0.7f, 0.0f);
+                add(MeshKind::Cube, {x, 0.47, z}, {0.12, 0.94, 0.12}, MaterialKind::Planks);
             }
         }
 
         // Crates.
-        add(MeshKind::Cube, {2.0, 0.5, -6.0}, {1.0, 1.0, 1.0}, rust, 0.85f, 0.0f);
-        add(MeshKind::Cube, {3.1, 0.4, -6.4}, {0.8, 0.8, 0.8}, olive, 0.85f, 0.0f);
-        add(MeshKind::Cube, {2.5, 1.3, -6.1}, {0.6, 0.6, 0.6}, olive, 0.85f, 0.0f);
-        add(MeshKind::Cube, {-6.0, 0.75, 1.5}, {1.5, 1.5, 1.5}, concrete, 0.8f, 0.0f);
-        add(MeshKind::Cube, {11.0, 1.0, 5.0}, {2.0, 2.0, 3.0}, slate, 0.5f, 0.3f);
+        add(MeshKind::Cube, {2.0, 0.5, -6.0}, {1.0, 1.0, 1.0}, MaterialKind::RustedMetal);
+        add(MeshKind::Cube, {3.1, 0.4, -6.4}, {0.8, 0.8, 0.8}, MaterialKind::PaintedMetal);
+        add(MeshKind::Cube, {2.5, 1.3, -6.1}, {0.6, 0.6, 0.6}, MaterialKind::PaintedMetal);
+        add(MeshKind::Cube, {-6.0, 0.75, 1.5}, {1.5, 1.5, 1.5}, MaterialKind::Concrete);
+        add(MeshKind::Cube, {11.0, 1.0, 5.0}, {2.0, 2.0, 3.0}, MaterialKind::MetalPlates);
 
-        // Spheres, rough to mirror.
+        // Spheres, rough to mirror, and one textured to show the sphere's
+        // mapping.
         add(MeshKind::Sphere, {0.0, 1.0, 0.0}, f64vec3{2.0}, {0.92f, 0.78f, 0.52f}, 0.2f, 1.0f);
         add(MeshKind::Sphere, {-2.0, 0.4, 2.5}, f64vec3{0.8}, {0.8f, 0.2f, 0.15f}, 0.5f, 0.0f);
         add(MeshKind::Sphere, {4.0, 0.6, 2.0}, f64vec3{1.2}, white, 0.1f, 0.0f);
-        add(MeshKind::Sphere, {-11.0, 2.5, 3.0}, f64vec3{5.0}, concrete, 0.9f, 0.0f);
+        add(MeshKind::Sphere, {-11.0, 2.5, 3.0}, f64vec3{5.0}, MaterialKind::Concrete);
         add(MeshKind::Sphere, {5.5, 0.3, -8.0}, f64vec3{0.6}, {0.2f, 0.5f, 0.9f}, 0.3f, 0.0f);
 
         // A spinning showpiece on a plinth, so some shadow moves.
-        add(MeshKind::Cube, {-4.0, 0.5, -9.0}, {1.2, 1.0, 1.2}, concrete, 0.8f, 0.0f);
+        add(MeshKind::Cube, {-4.0, 0.5, -9.0}, {1.2, 1.0, 1.2}, MaterialKind::Concrete);
         {
             SceneObject& spinner = add(MeshKind::Cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
                                        {0.92f, 0.78f, 0.52f}, 0.25f, 1.0f);
@@ -198,7 +206,7 @@ namespace encke
         for (Mast const& mast : masts)
         {
             add(MeshKind::Cube, mast.base + f64vec3{0.0, kMastHeight * 0.5, 0.0},
-                {0.2, kMastHeight, 0.2}, slate, 0.5f, 0.6f);
+                {0.2, kMastHeight, 0.2}, MaterialKind::RustedMetal);
 
             f64vec3 const head = mast.base + f64vec3{0.0, kMastHeight + 0.3, 0.0};
             f32vec3 const tint = srgb_to_linear(mast.colour_srgb);
