@@ -586,7 +586,10 @@ and are then skipped. The sampler is `push.material_sampler`, one for all.
 - **One asset worker, on purpose.** Decoding is serial on a single thread,
   and that is a decision, not a gap: the cores are meant for the SDF workers,
   f64 field evaluation and meshing on the CPU, which will be far heavier.
-  Asset decoding should not compete with them.
+  Asset decoding should not compete with them. A job that throws is caught,
+  logged and fails its material, since an exception leaving a `jthread` is
+  `std::terminate`. The target links `Threads::Threads`, which older glibc
+  needs for `std::jthread` and everything else ignores.
 - **Mips are blitted on the GPU**, level from level, by
   `Texture::record_upload`, into a frame's command buffer when streamed or a
   blocking `submit_immediate` through `init`. An `_SRGB` blit filters in linear space, so

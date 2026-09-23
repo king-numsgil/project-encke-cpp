@@ -272,6 +272,13 @@ target_link_libraries(encke PUBLIC
     encke_imgui
 )
 
+# std::jthread needs the platform's thread library. MinGW brings it along
+# implicitly and glibc 2.34+ folds it into libc, but older glibc does not: the
+# build links, then the first thread throws "Enable multithreading to use
+# std::thread: Operation not permitted". Correct and harmless everywhere.
+find_package(Threads REQUIRED)
+target_link_libraries(encke PRIVATE Threads::Threads)
+
 if(ENCKE_USE_MIMALLOC)
     target_link_libraries(encke PUBLIC
         $<IF:$<TARGET_EXISTS:mimalloc-static>,mimalloc-static,mimalloc>

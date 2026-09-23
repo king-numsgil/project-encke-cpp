@@ -2,6 +2,9 @@
 
 #include "render/material_loader.hpp"
 
+#include "core/log.hpp"
+
+#include <exception>
 #include <utility>
 
 namespace encke
@@ -73,7 +76,27 @@ namespace encke
             Decoded decoded;
             decoded.material = job.material;
             decoded.name     = std::move(job.name);
-            decoded.ok       = job.decode(decoded.maps);
+
+            // An exception leaving a jthread's function is std::terminate,
+            // and a corrupt or huge image can throw bad_alloc on the way
+            // through a decoder. One bad asset fails its material, not the
+            // program.
+            try
+            {
+                decoded.ok = job.decode(decoded.maps);
+            }
+            catch (std::exception const& error)
+            {
+                log::error("material %s: decode threw: %s", decoded.name.c_str(), error.what());
+                decoded.ok   = false;
+                decoded.maps = MaterialMaps{};
+            }
+            catch (...)
+            {
+                log::error("material %s: decode threw", decoded.name.c_str());
+                decoded.ok   = false;
+                decoded.maps = MaterialMaps{};
+            }
 
             std::lock_guard const lock{mutex_};
             finished_.push_back(std::move(decoded));
