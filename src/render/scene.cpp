@@ -2,6 +2,11 @@
 
 #include "render/scene.hpp"
 
+#include "assets/asset_manager.hpp"
+#include "core/log.hpp"
+#include "render/mesh.hpp"
+#include "render/pixels.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -38,9 +43,40 @@ namespace encke
         {
             return static_cast<f32>(std::cos(degrees * kPi / 180.0));
         }
+
+        // Tessellation of the procedural meshes.
+        constexpr u32 kSphereSlices     = 48;
+        constexpr u32 kSphereStacks     = 24;
+        constexpr u32 kPlanetSlices     = 192;
+        constexpr f64 kPlanetFirstRing  = 0.25;   // metres of arc from the pole
+        constexpr f64 kPlanetRingGrowth = 1.08;
+
+        // The test scene's ambientCG sets and how many metres one repeat
+        // covers, across and down; see assets/textures/CREDITS.md.
+        struct Materials
+        {
+            MaterialHandle ground;
+            MaterialHandle concrete;
+            MaterialHandle planks;
+            MaterialHandle painted_metal;
+            MaterialHandle rusted_metal;
+            MaterialHandle metal_plates;
+        };
+
+        Materials load_materials(AssetManager& assets)
+        {
+            return Materials{
+                .ground        = assets.load_ambientcg("Ground110", f32vec2{2.1f}),
+                .concrete      = assets.load_ambientcg("Concrete034", f32vec2{1.1f, 0.55f}),
+                .planks        = assets.load_ambientcg("Planks037A", f32vec2{2.0f}),
+                .painted_metal = assets.load_ambientcg("PaintedMetal006", f32vec2{1.5f}),
+                .rusted_metal  = assets.load_ambientcg("Metal041B", f32vec2{1.0f}),
+                .metal_plates  = assets.load_ambientcg("MetalPlates013", f32vec2{1.6f}),
+            };
+        }
     }
 
-    entt::entity Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
+    entt::entity Scene::add(MeshHandle mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
                             f32 roughness, f32 metallic, f32vec3 emissive)
     {
         entt::entity const entity = registry.create();
@@ -49,8 +85,8 @@ namespace encke
                                                 .scale    = f32vec3{scale},
                                             });
         registry.emplace<Renderable>(entity, Renderable{
-                                                 .mesh      = static_cast<u32>(mesh),
-                                                 .material  = static_cast<u32>(MaterialKind::None),
+                                                 .mesh      = mesh,
+                                                 .material  = MaterialHandle{},
                                                  .albedo    = srgb_to_linear(albedo_srgb),
                                                  .roughness = roughness,
                                                  .emissive  = emissive,
@@ -59,10 +95,11 @@ namespace encke
         return entity;
     }
 
-    entt::entity Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material)
+    entt::entity Scene::add(MeshHandle mesh, f64vec3 position, f64vec3 scale,
+                            MaterialHandle material)
     {
         entt::entity const entity = add(mesh, position, scale, f32vec3{1.0f}, 1.0f, 1.0f);
-        registry.get<Renderable>(entity).material = static_cast<u32>(material);
+        registry.get<Renderable>(entity).material = material;
         return entity;
     }
 
@@ -80,11 +117,26 @@ namespace encke
         return entity;
     }
 
-    entt::entity Scene::add_model(Model const& model, f64vec3 const& position,
-                                  f64quat const& orientation, f64 scale, f32 luminance)
+    entt::entity Scene::spawn(f64vec3 const& position, f64quat const& orientation,
+                              ModelSpawn const& spawn)
     {
         entt::entity const root = registry.create();
         registry.emplace<Transform>(root, Transform{.position = position, .rotation = orientation});
+        registry.emplace<ModelSpawn>(root, spawn);
+        return root;
+    }
+
+    void Scene::instantiate(entt::entity root, Model const& model, ModelSpawn const& spawn)
+    {
+        f64vec3 const extent = model.max - model.min;
+        f64 const     widest = std::max({extent.x, extent.y, extent.z});
+        f64 const     scale  = spawn.fit.has_value() && widest > 0.0 ? *spawn.fit / widest
+                                                                     : spawn.scale;
+
+        // In the root's frame, so it is along the root's +Y whatever the
+        // root's orientation.
+        f64vec3 const lift = spawn.rest_on_root ? f64vec3{0.0, -model.min.y * scale, 0.0}
+                                                : f64vec3{0.0};
 
         // Parents precede children, so each node's parent entity exists by
         // the time it is reached.
@@ -97,14 +149,15 @@ namespace encke
             // offset and size is exactly scaling the whole model.
             f32vec3 const size{node.scale * scale};
 
+            bool const top = !node.parent.has_value();
+
             entt::entity const entity = registry.create();
             registry.emplace<Transform>(entity, Transform{
-                                                    .position = node.position * scale,
+                                                    .position = node.position * scale +
+                                                                (top ? lift : f64vec3{0.0}),
                                                     .rotation = node.rotation,
                                                     .scale    = size,
-                                                    .parent   = node.parent.has_value()
-                                                                    ? nodes[*node.parent]
-                                                                    : root,
+                                                    .parent   = top ? root : nodes[*node.parent],
                                                 });
             nodes[index] = entity;
 
@@ -124,19 +177,37 @@ namespace encke
                                                         .material  = part.material,
                                                         .albedo    = part.albedo,
                                                         .roughness = part.roughness,
-                                                        .emissive  = part.emissive * luminance,
+                                                        .emissive  = part.emissive * spawn.luminance,
                                                         .metallic  = part.metallic,
                                                     });
             }
         }
-
-        return root;
     }
 
-    void Scene::build_test_planet(Model const* helmet)
+    void Scene::build_test_planet(AssetManager& assets)
     {
         registry.clear();
         origin_ = kWorldOrigin;
+
+        MeshHandle cube;
+        MeshHandle sphere;
+        MeshHandle planet;
+        {
+            MeshData data;
+            build_cube(data.vertices, data.indices);
+            cube = assets.add_mesh("cube", std::move(data));
+
+            data = MeshData{};
+            build_sphere(data.vertices, data.indices, kSphereSlices, kSphereStacks);
+            sphere = assets.add_mesh("sphere", std::move(data));
+
+            data = MeshData{};
+            build_planet(data.vertices, data.indices, kEarthRadius, kPlanetSlices,
+                         kPlanetFirstRing, kPlanetRingGrowth);
+            planet = assets.add_mesh("planet", std::move(data));
+        }
+
+        Materials const materials = load_materials(assets);
 
         ev100   = 14.0f;
         // Local up is radial from here. Ground albedo is a guess at the
@@ -148,11 +219,11 @@ namespace encke
         // Local frame at the pole: +Y is up, the ground is y = 0. The planet
         // curves away by d^2 / 2R, a tenth of a millimetre at 30 m, so the
         // object field can treat it as flat.
-        add(MeshKind::Planet, f64vec3{0.0}, f64vec3{1.0}, MaterialKind::Ground);
+        add(planet, f64vec3{0.0}, f64vec3{1.0}, materials.ground);
 
         // The Moon, straight up at its real distance from the Earth's centre.
         // Half a degree across: a few pixels.
-        add(MeshKind::Sphere, f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
+        add(sphere, f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
             f64vec3{2.0 * kMoonRadius}, {0.36f, 0.35f, 0.33f}, 0.95f, 0.0f);
 
         {
@@ -171,75 +242,73 @@ namespace encke
 
         // A tower: its shadow runs ~50 m across the field at this sun angle,
         // through every cascade.
-        add(MeshKind::Cube, {-9.0, 6.0, -7.0}, {1.6, 12.0, 1.6}, MaterialKind::Concrete);
+        add(cube, {-9.0, 6.0, -7.0}, {1.6, 12.0, 1.6}, materials.concrete);
 
         // A colonnade: striped shadows, and fine detail for the near cascade.
         for (i32 index = 0; index < 8; ++index)
         {
             f64 const x = -6.0 + 1.6 * static_cast<f64>(index);
-            add(MeshKind::Cube, {x, 1.5, 6.0}, {0.35, 3.0, 0.35}, white, 0.6f, 0.0f);
+            add(cube, {x, 1.5, 6.0}, {0.35, 3.0, 0.35}, white, 0.6f, 0.0f);
         }
-        add(MeshKind::Cube, {-0.4, 3.15, 6.0}, {12.0, 0.3, 0.8}, white, 0.6f, 0.0f);
+        add(cube, {-0.4, 3.15, 6.0}, {12.0, 0.3, 0.8}, white, 0.6f, 0.0f);
 
         // A gateway.
-        add(MeshKind::Cube, {7.0, 2.0, -3.0}, {0.8, 4.0, 0.8}, MaterialKind::MetalPlates);
-        add(MeshKind::Cube, {7.0, 2.0, 1.0}, {0.8, 4.0, 0.8}, MaterialKind::MetalPlates);
-        add(MeshKind::Cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, MaterialKind::MetalPlates);
+        add(cube, {7.0, 2.0, -3.0}, {0.8, 4.0, 0.8}, materials.metal_plates);
+        add(cube, {7.0, 2.0, 1.0}, {0.8, 4.0, 0.8}, materials.metal_plates);
+        add(cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, materials.metal_plates);
 
         // A table: a slab on legs, whose underside only a spot can light.
         f64vec3 const table{-3.0, 1.0, -2.0};
         f64 const     table_thickness = 0.12;
-        add(MeshKind::Cube, table, {3.0, table_thickness, 1.8}, MaterialKind::Planks);
+        add(cube, table, {3.0, table_thickness, 1.8}, materials.planks);
         for (f64 const x : {-4.3, -1.7})
         {
             for (f64 const z : {-2.75, -1.25})
             {
-                add(MeshKind::Cube, {x, 0.47, z}, {0.12, 0.94, 0.12}, MaterialKind::Planks);
+                add(cube, {x, 0.47, z}, {0.12, 0.94, 0.12}, materials.planks);
             }
         }
 
         // The glTF sample helmet, life-size, resting on the table and
         // turned three-quarters toward the camera's starting point. glTF
-        // models face +Z.
-        if (helmet != nullptr)
+        // models face +Z. If it fails to load the table stays empty.
         {
             constexpr f64 kHelmetWidth = 0.32;   // metres, across its widest axis
             constexpr f64 kHelmetYaw   = 0.9;    // radians about +Y
-
-            f64vec3 const extent = helmet->max - helmet->min;
-            f64 const     scale  = kHelmetWidth / std::max({extent.x, extent.y, extent.z});
-
-            // Its lowest point on the table top: yaw leaves height alone.
-            f64vec3 const at{table.x, table.y + table_thickness * 0.5 - helmet->min.y * scale,
-                             table.z};
 
             // The visor's glow, in cd/m^2 for an emissive factor of 1:
             // bright enough to read in daylight, well under the lamp heads.
             constexpr f32 kVisorLuminance = 2.0e4f;
 
-            add_model(*helmet, origin_ + at, glm::angleAxis(kHelmetYaw, f64vec3{0.0, 1.0, 0.0}),
-                      scale, kVisorLuminance);
+            f64vec3 const top{table.x, table.y + table_thickness * 0.5, table.z};
+            spawn(origin_ + top, glm::angleAxis(kHelmetYaw, f64vec3{0.0, 1.0, 0.0}),
+                  ModelSpawn{
+                      .model = assets.load_model(asset_path("models/DamagedHelmet/DamagedHelmet.glb")),
+                      .fit          = kHelmetWidth,
+                      .rest_on_root = true,
+                      .luminance    = kVisorLuminance,
+                  });
         }
 
         // Crates.
-        add(MeshKind::Cube, {2.0, 0.5, -6.0}, {1.0, 1.0, 1.0}, MaterialKind::RustedMetal);
-        add(MeshKind::Cube, {3.1, 0.4, -6.4}, {0.8, 0.8, 0.8}, MaterialKind::PaintedMetal);
-        add(MeshKind::Cube, {2.5, 1.3, -6.1}, {0.6, 0.6, 0.6}, MaterialKind::PaintedMetal);
-        add(MeshKind::Cube, {-6.0, 0.75, 1.5}, {1.5, 1.5, 1.5}, MaterialKind::Concrete);
-        add(MeshKind::Cube, {11.0, 1.0, 5.0}, {2.0, 2.0, 3.0}, MaterialKind::MetalPlates);
+        add(cube, {2.0, 0.5, -6.0}, {1.0, 1.0, 1.0}, materials.rusted_metal);
+        add(cube, {3.1, 0.4, -6.4}, {0.8, 0.8, 0.8}, materials.painted_metal);
+        add(cube, {2.5, 1.3, -6.1}, {0.6, 0.6, 0.6}, materials.painted_metal);
+        add(cube, {-6.0, 0.75, 1.5}, {1.5, 1.5, 1.5}, materials.concrete);
+        add(cube, {11.0, 1.0, 5.0}, {2.0, 2.0, 3.0}, materials.metal_plates);
 
         // Spheres, rough to mirror, and one textured to show the sphere's
         // mapping.
-        add(MeshKind::Sphere, {0.0, 1.0, 0.0}, f64vec3{2.0}, {0.92f, 0.78f, 0.52f}, 0.2f, 1.0f);
-        add(MeshKind::Sphere, {-2.0, 0.4, 2.5}, f64vec3{0.8}, {0.8f, 0.2f, 0.15f}, 0.5f, 0.0f);
-        add(MeshKind::Sphere, {4.0, 0.6, 2.0}, f64vec3{1.2}, white, 0.1f, 0.0f);
-        add(MeshKind::Sphere, {-11.0, 2.5, 3.0}, f64vec3{5.0}, MaterialKind::Concrete);
-        add(MeshKind::Sphere, {5.5, 0.3, -8.0}, f64vec3{0.6}, {0.2f, 0.5f, 0.9f}, 0.3f, 0.0f);
+        add(sphere, {0.0, 1.0, 0.0}, f64vec3{2.0}, {0.92f, 0.78f, 0.52f}, 0.2f, 1.0f);
+        add(sphere, {-2.0, 0.4, 2.5}, f64vec3{0.8}, {0.8f, 0.2f, 0.15f}, 0.5f, 0.0f);
+        add(sphere, {4.0, 0.6, 2.0}, f64vec3{1.2}, white, 0.1f, 0.0f);
+        add(sphere, {-11.0, 2.5, 3.0}, f64vec3{5.0}, materials.concrete);
+        add(sphere, {5.5, 0.3, -8.0}, f64vec3{0.6}, {0.2f, 0.5f, 0.9f}, 0.3f, 0.0f);
 
         // A spinning showpiece on a plinth, so some shadow moves.
-        add(MeshKind::Cube, {-4.0, 0.5, -9.0}, {1.2, 1.0, 1.2}, MaterialKind::Concrete);
+        add(cube, {-4.0, 0.5, -9.0}, {1.2, 1.0, 1.2}, materials.concrete);
         {
-            entt::entity const spinner = add(MeshKind::Cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
+            entt::entity const spinner = add(cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
                                              {0.92f, 0.78f, 0.52f}, 0.25f, 1.0f);
             registry.emplace<Spin>(spinner, Spin{.rate = 0.5, .axis = f64vec3{0.35, 1.0, 0.15}});
         }
@@ -267,12 +336,12 @@ namespace encke
 
         for (Mast const& mast : masts)
         {
-            add(MeshKind::Cube, mast.base + f64vec3{0.0, kMastHeight * 0.5, 0.0},
-                {0.2, kMastHeight, 0.2}, MaterialKind::RustedMetal);
+            add(cube, mast.base + f64vec3{0.0, kMastHeight * 0.5, 0.0},
+                {0.2, kMastHeight, 0.2}, materials.rusted_metal);
 
             f64vec3 const head = mast.base + f64vec3{0.0, kMastHeight + 0.3, 0.0};
             f32vec3 const tint = srgb_to_linear(mast.colour_srgb);
-            entt::entity const lamp = add(MeshKind::Cube, head, f64vec3{0.5, 0.4, 0.5},
+            entt::entity const lamp = add(cube, head, f64vec3{0.5, 0.4, 0.5},
                                           {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f, tint * 2.0e5f);
 
             // Hung under the lamp head, which is unrotated, so directions in
@@ -306,8 +375,8 @@ namespace encke
             f64vec3 const at{ring * std::cos(angle), 0.0, ring * std::sin(angle)};
             f32vec3 const colour = lamp_colours[index % 3];
 
-            add(MeshKind::Cube, at + f64vec3{0.0, 0.4, 0.0}, {0.1, 0.8, 0.1}, slate, 0.5f, 0.6f);
-            entt::entity const bulb = add(MeshKind::Sphere, at + f64vec3{0.0, 0.9, 0.0},
+            add(cube, at + f64vec3{0.0, 0.4, 0.0}, {0.1, 0.8, 0.1}, slate, 0.5f, 0.6f);
+            entt::entity const bulb = add(sphere, at + f64vec3{0.0, 0.9, 0.0},
                                           f64vec3{0.2}, {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f,
                                           colour * 1.0e5f);
 
@@ -328,8 +397,37 @@ namespace encke
         return glm::normalize(position - planet_centre_);
     }
 
-    void Scene::update(f64 seconds)
+    void Scene::update(f64 seconds, AssetManager const& assets)
     {
+        // Collected first: instantiating creates entities and removes the
+        // component being iterated.
+        vector<entt::entity> settled;
+        for (auto const [root, pending] : registry.view<ModelSpawn const>().each())
+        {
+            ModelAsset const* const model = assets.model(pending.model);
+            if (model == nullptr || model->state != AssetState::Loading)
+            {
+                settled.push_back(root);
+            }
+        }
+
+        for (entt::entity const root : settled)
+        {
+            ModelSpawn const        pending = registry.get<ModelSpawn>(root);
+            ModelAsset const* const model   = assets.model(pending.model);
+            registry.remove<ModelSpawn>(root);
+
+            if (model != nullptr && model->model.has_value())
+            {
+                instantiate(root, *model->model, pending);
+            }
+            else
+            {
+                log::warn("scene: %s did not load; its root stays empty",
+                          model != nullptr ? model->name.c_str() : "a model");
+            }
+        }
+
         registry.view<Transform, Spin const>().each([seconds](Transform& transform, Spin const& spin) {
             transform.rotation = glm::angleAxis(seconds * spin.rate, glm::normalize(spin.axis));
         });

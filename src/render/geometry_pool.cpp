@@ -138,14 +138,7 @@ namespace encke
             .first_index  = *first_index,
             .index_count  = static_cast<u32>(indices.size()),
             .resident     = false,
-            .min          = vertices.front().position,
-            .max          = vertices.front().position,
         };
-        for (Vertex const& vertex : vertices)
-        {
-            entry.range.min = glm::min(entry.range.min, vertex.position);
-            entry.range.max = glm::max(entry.range.max, vertex.position);
-        }
         entry.live = true;
 
         u32 mesh = 0;

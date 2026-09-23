@@ -11,7 +11,7 @@ namespace encke
     // rotated child is shear, which position, rotation and scale cannot
     // represent; leaving scale out of the chain keeps every world transform
     // exactly that triple. To scale an assembly, scale each part and its
-    // offset, as Scene::add_model does.
+    // offset, as spawning a model does.
     //
     // Scale must be positive. A negative one mirrors the mesh, which needs
     // the opposite winding, and a zero one has no inverse for the normal

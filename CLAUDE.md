@@ -95,16 +95,19 @@ src/
     stats_window.{hpp,cpp} frame timing history and the window graphing it
   world/
     transform.{hpp,cpp}  Transform and WorldTransform components, propagation
+  assets/
+    handle.hpp           typed generational handles: mesh, texture, material, model
+    asset_manager.{hpp,cpp} every asset's handle and CPU state; ready queues for the renderer
+    worker.{hpp,cpp}     the one asset thread: work there, finish on the main thread
+    model.hpp            a loaded model: node tree over mesh and material handles
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
     scene.{hpp,cpp}      the EnTT registry, star, camera; builds the test planet
     components.hpp       Renderable and Light, the components the renderer reads
     extract.{hpp,cpp}    registry -> RenderList once a frame: the renderer's only view of it
-    material.{hpp,cpp}   MaterialKind, loading and packing a texture set with SDL3_image
-    material_loader.{hpp,cpp} worker thread running material decode jobs for streaming
-    gltf.{hpp,cpp}       glTF -> CPU meshes, material factors and decode jobs, via fastgltf
-    model.hpp            a loaded model as renderer mesh and material ids, for the scene
+    material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
+    gltf.{hpp,cpp}       glTF -> CPU meshes, nodes, materials; image decoding, via fastgltf
     pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
     mesh.{hpp,cpp}       Vertex, procedural cube, sphere, pole-relative planet
     geometry_pool.{hpp,cpp} every mesh in one vertex and one index buffer, VMA virtual blocks
@@ -545,7 +548,7 @@ later run on its own threads without the renderer seeing half an update.
   the entity's own mesh, and a child's position is an unscaled offset in the
   parent's rotated frame. Inherited uneven scale under a rotated child is
   shear, which the triple cannot hold. Scaling an assembly means scaling
-  each part and each offset, as `Scene::add_model` does. Scale must be
+  each part and each offset, as spawning a model does. Scale must be
   positive; propagation warns once otherwise.
 - **`propagate_transforms` writes `WorldTransform`** for every entity with a
   `Transform`, adding it where missing. Each is composed once per pass,
@@ -565,9 +568,10 @@ later run on its own threads without the renderer seeing half an update.
   registry, holds last frame's model matrix for motion vectors, and the
   renderer keeps last frame's view and projection itself. A new entity's
   first frame has no motion.
-- **Mesh bounds come from the mesh**: `GeometryPool::Range` carries its
-  mesh-space box, and the extract turns it into a world bounding sphere for
-  shadow culling. Exact for a box at any scale, loose for the sphere.
+- **Mesh bounds come from the mesh**: `MeshAsset` keeps its mesh-space box
+  after the vertices have gone to the GPU, and the extract turns it into a
+  world bounding sphere for shadow culling. Exact for a box at any scale,
+  loose for the sphere.
 - **EnTT's registry header is in the PCH**, along with everything it pulls
   in: entities, storages, views, groups.
 
@@ -584,8 +588,67 @@ Known gaps:
   data included. Camera-relative transforms change every frame anyway;
   static per-object data could move to persistent slots filled on
   `on_construct`.
-- `Renderable` holds renderer mesh and material ids directly. An asset
-  manager with generational handles is the plan.
+
+## Assets
+
+`AssetManager` owns every asset: a slot per mesh, texture, material and
+model, reached by typed handles (`assets/handle.hpp`). A handle is a slot
+index and the generation the slot was at, so once slots are freed a stale
+handle stops resolving instead of reaching whatever reused the slot. Nothing
+frees slots yet (no eviction), so every generation is 0.
+
+It is Vulkan-free, and only the main thread calls it. Loading work runs on
+the one `AssetWorker`: a job's work runs there and returns a finishing
+closure, which `AssetManager::update()` runs on the main thread once a
+frame. So nothing the manager owns is ever touched off the main thread.
+
+- **CPU data goes to the renderer through ready queues.** Once a mesh or
+  texture is Ready, its data waits until `Renderer::draw` takes it
+  (`take_ready_meshes`, `take_ready_textures`, after the acquire), uploads it
+  within the staging budget and frees it. The manager keeps what stays
+  useful without the data: names, mesh bounds, texture encoding. Residency
+  is the renderer's, tracked by handle index: meshes map to geometry pool
+  ids, textures to bindless slots.
+- **A material has no data and no GPU state.** It names up to four texture
+  handles plus tiling. Each frame the renderer resolves it: until every
+  texture it names has landed (or failed, which leaves it out), the object
+  draws with its flat factors, and a material with an emission texture has
+  emission held at zero. A material therefore never samples a half-uploaded
+  set.
+- **Loads are deduplicated**: an ambientCG set by name, a model by path, a
+  texture by a key naming what it is decoded from. A glTF image is keyed by
+  file and image index, a packed ORM by file, both source images and the
+  occlusion strength, so images shared between materials, or between
+  instances of one model, decode once. Verified with a two-material test
+  file spawned twice: parsed once, its image decoded and uploaded once.
+- **Models load on the worker and spawn deferred.** `load_model(path)`
+  returns a handle at once; the worker parses the glTF, and its finish step
+  registers the meshes, textures and materials and builds the node tree.
+  `Scene::spawn` makes the root entity immediately, with a `ModelSpawn`
+  component; `Scene::update` instantiates the nodes the frame the model is
+  Ready and removes the component. A model that fails leaves its root empty,
+  logged. `ModelSpawn` can fit the model to a size and rest it on the root,
+  which the helmet uses.
+- **The scene asks for what it uses.** The procedural meshes are
+  `add_mesh`ed by `build_test_planet` and the ambientCG sets requested
+  there with their tile sizes; there is no built-in list in the renderer.
+- **Collision meshes will be separate assets**, kept on the CPU; a render
+  mesh's vertices are freed once uploaded.
+
+Verified at each step by capture: moving meshes and materials behind
+handles, moving glTF parsing onto the worker with deferred spawns, and
+splitting materials into deduplicated textures each rendered
+byte-identically to the step before.
+
+Known gaps:
+
+- No eviction or reference counting. Handles are generational so it can
+  come without auditing them.
+- `std::function` holds every job, since clang64's libc++ has no
+  `std::move_only_function`, so everything a job captures must be copyable;
+  bulky data is captured through a `shared_ptr`.
+- A texture's data waits in memory until the renderer has room to stage it;
+  there is no cap on how much can be queued.
 
 ## The test planet
 
@@ -607,9 +670,9 @@ source and licence in `CREDITS.md`. They are read from the source tree through
 executable like SPIR-V: tens of megabytes that rarely change. A shipped build
 would need that revisited.
 
-`MaterialKind` works like `MeshKind`: a fixed list the renderer loads at
-startup, one per ambientCG set, and `Renderable::material` picks one. Each
-set becomes three RGBA8 textures, glTF's arrangement:
+`AssetManager::load_ambientcg` loads a set by name with its tile size, and
+`Renderable::material` holds the handle. Each set becomes three RGBA8
+texture assets, glTF's arrangement:
 
 | Texture | Format | Holds |
 | --- | --- | --- |
@@ -629,26 +692,26 @@ of the scene renders unchanged.
 albedo and ORM are always sampled; normal and emission may be `kNoTexture`
 and are then skipped. The sampler is `push.material_sampler`, one for all.
 
-- **Every material streams in, ambientCG and glTF alike.** `MaterialLoader`
-  runs decode jobs on a worker thread while the scene already draws: an
-  ambientCG set's job is `load_material`, a glTF material's is the `decode`
-  that `load_gltf` builds over the model's image bytes and paths, which it
-  only locates, never decodes. Each frame the renderer takes what is finished
-  and uploads it map by map (albedo, normal, ORM, emission, absent ones
-  skipped), in completion order, while the staging budget allows; a
-  material's handles go live with its last map. Until then an object keeps
-  `kNoTexture` and draws with its flat factors, which for a textured object
-  means white. A glTF material with an emission map has its emission held at
-  zero until then (`hide_emission`), or its emissive factor would light the
-  whole surface. Slots are registered the frame the copies are recorded:
-  fresh slots, so no pending command buffer can be reading them.
-  `ENCKE_CAPTURE` waits for `Renderer::streaming_idle()`, so captures stay
-  byte-identical. Only the 1x1 whites use the blocking `Texture::init`.
+- **Every texture streams in, ambientCG and glTF alike.** Each is its own
+  asset, decoded on the asset worker while the scene already draws: an
+  ambientCG set's colour, normal and ORM through `load_ambientcg`, a glTF's
+  images through `decode_gltf_image` and `decode_gltf_orm` over the bytes
+  and paths `load_gltf` located but never decoded. Each frame the renderer
+  takes what is finished and uploads it texture by texture, in completion
+  order, while the staging budget allows. Until all of a material's
+  textures have landed an object keeps `kNoTexture` and draws with its flat
+  factors, which for a textured object means white; a material with an
+  emission texture has its emission held at zero until then, or its
+  emissive factor would light the whole surface. Slots are registered the
+  frame the copies are recorded: fresh slots, so no pending command buffer
+  can be reading them. `ENCKE_CAPTURE` waits for `AssetManager::idle()` and
+  `Renderer::streaming_idle()`, so captures stay byte-identical. Only the
+  1x1 whites use the blocking `Texture::init`.
 - **One asset worker, on purpose.** Decoding is serial on a single thread,
   and that is a decision, not a gap: the cores are meant for the SDF workers,
   f64 field evaluation and meshing on the CPU, which will be far heavier.
   Asset decoding should not compete with them. A job that throws is caught,
-  logged and fails its material, since an exception leaving a `jthread` is
+  logged and fails its asset, since an exception leaving a `jthread` is
   `std::terminate`. The target links `Threads::Threads`, which older glibc
   needs for `std::jthread` and everything else ignores.
 - **Mips are blitted on the GPU**, level from level, by
@@ -692,18 +755,20 @@ non-uniformly scaled sphere would smear.
 
 A glTF material is **non-tiling**: its UVs are 0..1 over an atlas, and the
 renderer sends `texture_scale = (1, 1, 1, 1)`, which makes the stretch
-exactly 1 at any object scale. `MaterialTextures::tiling` decides which.
+exactly 1 at any object scale. `MaterialAsset::tiling` decides which.
 
 ### glTF nodes: instanced, hierarchy kept
 
 `load_gltf` keeps the default scene's node tree rather than baking
 transforms into vertices. Each glTF mesh is converted and uploaded once, in
 its own space, and only if some node uses it; `Model::nodes` holds every
-node's local transform and parent, parents first. `Scene::add_model` makes
-an entity per node, parented as in the file under one root entity, and a
-child entity per primitive carrying the `Renderable`, so a mesh used by
-eight nodes is eight draws from one range of the geometry pool. Moving the
-root moves the model. Node extras are not read.
+node's local transform and parent, parents first. Spawning it makes an
+entity per node, parented as in the file under one root entity, and a
+child entity per primitive carrying the `Renderable`: a primitive is one
+mesh asset with one material, as fine-grained as the file allows, so every
+part of a multi-node model stays addressable. A mesh used by eight nodes is
+eight draws from one range of the geometry pool. Moving the root moves the
+model. Node extras are not read.
 
 - **glTF inherits scale and `Transform` does not**, so `load_gltf` converts:
   it composes each node's model-space matrix the glTF way, splits it into
@@ -728,12 +793,11 @@ Known gaps:
 - No specular antialiasing. Normal-mapped metal at a distance sparkles; that
   wants Toksvig or similar folded into roughness, or TAA.
 - Streaming is whole textures only. A texture larger than the per-frame
-  budget can never land (it is logged and stays flat); uploading mip by mip,
+  budget can never land (it is logged and left out); uploading mip by mip,
   smallest first, would fix that and give a blurry version sooner. Textures
-  are never evicted either. glTF images shared
-  between materials are decoded once per material, not once per model.
-- Materials are a compile-time list with tile sizes in `render/material.cpp`.
-  No material description files.
+  are never evicted either.
+- ambientCG sets and their tile sizes are requested in code, in
+  `render/scene.cpp`. No material description files.
 - Normal strength is hardcoded at 2 in `shaders/gbuffer.slang` for every
   material, chosen by eye. It is meant to become a per-material parameter.
 

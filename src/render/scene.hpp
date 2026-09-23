@@ -1,8 +1,8 @@
 #pragma once
 
+#include "assets/model.hpp"
 #include "render/camera.hpp"
 #include "render/components.hpp"
-#include "render/model.hpp"
 #include "world/transform.hpp"
 
 namespace encke
@@ -15,6 +15,8 @@ namespace encke
     inline constexpr f64 kEarthMoonDistance = 384'400'000.0;
     inline constexpr f64 kAstronomicalUnit  = 149'597'870'700.0;
 
+    class AssetManager;
+
     // Turns an entity about `axis`, in its parent's frame, at `rate` rad/s.
     // It replaces the Transform's rotation outright: the angle is rate times
     // the scene clock, from no rotation at zero.
@@ -22,6 +24,27 @@ namespace encke
     {
         f64     rate = 0.0;
         f64vec3 axis{0.0, 1.0, 0.0};
+    };
+
+    // On a model's root entity until the model is Ready and its nodes have
+    // been spawned under it; Scene::update does that and removes this. Scale
+    // is not inherited, so the model's is folded into every node's offset and
+    // size then.
+    struct ModelSpawn
+    {
+        ModelHandle model;
+
+        // Uniform. With `fit`, worked out instead so the model's widest
+        // extent measures `fit` metres.
+        f64           scale = 1.0;
+        optional<f64> fit;
+
+        // Lifts the model so its lowest point, along the root's +Y, sits at
+        // the root: the root is then where it stands.
+        bool rest_on_root = false;
+
+        // cd/m^2 for an emissive factor of 1.
+        f32 luminance = 1.0f;
     };
 
     // The system's star. Its direction and illuminance are worked out per
@@ -52,26 +75,28 @@ namespace encke
         // An Earth-sized planet whose north pole is the floor, strewn with
         // boxes, spheres and pillars, lit by a Sun low on the horizon and a
         // handful of spot and point lights, with the Moon overhead at its real
-        // distance. Places the camera at the edge of the field. Built far from
-        // the world origin on purpose, so any regression in camera-relative
-        // rendering shows up as visible jitter.
+        // distance, and the glTF sample helmet on a table. Places the camera
+        // at the edge of the field. Built far from the world origin on
+        // purpose, so any regression in camera-relative rendering shows up as
+        // visible jitter.
         //
-        // `helmet`, when given, is set on the table.
-        void build_test_planet(Model const* helmet);
+        // Asks `assets` for the meshes and materials it uses; they stream in
+        // while it draws.
+        void build_test_planet(AssetManager& assets);
 
-        // Spawns the model's node tree under a new root entity, which it
-        // returns: the root sits at `position` (world) with `orientation`, and
-        // moving it moves the model. Each node is an entity parented as in the
-        // file, and each part of a node's mesh a child of it with a
-        // Renderable. Scale is not inherited, so the model's uniform `scale`
-        // is folded into every node's offset and size here. Emissive factors
-        // are relative, and `luminance` turns 1 into cd/m^2.
-        entt::entity add_model(Model const& model, f64vec3 const& position,
-                               f64quat const& orientation, f64 scale, f32 luminance);
+        // A root entity for `spawn.model`, at `position` (world) with
+        // `orientation`, returned at once so it can be placed and parented
+        // while the model loads. Its nodes appear under it in the update
+        // after the model is Ready: an entity per node, parented as in the
+        // file, and a child per part of a node's mesh carrying a Renderable.
+        // If the model fails, the root stays empty.
+        entt::entity spawn(f64vec3 const& position, f64quat const& orientation,
+                           ModelSpawn const& spawn);
 
-        // Advances animation to `seconds` on the scene clock, then composes
-        // every WorldTransform. Read world transforms after this.
-        void update(f64 seconds);
+        // Spawns the nodes of models that became Ready, advances animation
+        // to `seconds` on the scene clock, then composes every
+        // WorldTransform. Read world transforms after this.
+        void update(f64 seconds, AssetManager const& assets);
 
         // World position of the test planet's pole, which the scene is laid
         // out around.
@@ -110,13 +135,16 @@ namespace encke
         Camera camera;
 
     private:
-        // A built-in mesh at `position` from the pole, flat material.
-        entt::entity add(MeshKind mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
+        // A mesh at `position` from the pole, flat material.
+        entt::entity add(MeshHandle mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
                          f32 roughness, f32 metallic, f32vec3 emissive = f32vec3{0.0f});
 
         // Every factor 1, so the maps are the material. Metalness comes from
         // the map too: a set without one is a dielectric.
-        entt::entity add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material);
+        entt::entity add(MeshHandle mesh, f64vec3 position, f64vec3 scale, MaterialHandle material);
+
+        // The nodes of `model` under `root`, as `spawn` asks.
+        void instantiate(entt::entity root, Model const& model, ModelSpawn const& spawn);
 
         // A light at `position` relative to `parent`'s frame, facing
         // `direction` in that frame.

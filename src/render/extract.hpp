@@ -4,7 +4,7 @@
 
 namespace encke
 {
-    class GeometryPool;
+    class AssetManager;
     class Scene;
 
     // The boundary between the scene and the renderer. Once a frame the
@@ -48,5 +48,5 @@ namespace encke
     // order, capped at config::kMaxObjects and kMaxLights: the excess is
     // dropped, and logged once. Reads WorldTransform, so call it after
     // Scene::update. Reuse one list, and its storage is reused too.
-    void extract(Scene const& scene, GeometryPool const& geometry, RenderList& list);
+    void extract(Scene const& scene, AssetManager const& assets, RenderList& list);
 }

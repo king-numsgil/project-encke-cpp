@@ -147,6 +147,9 @@ add_executable(encke
     src/main.cpp
     src/app.cpp
 
+    src/assets/asset_manager.cpp
+    src/assets/worker.cpp
+
     src/core/log.cpp
     src/core/memory.cpp
 
@@ -160,7 +163,6 @@ add_executable(encke
     src/render/geometry_pool.cpp
     src/render/gltf.cpp
     src/render/material.cpp
-    src/render/material_loader.cpp
     src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/pixels.cpp

@@ -1,6 +1,6 @@
 #include "core/pch.hpp"
 
-#include "render/material_loader.hpp"
+#include "assets/worker.hpp"
 
 #include "core/log.hpp"
 
@@ -9,17 +9,17 @@
 
 namespace encke
 {
-    MaterialLoader::~MaterialLoader()
+    AssetWorker::~AssetWorker()
     {
         stop();
     }
 
-    void MaterialLoader::start()
+    void AssetWorker::start()
     {
         thread_ = std::jthread{[this](std::stop_token const& stop) { run(stop); }};
     }
 
-    void MaterialLoader::stop()
+    void AssetWorker::stop()
     {
         if (thread_.joinable())
         {
@@ -28,7 +28,7 @@ namespace encke
         }
     }
 
-    void MaterialLoader::submit(Job job)
+    void AssetWorker::submit(Job job)
     {
         {
             std::lock_guard const lock{mutex_};
@@ -38,23 +38,23 @@ namespace encke
         wake_.notify_one();
     }
 
-    vector<MaterialLoader::Decoded> MaterialLoader::take()
+    vector<AssetWorker::Finish> AssetWorker::take()
     {
         std::lock_guard const lock{mutex_};
 
-        vector<Decoded> taken = std::move(finished_);
+        vector<Finish> taken = std::move(finished_);
         finished_.clear();
         outstanding_ -= taken.size();
         return taken;
     }
 
-    bool MaterialLoader::idle() const
+    bool AssetWorker::idle() const
     {
         std::lock_guard const lock{mutex_};
         return outstanding_ == 0;
     }
 
-    void MaterialLoader::run(std::stop_token const& stop)
+    void AssetWorker::run(std::stop_token const& stop)
     {
         while (true)
         {
@@ -73,33 +73,26 @@ namespace encke
                 queued_.erase(queued_.begin());
             }
 
-            Decoded decoded;
-            decoded.material = job.material;
-            decoded.name     = std::move(job.name);
-
-            // An exception leaving a jthread's function is std::terminate,
-            // and a corrupt or huge image can throw bad_alloc on the way
-            // through a decoder. One bad asset fails its material, not the
-            // program.
+            // A corrupt or huge image can throw bad_alloc on the way through
+            // a decoder.
+            Finish finish;
             try
             {
-                decoded.ok = job.decode(decoded.maps);
+                finish = job.work();
             }
             catch (std::exception const& error)
             {
-                log::error("material %s: decode threw: %s", decoded.name.c_str(), error.what());
-                decoded.ok   = false;
-                decoded.maps = MaterialMaps{};
+                log::error("asset %s: threw: %s", job.name.c_str(), error.what());
+                finish = std::move(job.failed);
             }
             catch (...)
             {
-                log::error("material %s: decode threw", decoded.name.c_str());
-                decoded.ok   = false;
-                decoded.maps = MaterialMaps{};
+                log::error("asset %s: threw", job.name.c_str());
+                finish = std::move(job.failed);
             }
 
             std::lock_guard const lock{mutex_};
-            finished_.push_back(std::move(decoded));
+            finished_.push_back(std::move(finish));
         }
     }
 }

@@ -5,7 +5,6 @@
 #include "core/log.hpp"
 #include "core/memory.hpp"
 #include "platform/cpu.hpp"
-#include "render/gltf.hpp"
 #include "render/pixels.hpp"
 #include "ui/image_window.hpp"
 
@@ -251,21 +250,8 @@ namespace encke
         }
         window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
 
-        // Not fatal: without it the scene is only missing the helmet.
-        optional<Model> helmet;
-        {
-            GltfModel file;
-            if (load_gltf(asset_path("models/DamagedHelmet/DamagedHelmet.glb"), file))
-            {
-                helmet = renderer_.add_model(file);
-            }
-            if (!helmet.has_value())
-            {
-                log::warn("the helmet did not load; the table stays empty");
-            }
-        }
-
-        scene_.build_test_planet(helmet.has_value() ? &*helmet : nullptr);
+        assets_.start();
+        scene_.build_test_planet(assets_);
 
         // The test scene's frame is the world's rotated by nothing, only
         // moved to the pole, so its directions pass through unchanged.
@@ -590,7 +576,8 @@ namespace encke
             }
             last_tick_ = tick;
 
-            scene_.update(seconds);
+            assets_.update();
+            scene_.update(seconds, assets_);
             fly(events, delta);
 
             draw_ui();
@@ -603,13 +590,13 @@ namespace encke
             // Not before streaming has settled: until then which materials
             // have landed depends on timing, and captures would differ.
             bool const capturing = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
-                                   renderer_.streaming_idle();
+                                   assets_.idle() && renderer_.streaming_idle();
             if (capturing)
             {
                 renderer_.request_capture();
             }
 
-            FrameResult const result = renderer_.draw(swapchain_, scene_, &ui_);
+            FrameResult const result = renderer_.draw(swapchain_, scene_, assets_, &ui_);
 
             if (result == FrameResult::Ok)
             {

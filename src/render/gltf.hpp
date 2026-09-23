@@ -1,17 +1,31 @@
 #pragma once
 
-#include "render/material.hpp"
 #include "render/mesh.hpp"
+#include "render/pixels.hpp"
+
+#include <memory>
 
 namespace encke
 {
-    // A glTF material. Factors are glTF's and multiply the maps.
-    //
-    // The maps are not decoded here: `decode` does that, reading the model's
-    // images from bytes and paths it holds itself, so it can run on the
-    // material loader's worker after load_gltf has returned. It packs
-    // occlusion and metallic-roughness into one ORM map and leaves absent
-    // maps nullopt. Null when the material has no maps at all.
+    // Where a loaded glTF's encoded images are: bytes copied out of the
+    // file, or paths beside it. Held by the model so images decode later,
+    // on any thread, after load_gltf's parsed asset is gone.
+    struct GltfImages;
+
+    // glTF keeps occlusion apart from metallic-roughness, though exporters
+    // often point both at one image. The renderer wants them as one ORM
+    // texture, so this names what is packed into it.
+    struct GltfOrm
+    {
+        optional<u32> occlusion;     // image index; R
+        optional<u32> metal_rough;   // image index; G roughness, B metalness
+        f32           occlusion_strength = 1.0f;
+
+        bool any() const { return occlusion.has_value() || metal_rough.has_value(); }
+    };
+
+    // A glTF material: factors, which multiply the maps, and which images
+    // the maps are. Nothing is decoded here; see decode_gltf_image.
     struct GltfMaterial
     {
         f32vec3 base_colour{1.0f};   // linear
@@ -19,11 +33,10 @@ namespace encke
         f32     metallic  = 1.0f;
         f32vec3 emissive{0.0f};      // linear, emissiveFactor times KHR_materials_emissive_strength
 
-        // The emissive factor is meant to be multiplied by a map; drawn
-        // without it before the map lands, the whole surface would glow.
-        bool has_emission_map = false;
-
-        function<bool(MaterialMaps& maps)> decode;
+        optional<u32> albedo;        // image indices
+        optional<u32> normal;
+        optional<u32> emission;
+        GltfOrm       orm;
     };
 
     // One triangle list with one material, in its mesh's own space: no node
@@ -70,15 +83,28 @@ namespace encke
         vector<GltfMaterial> materials;
         f32vec3              min{0.0f};   // model space, over every instanced primitive
         f32vec3              max{0.0f};
+
+        std::shared_ptr<GltfImages const> images;
     };
 
     // Reads a .gltf or .glb: the default scene's node hierarchy and the
     // triangle primitives of the meshes it instances. Tangents are generated
     // where the file has none. Images may be embedded or external JPG/PNG
-    // files beside it; they are only located here, and decoded later by each
-    // material's `decode`. Unsupported features (texture coordinate sets
+    // files beside it; they are only located here, and decoded later with
+    // decode_gltf_image and decode_gltf_orm. Unsupported features (texture coordinate sets
     // other than 0, alpha blending and masking, double-sided materials,
     // mirroring node transforms, other primitive modes) are logged and
     // ignored, not fatal. So is shear, which is drawn approximately.
     bool load_gltf(string const& path, GltfModel& model);
+
+    // Decodes image `index` of a loaded model. Safe on any thread. Logs and
+    // returns false on failure.
+    bool decode_gltf_image(GltfImages const& images, u32 index, Pixels& pixels);
+
+    // Decodes and packs an ORM texture: R occlusion, at `occlusion_strength`
+    // as glTF defines it, G and B the metallic-roughness image's. A missing
+    // part reads 1, leaving its factor alone; an image that fails to decode
+    // is logged and treated as missing. False if nothing is left to pack.
+    // Safe on any thread.
+    bool decode_gltf_orm(GltfImages const& images, GltfOrm const& orm, Pixels& pixels);
 }

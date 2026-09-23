@@ -1,14 +1,12 @@
 #pragma once
 
+#include "assets/asset_manager.hpp"
 #include "render/config.hpp"
 #include "render/extract.hpp"
 #include "render/geometry_pool.hpp"
-#include "render/gltf.hpp"
 #include "render/gpu_types.hpp"
 #include "render/material.hpp"
-#include "render/material_loader.hpp"
 #include "render/mesh.hpp"
-#include "render/model.hpp"
 #include "render/pipeline.hpp"
 #include "render/shadows.hpp"
 #include "vulkan/bindless.hpp"
@@ -117,14 +115,10 @@ namespace encke
         // place, and rebuilds per-image semaphores. Caller waits for idle.
         bool on_swapchain_changed(VulkanSwapchain const& swapchain);
 
-        // Uploads a loaded glTF's meshes and textures and returns the ids a
-        // scene places it by. Blocking, startup-time work, and it registers
-        // new bindless slots: call it before the first frame, or with the
-        // device idle.
-        optional<Model> add_model(GltfModel const& model);
-
-        // `overlay` may be null.
-        FrameResult draw(VulkanSwapchain const& swapchain, Scene const& scene, Overlay* overlay);
+        // Takes whatever `assets` has made Ready and streams it in within the
+        // frame's staging budget, then draws `scene`. `overlay` may be null.
+        FrameResult draw(VulkanSwapchain const& swapchain, Scene const& scene,
+                         AssetManager& assets, Overlay* overlay);
 
         // The one global descriptor set. Mutable so the UI can register its
         // textures and samplers in it; every pipeline shares it.
@@ -172,12 +166,10 @@ namespace encke
         // empty if none was recorded.
         optional<Capture> take_capture();
 
-        // Every streamed material has been decoded and uploaded. Until then
-        // frames differ as materials land, so a capture waits for it.
-        bool streaming_idle() const
-        {
-            return loader_.idle() && decoded_.empty() && geometry_.idle();
-        }
+        // Everything taken from the asset manager has been uploaded. Until
+        // then frames differ as assets land, so a capture waits for this and
+        // for AssetManager::idle.
+        bool streaming_idle() const { return decoded_.empty() && geometry_.idle(); }
 
         void    set_tonemap(Tonemap tonemap) { tonemap_ = tonemap; }
         Tonemap tonemap() const { return tonemap_; }
@@ -223,35 +215,40 @@ namespace encke
             u32 shadow_matrices_handle = BindlessSet::kInvalid;
         };
 
-        // Streamed in once and read-only after, so unlike the targets they
-        // need no per-frame barriers. A tiling material repeats over
-        // the surface at `tile` metres, stretched by the object's scale; a
-        // non-tiling one is a glTF atlas whose UVs are used as they are.
-        struct MaterialTextures
+        // A texture asset on the GPU, streamed in once and read-only after,
+        // so unlike the targets it needs no per-frame barriers. Materials
+        // are the AssetManager's and have no GPU state: each frame reads
+        // which textures a material names and whether they have landed.
+        struct GpuTexture
         {
-            Texture albedo;
-            Texture normal;
-            Texture orm;
-            Texture emission;
-            u32vec4 handles{gpu::kNoTexture};   // as gpu::Object::textures
-            f32vec2 tile{1.0f};                 // metres per repeat
-            bool    tiling = true;
-
-            // Objects draw with no emission until the maps land: set for a
-            // material whose emissive factor is meant to be masked by a map.
-            bool hide_emission = false;
+            u32     generation = 0;   // of the handle it was made for
+            Texture texture;
+            u32     sampled = BindlessSet::kInvalid;
         };
 
         bool create_targets(VkExtent2D extent);
         void register_targets(bool first_time);
         bool create_shadow_maps();
-        bool create_materials();
+        bool create_material_resources();
 
-        // Takes what the loader has finished and, within this frame's staging
-        // budget, creates its textures and stages their texels. Call after
-        // the slot's fence and the acquire, before upload(), which then sees
-        // the new handles; the copies go into this frame's command buffer.
-        void stream_materials();
+        // Takes what `assets` has made Ready: meshes into the geometry pool,
+        // textures onto the streaming queue. After the slot's fence and the
+        // acquire, before the pool stages.
+        void take_assets(AssetManager& assets);
+
+        // Within this frame's staging budget, creates the queued textures
+        // and stages their texels. Before upload(), which then sees them;
+        // the copies go into this frame's command buffer.
+        void stream_textures(AssetManager const& assets);
+
+        // The pool range of a mesh handle, or null if the handle is stale or
+        // its mesh has not been taken. Not necessarily resident yet.
+        GeometryPool::Range const* mesh_range(MeshHandle handle) const;
+
+        // The bindless handles a material samples, as gpu::Object::textures,
+        // once every texture it names has landed or failed; nullopt before.
+        optional<u32vec4> material_textures(MaterialAsset const& material,
+                                            AssetManager const& assets) const;
 
         // Records the copies stream_materials() staged. First in the frame,
         // outside any rendering scope.
@@ -259,7 +256,8 @@ namespace encke
 
         // Extracts the scene into render_list_ and writes the frame's buffers
         // from it. Also plans this frame's shadows, which record() then draws.
-        void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources);
+        void upload(Scene const& scene, AssetManager const& assets, VkExtent2D extent,
+                    FrameResources& resources);
         bool record(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index,
                     Scene const& scene, Overlay* overlay);
         void destroy_image_semaphores();
@@ -345,8 +343,9 @@ namespace encke
         // Neutral keeps the most colour and hue of the three; see CLAUDE.md.
         Tonemap tonemap_ = Tonemap::PbrNeutral;
 
-        // Per-frame uploads. Decoded materials wait in decoded_ until the
-        // budget has room; pending_uploads_ are this frame's staged copies.
+        // Per-frame uploads. Textures taken from the asset manager wait in
+        // decoded_ until the budget has room; pending_uploads_ are this
+        // frame's staged copies.
         struct PendingUpload
         {
             Texture const* texture = nullptr;
@@ -354,19 +353,9 @@ namespace encke
             VkDeviceSize   offset  = 0;
         };
 
-        // A decoded material and how far through its maps (albedo, normal,
-        // ORM, emission, in that order, absent ones skipped) staging has
-        // got. Its handles go live with the last one.
-        struct StreamingMaterial
-        {
-            MaterialLoader::Decoded decoded;
-            u32                     staged = 0;
-        };
-
-        StagingArena              staging_;
-        MaterialLoader            loader_;
-        vector<StreamingMaterial> decoded_;
-        vector<PendingUpload>     pending_uploads_;
+        StagingArena                         staging_;
+        vector<AssetManager::ReadyTexture>   decoded_;
+        vector<PendingUpload>                pending_uploads_;
 
         // Host memory the swapchain image is copied into, created on the
         // first capture. `capture_` describes what the copy recorded.
@@ -384,12 +373,20 @@ namespace encke
         ComputePipeline  histogram_pipeline_;
         ComputePipeline  adapt_pipeline_;
 
-        // Renderable::mesh and ::material index these. The built-ins come
-        // first, in MeshKind and MaterialKind order, then whatever add_model
-        // loaded. MaterialTextures is not movable, hence the pointers.
-        // materials_[0] is MaterialKind::None and stays null.
-        GeometryPool                              geometry_;
-        vector<std::unique_ptr<MaterialTextures>> materials_;
+        // GPU state by asset handle index, checked against the handle's
+        // generation. A mesh's pool id is not its handle index: the pool
+        // reuses ids on its own terms. Texture is not movable, hence the
+        // pointers; null until a texture has been uploaded.
+        struct MeshSlot
+        {
+            u32 generation = 0;
+            u32 pool       = 0;
+            bool taken     = false;
+        };
+
+        GeometryPool                        geometry_;
+        vector<MeshSlot>                    meshes_;
+        vector<std::unique_ptr<GpuTexture>> textures_;
         VkSampler                            material_sampler_        = VK_NULL_HANDLE;
         u32                                  material_sampler_handle_ = BindlessSet::kInvalid;
 

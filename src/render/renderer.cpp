@@ -217,13 +217,6 @@ namespace encke
             {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT,
              .offset = offsetof(Vertex, position)},
         };
-
-        // Tessellation of the built-in meshes.
-        constexpr u32 kSphereSlices     = 48;
-        constexpr u32 kSphereStacks     = 24;
-        constexpr u32 kPlanetSlices     = 192;
-        constexpr f64 kPlanetFirstRing  = 0.25;   // metres of arc from the pole
-        constexpr f64 kPlanetRingGrowth = 1.08;
     }
 
     Renderer::~Renderer()
@@ -335,37 +328,7 @@ namespace encke
             return false;
         }
 
-        vector<Vertex> vertices;
-        vector<u32>    indices;
-
-        // First into an empty pool, in MeshKind order, so a MeshKind is its
-        // own mesh id. They upload with the first frame.
-        u32  expected = 0;
-        auto add_mesh = [&] {
-            optional<u32> const mesh = geometry_.add(vertices, indices);
-            return mesh.has_value() && *mesh == expected++;
-        };
-
-        build_cube(vertices, indices);
-        if (!add_mesh())
-        {
-            return false;
-        }
-
-        build_sphere(vertices, indices, kSphereSlices, kSphereStacks);
-        if (!add_mesh())
-        {
-            return false;
-        }
-
-        build_planet(vertices, indices, kEarthRadius, kPlanetSlices, kPlanetFirstRing,
-                     kPlanetRingGrowth);
-        if (!add_mesh())
-        {
-            return false;
-        }
-
-        if (!create_materials())
+        if (!create_material_resources())
         {
             return false;
         }
@@ -594,7 +557,7 @@ namespace encke
         return true;
     }
 
-    bool Renderer::create_materials()
+    bool Renderer::create_material_resources()
     {
         // Trilinear and anisotropic, repeating: surface textures seen at
         // grazing angles across the ground would blur to mush without it.
@@ -642,153 +605,151 @@ namespace encke
         white_srgb_handle_  = bindless_.add_sampled_image(white_srgb_.view(), read_only);
         white_unorm_handle_ = bindless_.add_sampled_image(white_unorm_.view(), read_only);
 
-        if (!staging_.init(*allocator_, config::kStagingBytesPerFrame, kFramesInFlight))
-        {
-            return false;
-        }
-
-        // In MaterialKind order, so a MaterialKind is its own material id.
-        // None has no textures. The rest start untextured -- kNoTexture, so
-        // their objects draw with flat factors -- and fill in as the loader
-        // finishes them.
-        materials_.clear();
-        materials_.push_back(nullptr);
-        loader_.start();
-
-        for (u32 index = 1; index < kMaterialKindCount; ++index)
-        {
-            auto const kind = static_cast<MaterialKind>(index);
-
-            materials_.push_back(std::make_unique<MaterialTextures>());
-            MaterialTextures& material = *materials_.back();
-            material.tile   = material_tile_metres(kind);
-            material.tiling = true;
-
-            loader_.submit(MaterialLoader::Job{
-                .material = index,
-                .name     = material_name(kind),
-                .decode   = [kind](MaterialMaps& maps) { return load_material(kind, maps); },
-            });
-        }
-
-        return true;
+        return staging_.init(*allocator_, config::kStagingBytesPerFrame, kFramesInFlight);
     }
 
-    void Renderer::stream_materials()
+    void Renderer::take_assets(AssetManager& assets)
     {
-        for (MaterialLoader::Decoded& decoded : loader_.take())
+        // Into the pool at once: add() only reserves and queues, and stage()
+        // uploads within the budget from this frame on.
+        for (AssetManager::ReadyMesh& ready : assets.take_ready_meshes())
         {
-            decoded_.push_back(StreamingMaterial{.decoded = std::move(decoded), .staged = 0});
+            optional<u32> const pool = geometry_.add(ready.data.vertices, ready.data.indices);
+            if (!pool.has_value())
+            {
+                continue;   // logged; the mesh never draws
+            }
+
+            if (meshes_.size() <= ready.handle.index)
+            {
+                meshes_.resize(ready.handle.index + 1);
+            }
+            meshes_[ready.handle.index] =
+                MeshSlot{.generation = ready.handle.generation, .pool = *pool, .taken = true};
         }
 
+        for (AssetManager::ReadyTexture& ready : assets.take_ready_textures())
+        {
+            decoded_.push_back(std::move(ready));
+        }
+    }
+
+    GeometryPool::Range const* Renderer::mesh_range(MeshHandle handle) const
+    {
+        if (!handle || handle.index >= meshes_.size())
+        {
+            return nullptr;
+        }
+        MeshSlot const& slot = meshes_[handle.index];
+        return slot.taken && slot.generation == handle.generation ? &geometry_.range(slot.pool)
+                                                                  : nullptr;
+    }
+
+    optional<u32vec4> Renderer::material_textures(MaterialAsset const& material,
+                                                  AssetManager const& assets) const
+    {
+        // Albedo and ORM are always sampled once an object is textured, so
+        // one left out is white; normal and emission are skipped.
+        bool pending = false;
+        auto sampled = [&](TextureHandle handle, u32 missing) -> u32 {
+            TextureAsset const* const asset = assets.texture(handle);
+            if (asset == nullptr || asset->state == AssetState::Failed)
+            {
+                return missing;
+            }
+            if (handle.index < textures_.size() && textures_[handle.index] != nullptr &&
+                textures_[handle.index]->generation == handle.generation)
+            {
+                // Uploaded, or failed to upload.
+                u32 const slot = textures_[handle.index]->sampled;
+                return slot != BindlessSet::kInvalid ? slot : missing;
+            }
+            pending = true;
+            return missing;
+        };
+
+        u32vec4 const handles{
+            sampled(material.albedo, white_srgb_handle_),
+            sampled(material.normal, gpu::kNoTexture),
+            sampled(material.orm, white_unorm_handle_),
+            sampled(material.emission, gpu::kNoTexture),
+        };
+        return pending ? nullopt : optional<u32vec4>{handles};
+    }
+
+    void Renderer::stream_textures(AssetManager const& assets)
+    {
         VkImageLayout const read_only = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
 
-        // In completion order, map by map, as many as fit. A map that does
-        // not fit waits, and so does everything behind it, so materials land
-        // in the order they were decoded. A material's handles go live only
-        // with its last map, so nothing samples a half-uploaded set; the
-        // earlier maps' copies were recorded in earlier frames, which the
-        // queue has ordered ahead of this one.
+        // In completion order, as many as fit. A texture that does not fit
+        // waits, and so does everything behind it, so textures land in the
+        // order they were decoded. A material samples nothing until all its
+        // textures have landed, so none draws half-uploaded; the earlier
+        // textures' copies were recorded in earlier frames, which the queue
+        // has ordered ahead of this one.
         size_t done = 0;
         for (; done < decoded_.size(); ++done)
         {
-            StreamingMaterial&             entry   = decoded_[done];
-            MaterialLoader::Decoded const& decoded = entry.decoded;
-            if (!decoded.ok)
+            AssetManager::ReadyTexture const& entry = decoded_[done];
+            TextureAsset const* const         asset = assets.texture(entry.handle);
+            if (asset == nullptr)
             {
-                continue;   // the loader logged why; the material stays flat
+                continue;   // the handle went stale while it waited
+            }
+            char const* const name   = asset->name.c_str();
+            Pixels const&     pixels = entry.pixels;
+
+            VkDeviceSize const bytes = Texture::upload_bytes(pixels.width, pixels.height);
+
+            // 16 bytes of slack covers the allocation's alignment.
+            bool const too_big = bytes + 16 > staging_.bytes_per_slot();
+            if (too_big)
+            {
+                log::error("texture %s: %ux%u needs %llu bytes of staging, over the %llu a "
+                           "frame allows", name, pixels.width, pixels.height,
+                           static_cast<unsigned long long>(bytes),
+                           static_cast<unsigned long long>(staging_.bytes_per_slot()));
             }
 
-            MaterialTextures& material = *materials_[decoded.material];
-
-            struct Map
+            optional<StagingArena::Allocation> staged;
+            if (!too_big)
             {
-                Texture&                texture;
-                VkFormat                format;
-                char const*             name;
-                optional<Pixels> const& pixels;
-            };
-            Map const maps[]{
-                {material.albedo, VK_FORMAT_R8G8B8A8_SRGB, "material albedo", decoded.maps.albedo},
-                {material.normal, VK_FORMAT_R8G8B8A8_UNORM, "material normal", decoded.maps.normal},
-                {material.orm, VK_FORMAT_R8G8B8A8_UNORM, "material orm", decoded.maps.orm},
-                {material.emission, VK_FORMAT_R8G8B8A8_SRGB, "material emission",
-                 decoded.maps.emission},
-            };
-
-            bool out_of_budget = false;
-            bool failed        = false;
-            for (; entry.staged < std::size(maps); ++entry.staged)
-            {
-                Map const& map = maps[entry.staged];
-                if (!map.pixels.has_value())
-                {
-                    continue;
-                }
-
-                Pixels const&      pixels = *map.pixels;
-                VkDeviceSize const bytes  = Texture::upload_bytes(pixels.width, pixels.height);
-
-                // 16 bytes of slack covers the allocation's alignment.
-                if (bytes + 16 > staging_.bytes_per_slot())
-                {
-                    log::error("material %s: a %ux%u map needs %llu bytes of staging, over the "
-                               "%llu a frame allows", decoded.name.c_str(), pixels.width,
-                               pixels.height, static_cast<unsigned long long>(bytes),
-                               static_cast<unsigned long long>(staging_.bytes_per_slot()));
-                    failed = true;
-                    break;
-                }
-
-                optional<StagingArena::Allocation> const staged = staging_.allocate(bytes);
+                staged = staging_.allocate(bytes);
                 if (!staged.has_value())
                 {
-                    out_of_budget = true;
-                    break;
+                    break;   // out of this frame's budget
                 }
-                if (!map.texture.create(*allocator_, *device_, {map.format, map.name},
-                                        pixels.width, pixels.height))
-                {
-                    failed = true;
-                    break;
-                }
-
-                std::memcpy(staged->data, pixels.rgba.data(), bytes);
-                pending_uploads_.push_back(
-                    PendingUpload{.texture = &map.texture, .buffer = staged->buffer,
-                                  .offset = staged->offset});
             }
 
-            if (out_of_budget)
+            u32 const index = entry.handle.index;
+            if (textures_.size() <= index)
             {
-                break;
+                textures_.resize(index + 1);
             }
-            if (failed)
+            textures_[index]             = std::make_unique<GpuTexture>();
+            GpuTexture& texture          = *textures_[index];
+            texture.generation           = entry.handle.generation;
+
+            VkFormat const format = asset->encoding == TextureEncoding::Srgb
+                                        ? VK_FORMAT_R8G8B8A8_SRGB
+                                        : VK_FORMAT_R8G8B8A8_UNORM;
+            if (too_big || !texture.texture.create(*allocator_, *device_, {format, "material map"},
+                                                   pixels.width, pixels.height))
             {
-                // Maps already uploaded are never sampled; they are freed
-                // with the rest of the materials.
-                log::error("material %s stays untextured", decoded.name.c_str());
+                // Kept, unsampled, so materials stop waiting and leave it out.
+                log::error("texture %s is left out", name);
                 continue;
             }
 
-            // Registered now, sampled from this very frame: the copies are
-            // recorded ahead of every pass, and the slots are fresh, so no
-            // pending command buffer can be reading them. Albedo and ORM are
-            // always sampled once an object is textured, so a missing one is
-            // white; normal and emission are skipped.
-            auto handle = [&](Map const& map, u32 missing) {
-                return map.pixels.has_value() ? bindless_.add_sampled_image(map.texture.view(),
-                                                                            read_only)
-                                              : missing;
-            };
-            material.handles = u32vec4{
-                handle(maps[0], white_srgb_handle_),
-                handle(maps[1], gpu::kNoTexture),
-                handle(maps[2], white_unorm_handle_),
-                handle(maps[3], gpu::kNoTexture),
-            };
-            material.hide_emission = false;
-            log::info("material %s streamed in", decoded.name.c_str());
+            std::memcpy(staged->data, pixels.rgba.data(), bytes);
+            pending_uploads_.push_back(PendingUpload{
+                .texture = &texture.texture, .buffer = staged->buffer, .offset = staged->offset});
+
+            // Registered now, sampled from this very frame: the copy is
+            // recorded ahead of every pass, and the slot is fresh, so no
+            // pending command buffer can be reading it.
+            texture.sampled = bindless_.add_sampled_image(texture.texture.view(), read_only);
+            log::info("texture %s streamed in", name);
         }
 
         decoded_.erase(decoded_.begin(), decoded_.begin() + static_cast<std::ptrdiff_t>(done));
@@ -803,74 +764,6 @@ namespace encke
             upload.texture->record_upload(command, upload.buffer, upload.offset);
         }
         pending_uploads_.clear();
-    }
-
-    optional<Model> Renderer::add_model(GltfModel const& source)
-    {
-        // Textures stream in like the built-in materials: each material
-        // starts untextured, with its emission held back if a map is meant
-        // to mask it, and its decode job goes to the loader.
-        u32 const first_material = static_cast<u32>(materials_.size());
-        for (size_t index = 0; index < source.materials.size(); ++index)
-        {
-            GltfMaterial const& material = source.materials[index];
-
-            materials_.push_back(std::make_unique<MaterialTextures>());
-            MaterialTextures& textures = *materials_.back();
-            textures.tiling        = false;
-            textures.hide_emission = material.has_emission_map;
-
-            if (material.decode)
-            {
-                loader_.submit(MaterialLoader::Job{
-                    .material = static_cast<u32>(materials_.size() - 1),
-                    .name     = "gltf material " + std::to_string(index),
-                    .decode   = material.decode,
-                });
-            }
-        }
-
-        Model model;
-        model.min = f64vec3{source.min};
-        model.max = f64vec3{source.max};
-
-        // Each primitive once, however many nodes instance its mesh.
-        for (GltfMesh const& source_mesh : source.meshes)
-        {
-            ModelMesh& mesh = model.meshes.emplace_back();
-            for (GltfPrimitive const& primitive : source_mesh.primitives)
-            {
-                optional<u32> const id = geometry_.add(primitive.vertices, primitive.indices);
-                if (!id.has_value())
-                {
-                    return nullopt;
-                }
-
-                GltfMaterial const& material = source.materials[primitive.material];
-                mesh.parts.push_back(ModelPart{
-                    .mesh      = *id,
-                    .material  = first_material + primitive.material,
-                    .albedo    = material.base_colour,
-                    .roughness = material.roughness,
-                    .metallic  = material.metallic,
-                    .emissive  = material.emissive,
-                });
-            }
-        }
-
-        for (GltfNode const& node : source.nodes)
-        {
-            model.nodes.push_back(ModelNode{
-                .name     = node.name,
-                .parent   = node.parent,
-                .position = f64vec3{node.position},
-                .rotation = f64quat{node.rotation},
-                .scale    = f64vec3{node.scale},
-                .mesh     = node.mesh,
-            });
-        }
-
-        return model;
     }
 
     bool Renderer::create_targets(VkExtent2D extent)
@@ -1001,12 +894,13 @@ namespace encke
         return true;
     }
 
-    void Renderer::upload(Scene const& scene, VkExtent2D extent, FrameResources& resources)
+    void Renderer::upload(Scene const& scene, AssetManager const& assets, VkExtent2D extent,
+                          FrameResources& resources)
     {
         f64 const aspect = static_cast<f64>(extent.width) / static_cast<f64>(extent.height);
 
         // Everything below reads the list, not the scene's registry.
-        extract(scene, geometry_, render_list_);
+        extract(scene, assets, render_list_);
 
         // The first frame has no last one, so nothing has moved.
         f64mat4 const view                = scene.camera.view();
@@ -1107,9 +1001,10 @@ namespace encke
             casters      = 0;
             for (u32 object = 0; object < object_count; ++object)
             {
-                RenderObject const& caster = render_list_.objects[object];
-                GeometryPool::Range const& range = geometry_.range(caster.renderable.mesh);
-                if (!range.resident || !map.may_cast(caster.bounds_centre, caster.bounds_radius))
+                RenderObject const&        caster = render_list_.objects[object];
+                GeometryPool::Range const* range  = mesh_range(caster.renderable.mesh);
+                if (range == nullptr || !range->resident ||
+                    !map.may_cast(caster.bounds_centre, caster.bounds_radius))
                 {
                     continue;
                 }
@@ -1118,7 +1013,7 @@ namespace encke
                 f32mat4 const matrix{world_to_clip * caster.model};
                 std::memcpy(&shadow_matrices[slot], &matrix, sizeof(matrix));
 
-                draws[(1 + index) * kMaxObjects + casters++] = draw_command(range, slot);
+                draws[(1 + index) * kMaxObjects + casters++] = draw_command(*range, slot);
             }
         }
         for (u32 index = shadow_view_count; index < kShadowViewCount; ++index)
@@ -1149,20 +1044,27 @@ namespace encke
             f64mat4 const previous_model_view = previous_view * previous_model;
             f64mat3 const normal_matrix = glm::transpose(glm::inverse(f64mat3{model_view}));
 
+            // Untextured, with flat factors, until every map has landed; no
+            // material at all draws the same way for good.
             u32vec4 textures{gpu::kNoTexture};
             f32vec4 texture_scale{0.0f};
             bool    hide_emission = false;
-            if (renderable.material != 0)
+            if (MaterialAsset const* material = assets.material(renderable.material))
             {
-                MaterialTextures const& material = *materials_[renderable.material];
-                textures      = material.handles;
-                hide_emission = material.hide_emission;
+                // An emissive factor meant to be masked by a map would light
+                // the whole surface until the map is drawn.
+                optional<u32vec4> const live = material_textures(*material, assets);
+                if (live.has_value())
+                {
+                    textures = *live;
+                }
+                hide_emission = static_cast<bool>(material->emission) && !live.has_value();
 
                 // (1, 1, 1, 1) makes the shader's stretch exactly 1, which
                 // leaves an atlas's UVs alone whatever the object's scale.
-                texture_scale = material.tiling
-                                    ? f32vec4{object.scale / material.tile.x,
-                                              material.tile.x / material.tile.y}
+                texture_scale = material->tiling
+                                    ? f32vec4{object.scale / material->tile.x,
+                                              material->tile.x / material->tile.y}
                                     : f32vec4{1.0f};
             }
 
@@ -1181,10 +1083,10 @@ namespace encke
 
             // A mesh still waiting for its upload is left out, not drawn
             // from memory that holds nothing yet.
-            GeometryPool::Range const& range = geometry_.range(renderable.mesh);
-            if (range.resident)
+            GeometryPool::Range const* range = mesh_range(renderable.mesh);
+            if (range != nullptr && range->resident)
             {
-                draws[gbuffer_draws_++] = draw_command(range, index);
+                draws[gbuffer_draws_++] = draw_command(*range, index);
             }
         }
 
@@ -1814,7 +1716,7 @@ namespace encke
     }
 
     FrameResult Renderer::draw(VulkanSwapchain const& swapchain, Scene const& scene,
-                               Overlay* overlay)
+                               AssetManager& assets, Overlay* overlay)
     {
         VkDevice const device = device_->handle();
 
@@ -1860,9 +1762,10 @@ namespace encke
         // arena over copies it never recorded.
         // Geometry first, so objects draw as soon as they can, even untextured.
         staging_.begin(frame_);
+        take_assets(assets);
         geometry_.stage(staging_, frame_);
-        stream_materials();
-        upload(scene, swapchain.extent(), frames_[frame_]);
+        stream_textures(assets);
+        upload(scene, assets, swapchain.extent(), frames_[frame_]);
 
         // Only reset once the frame is definitely going to be submitted --
         // returning early after this would leave the fence unsignalled forever.
@@ -1998,9 +1901,6 @@ namespace encke
 
         VkDevice const device = device_->handle();
 
-        // The worker writes into loader state only, but it must be gone
-        // before anything it could be decoding for is torn down.
-        loader_.stop();
         decoded_.clear();
         pending_uploads_.clear();
         staging_.shutdown();
@@ -2021,7 +1921,8 @@ namespace encke
         capture_buffer_.shutdown();
 
         geometry_.shutdown();
-        materials_.clear();
+        meshes_.clear();
+        textures_.clear();
         white_srgb_.shutdown();
         white_unorm_.shutdown();
 

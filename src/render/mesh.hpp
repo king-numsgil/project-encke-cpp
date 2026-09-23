@@ -29,17 +29,6 @@ namespace encke
     static_assert(offsetof(Vertex, tangent) == 24);
     static_assert(offsetof(Vertex, uv) == 40);
 
-    // Every mesh the renderer builds at startup, first into the geometry
-    // pool, so each is its own mesh id. Renderable::mesh picks one.
-    enum class MeshKind : u32
-    {
-        Cube   = 0,
-        Sphere = 1,
-        Planet = 2,
-    };
-
-    inline constexpr u32 kMeshKindCount = 3;
-
     // A unit cube centred on the origin, wound counter-clockwise. Vertices are
     // not shared between faces because the normals differ. Each face maps the
     // whole unit square, upright on the sides and seen from outside.

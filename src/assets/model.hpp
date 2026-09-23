@@ -1,15 +1,16 @@
 #pragma once
 
+#include "assets/handle.hpp"
+
 namespace encke
 {
-    // A loaded model as the renderer holds it: GPU meshes and materials by
-    // id, plus what the scene needs to place it. Renderer::add_model makes
-    // one; Scene::add_model instances it. Ids index the renderer's mesh and
-    // material lists, which start with MeshKind and MaterialKind in order.
+    // A loaded model: its node tree, and each node's mesh as parts that are
+    // one mesh asset and one material asset each. The AssetManager makes it
+    // from a glTF; Scene::spawn instances it.
     struct ModelPart
     {
-        u32 mesh     = 0;
-        u32 material = 0;
+        MeshHandle     mesh;
+        MaterialHandle material;
 
         // glTF factors, copied onto each Renderable made from the part.
         f32vec3 albedo{1.0f};
@@ -18,7 +19,7 @@ namespace encke
         f32vec3 emissive{0.0f};   // relative; the scene scales it to luminance
     };
 
-    // One mesh, uploaded once and drawn once per node that uses it.
+    // One glTF mesh: a part per primitive, each drawn by its own entity.
     struct ModelMesh
     {
         vector<ModelPart> parts;

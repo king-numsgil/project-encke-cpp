@@ -2,14 +2,14 @@
 
 #include "render/extract.hpp"
 
+#include "assets/asset_manager.hpp"
 #include "core/log.hpp"
 #include "render/config.hpp"
-#include "render/geometry_pool.hpp"
 #include "render/scene.hpp"
 
 namespace encke
 {
-    void extract(Scene const& scene, GeometryPool const& geometry, RenderList& list)
+    void extract(Scene const& scene, AssetManager const& assets, RenderList& list)
     {
         list.objects.clear();
         list.lights.clear();
@@ -34,10 +34,14 @@ namespace encke
                 break;
             }
 
-            GeometryPool::Range const& range = geometry.range(renderable.mesh);
-            f64vec3 const size   = glm::abs(f64vec3{world.scale});
-            f64vec3 const centre = (f64vec3{range.min} + f64vec3{range.max}) * 0.5;
-            f64vec3 const extent = (f64vec3{range.max} - f64vec3{range.min}) * 0.5;
+            // A mesh that is not known yet has no size; it draws nothing
+            // either until it is.
+            MeshAsset const* const mesh   = assets.mesh(renderable.mesh);
+            f64vec3 const          min    = mesh != nullptr ? f64vec3{mesh->min} : f64vec3{0.0};
+            f64vec3 const          max    = mesh != nullptr ? f64vec3{mesh->max} : f64vec3{0.0};
+            f64vec3 const          size   = glm::abs(f64vec3{world.scale});
+            f64vec3 const          centre = (min + max) * 0.5;
+            f64vec3 const          extent = (max - min) * 0.5;
 
             list.objects.push_back(RenderObject{
                 .entity        = entity,

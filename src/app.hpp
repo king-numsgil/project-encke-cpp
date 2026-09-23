@@ -2,6 +2,7 @@
 
 #include <chrono>
 
+#include "assets/asset_manager.hpp"
 #include "platform/window.hpp"
 #include "render/fly_camera.hpp"
 #include "render/renderer.hpp"
@@ -66,6 +67,10 @@ namespace encke
 
         array<bool, kDebugWindowCount> debug_windows_{};
         f32                            motion_gain_ = 5000.0f;
+
+        // After the renderer, so destroyed before it; the renderer only reads
+        // it during draw(). Its worker stops on destruction.
+        AssetManager assets_;
 
         Scene     scene_;
         FlyCamera fly_;

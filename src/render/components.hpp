@@ -1,7 +1,6 @@
 #pragma once
 
-#include "render/material.hpp"
-#include "render/mesh.hpp"
+#include "assets/handle.hpp"
 
 namespace encke
 {
@@ -13,10 +12,10 @@ namespace encke
     // sized by its scale.
     struct Renderable
     {
-        // Renderer ids. A MeshKind or MaterialKind converts to its own id;
-        // loaded models get ids past them. Material 0 is untextured.
-        u32 mesh     = static_cast<u32>(MeshKind::Cube);
-        u32 material = static_cast<u32>(MaterialKind::None);
+        // Drawn once the mesh is resident. No material, or one whose maps
+        // have not landed, draws with the flat factors below.
+        MeshHandle     mesh;
+        MaterialHandle material;
 
         // With a material these are glTF-style factors on its maps; without,
         // they are the whole material.
