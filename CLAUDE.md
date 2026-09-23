@@ -95,6 +95,7 @@ src/
     stats_window.{hpp,cpp} frame timing history and the window graphing it
   world/
     transform.{hpp,cpp}  Transform and WorldTransform components, propagation
+    bodies.{hpp,cpp}     Star and Body components; the starlight and environment at a point
   assets/
     handle.hpp           typed generational handles: mesh, texture, material, model
     asset_manager.{hpp,cpp} every asset's handle and CPU state; ready queues for the renderer
@@ -103,7 +104,7 @@ src/
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
-    scene.{hpp,cpp}      the EnTT registry, star, camera; builds the test planet
+    scene.{hpp,cpp}      the EnTT registry and active camera; builds the test planet
     components.hpp       Renderable and Light, the components the renderer reads
     extract.{hpp,cpp}    registry -> RenderList once a frame: the renderer's only view of it
     material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
@@ -471,8 +472,8 @@ Known gaps, seen 2026-09-22 and not yet worked on:
   the proof, not the eye: the paleness is in the pixels.
 - **Ambient is a two-colour environment, first draft.** `shade_environment`
   in `lib/pbr.slang` replaces the old flat ambient: sunlit ground below the
-  horizon (its radiance worked out per frame from the star and
-  `Scene::ground_albedo`), sky above it at `Scene::sky_fill` of that. Diffuse
+  horizon (its radiance worked out per frame from the star and the nearest
+  body's `Body::ground_albedo`), sky above it at `Body::sky_fill` of that. Diffuse
   is exact for it; specular reads it along the reflected ray with the horizon
   softened by roughness, scaled by Karis's analytic environment BRDF. It
   gives metal its shape (dark above, lit below). It knows nothing of nearby
@@ -497,9 +498,9 @@ and picks the spots, and the renderer composes each map's `world -> clip` with
 every model matrix, and with the camera's inverse view for the lighting
 lookup, before narrowing. The GPU never sees a world position here either.
 
-- **The sun's direction and illuminance come from `Scene::star`** and the
-  camera's position, per frame. Flying across a system, or moving the star,
-  needs nothing else changed.
+- **The sun's direction and illuminance come from the brightest `Star`
+  entity** at the camera's position, per frame. Flying across a system, or
+  moving the star, needs nothing else changed.
 - **Cascades are bounding spheres of their frustum slice, snapped to whole
   texels in f64 world space.** The sphere's radius depends only on the split
   distances and the field of view, so turning the camera does not resize the
@@ -573,6 +574,14 @@ later run on its own threads without the renderer seeing half an update.
   spinning cube, the cube held still in frame while the world turned. The
   extract copies its world pose and lens into `RenderList::camera`, a
   `CameraView`, which is all the renderer and shadow planning read.
+- **Stars and bodies are entities** (`world/bodies.hpp`). A `Star` is
+  luminous intensity and colour at its entity's position, not drawn. A
+  `Body` is a radius, its centre in the entity's frame (the planet's is a
+  radius below its pole-centred mesh) and its environment: ground albedo
+  and sky fill. The extract picks, at the camera, the star giving the most
+  illuminance and the body whose surface is nearest, into
+  `RenderList::star` and `surroundings`; with neither, nothing lights the
+  frame from outside. The Earth, the Moon and the Sun are one of each.
 - **An object's GPU slot is its index in this frame's `RenderList`**, and so
   its indirect draw's `firstInstance`; a light's likewise. Neither is stable
   across frames. Per-object renderer state is keyed by entity instead:
@@ -844,8 +853,10 @@ present -- most of a frame -- and made movement slow and violently uneven.
   matrices and model space, not the direction away from the ground, and the
   camera is not levelled against any body: it has to fly from one planet to
   another. Nothing in `FlyCamera` reads world +Y or a planet.
-- **The environment's up is the scene's**: `Scene::up_at`, radial from the
-  one planet here. With several bodies, choosing it is the scene's job.
+- **The environment's up is the nearest body's**: radial from the centre
+  of whichever `Body` has its surface nearest the camera
+  (`surroundings_at`). Flying to the Moon switches to its up and its
+  regolith; it switches, rather than blends, halfway.
 - **`ENCKE_CAMERA` takes an optional up**, `"px py pz tx ty tz ux uy uz"`,
   defaulting to the test scene's +Y. A look-at needs one: keeping the
   camera's previous up instead turned its starting pitch into roll.

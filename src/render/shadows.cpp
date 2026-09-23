@@ -52,10 +52,9 @@ namespace encke
                    (-centre.y + centre.z * ty) / ny <= radius;
         }
 
-        void plan_cascades(CameraView const& camera, Star const& star, f64 aspect, ShadowPlan& plan)
-        {
-            f64vec3 const to_sun = star.direction_from(camera.position);
-            f64vec3       right;
+        void plan_cascades(CameraView const& camera, f64vec3 const& to_sun, f64 aspect,
+                           ShadowPlan& plan)
+        {            f64vec3       right;
             f64vec3       up;
             basis(-to_sun, right, up);
 
@@ -217,10 +216,10 @@ namespace encke
         return std::abs(p.x) - radius <= extent && std::abs(p.y) - radius <= extent;
     }
 
-    void plan_shadows(CameraView const& camera, Star const& star, span<RenderLight const> lights,
-                      f64 aspect, ShadowPlan& plan)
+    void plan_shadows(CameraView const& camera, f64vec3 const& to_sun,
+                      span<RenderLight const> lights, f64 aspect, ShadowPlan& plan)
     {
-        plan_cascades(camera, star, aspect, plan);
+        plan_cascades(camera, to_sun, aspect, plan);
         plan_spots(camera, lights, aspect, plan);
     }
 }

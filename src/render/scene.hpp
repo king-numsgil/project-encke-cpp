@@ -3,6 +3,7 @@
 #include "assets/model.hpp"
 #include "render/camera.hpp"
 #include "render/components.hpp"
+#include "world/bodies.hpp"
 #include "world/transform.hpp"
 
 namespace encke
@@ -47,28 +48,6 @@ namespace encke
         f32 luminance = 1.0f;
     };
 
-    // The system's star. Its direction and illuminance are worked out per
-    // frame from where the camera is, so moving either -- flying across the
-    // system, or the star's own motion -- needs nothing else changed.
-    struct Star
-    {
-        f64vec3 position{0.0};             // world, metres
-        f64     luminous_intensity = 0.0;  // candela
-        f32vec3 colour{1.0f};              // linear tint, multiplied by the illuminance
-
-        f64vec3 direction_from(f64vec3 const& point) const
-        {
-            return glm::normalize(position - point);
-        }
-
-        // Lux at `point`: inverse square, no atmosphere.
-        f64 illuminance_at(f64vec3 const& point) const
-        {
-            f64vec3 const delta = position - point;
-            return luminous_intensity / glm::dot(delta, delta);
-        }
-    };
-
     class Scene
     {
     public:
@@ -102,15 +81,10 @@ namespace encke
         // out around.
         f64vec3 origin() const { return origin_; }
 
-        // Away from the centre of the one body this scene has, unit: where
-        // the environment's horizon lies. Lighting only; the camera has its
-        // own frame and nothing levels it against this. With several bodies this becomes the nearest one's, or
-        // a blend, and is the scene's decision. World +Y means nothing here.
-        f64vec3 up_at(f64vec3 const& position) const;
-
-        // Every object, light and camera is an entity: a Transform, plus a
-        // Renderable or a Light (render/components.hpp), or a Camera
-        // (render/camera.hpp).
+        // Every object, light, camera, star and body is an entity: a
+        // Transform, plus a Renderable or a Light (render/components.hpp), a
+        // Camera (render/camera.hpp), or a Star or a Body
+        // (world/bodies.hpp).
         entt::registry registry;
 
         // The camera the frame is drawn from: an entity with a Transform and
@@ -119,25 +93,10 @@ namespace encke
         // late.
         entt::entity camera = entt::null;
 
-        Star star;
-
         // Exposure as EV100: the fixed value when auto-exposure is off, and
         // where it starts when on. The scene is lit by a real-magnitude sun,
         // so it is set for daylight.
         f32 ev100 = 14.0f;
-
-        // The environment the lighting pass is filled by and reflects, a
-        // stand-in for bounce light until there is any GI: the ground below
-        // the horizon, lit by the star, and the sky above it. The renderer
-        // works out the ground's radiance per frame from the star, so only
-        // its albedo is set here.
-        //
-        // An airless sky is black, which leaves anything facing up in shadow
-        // black too. `sky_fill` gives the sky that fraction of the ground's
-        // radiance anyway, for the light nearby objects would bounce, which
-        // a two-colour environment cannot know about.
-        f32vec3 ground_albedo{0.0f};   // linear
-        f32     sky_fill = 0.0f;
 
     private:
         // A mesh at `position` from the pole, flat material.
@@ -157,6 +116,5 @@ namespace encke
                                Light const& light);
 
         f64vec3 origin_{0.0};
-        f64vec3 planet_centre_{0.0};
     };
 }

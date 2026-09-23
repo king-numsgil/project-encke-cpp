@@ -5,8 +5,6 @@
 
 namespace encke
 {
-    struct Star;
-
     // One shadow map's view for this frame. World space, f64, CPU only: the
     // renderer composes these with each object's model, and with the camera's
     // inverse view for the lighting pass, before anything is narrowed.
@@ -47,6 +45,7 @@ namespace encke
     // Fits the sun's cascades to the camera's frustum, texel-snapped so they
     // do not shimmer as the camera moves, and picks which of `lights`, the
     // frame's extracted ones, get a map this frame.
-    void plan_shadows(CameraView const& camera, Star const& star, span<RenderLight const> lights,
-                      f64 aspect, ShadowPlan& plan);
+    // `to_sun` is the direction toward the star, world space, unit.
+    void plan_shadows(CameraView const& camera, f64vec3 const& to_sun,
+                      span<RenderLight const> lights, f64 aspect, ShadowPlan& plan);
 }

@@ -37,6 +37,9 @@ namespace encke
             warned_camera = true;
         }
 
+        list.star         = starlight_at(registry, list.camera.position);
+        list.surroundings = surroundings_at(registry, list.camera.position);
+
         for (auto const [entity, world, renderable] :
              registry.view<WorldTransform const, Renderable const>().each())
         {

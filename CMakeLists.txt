@@ -186,6 +186,7 @@ add_executable(encke
     src/vulkan/texture.cpp
     src/vulkan/timestamps.cpp
 
+    src/world/bodies.cpp
     src/world/transform.cpp
 )
 

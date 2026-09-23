@@ -920,27 +920,31 @@ namespace encke
 
         // Direction and strength of the star from where the camera is: the
         // whole scene is small against an astronomical unit, so one direction
-        // and one illuminance serve every pixel.
-        f64vec3 const sun_world   = scene.star.direction_from(camera.position);
-        f64vec3 const sun_view    = f64vec3{view * f64vec4{sun_world, 0.0}};
-        f32 const     illuminance = static_cast<f32>(scene.star.illuminance_at(camera.position));
+        // and one illuminance serve every pixel. No star, no starlight.
+        Starlight const star        = render_list_.star.value_or(Starlight{});
+        f64vec3 const   sun_world   = star.direction;
+        f64vec3 const   sun_view    = f64vec3{view * f64vec4{sun_world, 0.0}};
+        f32 const       illuminance = static_cast<f32>(star.illuminance);
 
         // The environment's ground is a Lambertian plane lit by the star:
         // radiance albedo * E * cos(elevation) / pi, zero once the star sets.
+        // No body, no environment: black, with the camera's up standing in.
         constexpr f64 kPi = 3.14159265358979323846;
 
-        f64vec3 const up_world  = scene.up_at(camera.position);
+        Surroundings const surroundings = render_list_.surroundings.value_or(Surroundings{
+            .up = camera.orientation * f64vec3{0.0, 1.0, 0.0}, .ground_albedo = {}, .sky_fill = 0.0f});
+        f64vec3 const up_world  = surroundings.up;
         f64vec3 const up_view   = glm::normalize(f64vec3{view * f64vec4{up_world, 0.0}});
         f64 const     sun_up    = std::max(glm::dot(up_world, sun_world), 0.0);
-        f32vec3 const ground    = scene.ground_albedo * scene.star.colour *
+        f32vec3 const ground    = surroundings.ground_albedo * star.colour *
                                   static_cast<f32>(static_cast<f64>(illuminance) * sun_up / kPi);
-        f32vec3 const sky       = ground * scene.sky_fill;
+        f32vec3 const sky       = ground * surroundings.sky_fill;
 
         // The extract has already capped both at the buffers' sizes.
         u32 const light_count  = static_cast<u32>(render_list_.lights.size());
         u32 const object_count = static_cast<u32>(render_list_.objects.size());
 
-        plan_shadows(camera, scene.star, render_list_.lights, aspect, shadow_plan_);
+        plan_shadows(camera, sun_world, render_list_.lights, aspect, shadow_plan_);
 
         f32 const shadow_far = config::kShadowDistance;
 
@@ -952,7 +956,7 @@ namespace encke
             .cluster_depth = f32vec4{kClusterNear, kClusterFar, scale, bias},
             .cluster_grid  = u32vec4{kClustersX, kClustersY, kClustersZ, kMaxLightsPerCluster},
             .sun_direction = f32vec4{f32vec3{glm::normalize(sun_view)}, 0.0f},
-            .sun_radiance  = f32vec4{scene.star.colour * illuminance, 0.0f},
+            .sun_radiance  = f32vec4{star.colour * illuminance, 0.0f},
             .env_up        = f32vec4{f32vec3{up_view}, 0.0f},
             .env_sky       = f32vec4{sky, 0.0f},
             .env_ground    = f32vec4{ground, 0.0f},

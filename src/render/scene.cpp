@@ -209,30 +209,51 @@ namespace encke
 
         Materials const materials = load_materials(assets);
 
-        ev100   = 14.0f;
-        // Local up is radial from here. Ground albedo is a guess at the
-        // Ground110 set's average, not measured from it.
-        planet_centre_ = origin_ - f64vec3{0.0, kEarthRadius, 0.0};
-        ground_albedo  = f32vec3{0.25f};
-        sky_fill       = 0.1f;
+        ev100 = 14.0f;
 
         // Local frame at the pole: +Y is up, the ground is y = 0. The planet
         // curves away by d^2 / 2R, a tenth of a millimetre at 30 m, so the
-        // object field can treat it as flat.
-        add(planet, f64vec3{0.0}, f64vec3{1.0}, materials.ground);
+        // object field can treat it as flat. The mesh's origin is the pole,
+        // so the body's centre is a radius below it. Ground albedo is a
+        // guess at the Ground110 set's average, not measured from it.
+        {
+            entt::entity const earth = add(planet, f64vec3{0.0}, f64vec3{1.0}, materials.ground);
+            registry.emplace<Body>(earth, Body{
+                                              .radius        = kEarthRadius,
+                                              .centre        = f64vec3{0.0, -kEarthRadius, 0.0},
+                                              .ground_albedo = f32vec3{0.25f},
+                                              .sky_fill      = 0.1f,
+                                          });
+        }
 
         // The Moon, straight up at its real distance from the Earth's centre.
-        // Half a degree across: a few pixels.
-        add(sphere, f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
-            f64vec3{2.0 * kMoonRadius}, {0.36f, 0.35f, 0.33f}, 0.95f, 0.0f);
+        // Half a degree across: a few pixels. Its environment is its own grey
+        // regolith, for anyone who flies there.
+        {
+            f32vec3 const regolith{0.36f, 0.35f, 0.33f};
+            entt::entity const moon =
+                add(sphere, f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
+                    f64vec3{2.0 * kMoonRadius}, regolith, 0.95f, 0.0f);
+            registry.emplace<Body>(moon, Body{
+                                             .radius        = kMoonRadius,
+                                             .centre        = f64vec3{0.0},
+                                             .ground_albedo = srgb_to_linear(regolith),
+                                             .sky_fill      = 0.1f,
+                                         });
+        }
 
+        // The Sun, not drawn: only its light is.
         {
             f64vec3 const direction{std::cos(kSunElevation) * std::cos(kSunAzimuth),
                                     std::sin(kSunElevation),
                                     std::cos(kSunElevation) * std::sin(kSunAzimuth)};
-            star.position           = origin_ + direction * kAstronomicalUnit;
-            star.luminous_intensity = kSunIntensity;
-            star.colour             = f32vec3{1.0f, 0.97f, 0.93f};
+            entt::entity const sun = registry.create();
+            registry.emplace<Transform>(
+                sun, Transform{.position = origin_ + direction * kAstronomicalUnit});
+            registry.emplace<Star>(sun, Star{
+                                            .luminous_intensity = kSunIntensity,
+                                            .colour             = f32vec3{1.0f, 0.97f, 0.93f},
+                                        });
         }
 
         // Textured and flat objects side by side: the colonnade, the spheres
@@ -402,11 +423,6 @@ namespace encke
                                     glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0}),
                     });
         registry.emplace<Camera>(camera);
-    }
-
-    f64vec3 Scene::up_at(f64vec3 const& position) const
-    {
-        return glm::normalize(position - planet_centre_);
     }
 
     void Scene::update(f64 seconds, AssetManager const& assets)
