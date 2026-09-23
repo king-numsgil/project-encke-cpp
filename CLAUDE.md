@@ -561,6 +561,12 @@ later run on its own threads without the renderer seeing half an update.
 - **A spot light faces its entity's -Z** (`look_rotation` builds one from a
   direction). The mast lights are children of their lamp heads, the ring
   lamps' of their bulbs.
+- **The camera is an entity too**: a `Transform` and a `Camera` (field of
+  view, near plane), with `Scene::camera` naming the active one. It looks
+  down its -Z, and parented to something it rides along: hung off the
+  spinning cube, the cube held still in frame while the world turned. The
+  extract copies its world pose and lens into `RenderList::camera`, a
+  `CameraView`, which is all the renderer and shadow planning read.
 - **An object's GPU slot is its index in this frame's `RenderList`**, and so
   its indirect draw's `firstInstance`; a light's likewise. Neither is stable
   across frames. Per-object renderer state is keyed by entity instead:
@@ -803,7 +809,8 @@ Known gaps:
 
 ## Camera control
 
-`render/fly_camera` flies the camera, editor-style: everything happens while
+`render/fly_camera` flies the camera entity's local `Transform`, so a
+camera parented to a ship flies relative to it, editor-style: everything happens while
 the right mouse button is held. It is six-degrees-of-freedom: mouse yaws and
 pitches about the camera's own axes, Q/E roll, WASD moves along the view,
 Space/Ctrl strafe along the camera's up, Shift is 5x, Alt is 0.2x, and the
@@ -823,9 +830,10 @@ present -- most of a frame -- and made movement slow and violently uneven.
   keyboard navigation activates the focused widget on Space; with
   `NoKeyboard` set for as long as the button is held, it never sees it.
 - **Losing focus counts as release**, since the button-up may never arrive.
-- **Last frame's camera is the renderer's**, recorded when a frame's buffers
-  are written, so when the app moves the camera relative to `Scene::update`
-  does not matter to motion vectors.
+- **The camera is flown before `Scene::update`**, which composes its world
+  transform for the frame; flown after, it would draw a frame late. Last
+  frame's view belongs to the renderer, recorded when a frame's buffers are
+  written, so this order costs motion vectors nothing.
 - **The camera has no up but its own.** "+Y is up" is the convention for
   matrices and model space, not the direction away from the ground, and the
   camera is not levelled against any body: it has to fly from one planet to

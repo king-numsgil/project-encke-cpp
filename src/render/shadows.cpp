@@ -52,22 +52,20 @@ namespace encke
                    (-centre.y + centre.z * ty) / ny <= radius;
         }
 
-        void plan_cascades(Scene const& scene, f64 aspect, ShadowPlan& plan)
+        void plan_cascades(CameraView const& camera, Star const& star, f64 aspect, ShadowPlan& plan)
         {
-            Camera const& camera = scene.camera;
-
-            f64vec3 const to_sun = scene.star.direction_from(camera.position);
+            f64vec3 const to_sun = star.direction_from(camera.position);
             f64vec3       right;
             f64vec3       up;
             basis(-to_sun, right, up);
 
             // Squared lateral spread of the frustum per metre of depth, to its
             // corners.
-            f64 const ty = std::tan(camera.vertical_fov * 0.5);
+            f64 const ty = std::tan(camera.lens.vertical_fov * 0.5);
             f64 const tx = ty * aspect;
             f64 const k2 = tx * tx + ty * ty;
 
-            f64 const near     = camera.near_plane;
+            f64 const near     = camera.lens.near_plane;
             f64 const far      = static_cast<f64>(config::kShadowDistance);
             f64 const lambda   = static_cast<f64>(config::kCascadeSplitLambda);
             f64 const count    = static_cast<f64>(config::kCascadeCount);
@@ -123,10 +121,9 @@ namespace encke
             plan.cascade_count = config::kCascadeCount;
         }
 
-        void plan_spots(Scene const& scene, span<RenderLight const> lights, f64 aspect,
+        void plan_spots(CameraView const& camera, span<RenderLight const> lights, f64 aspect,
                         ShadowPlan& plan)
         {
-            Camera const& camera = scene.camera;
             f64mat4 const view   = camera.view();
             f64mat4 const proj   = camera.projection(aspect);
 
@@ -220,10 +217,10 @@ namespace encke
         return std::abs(p.x) - radius <= extent && std::abs(p.y) - radius <= extent;
     }
 
-    void plan_shadows(Scene const& scene, span<RenderLight const> lights, f64 aspect,
-                      ShadowPlan& plan)
+    void plan_shadows(CameraView const& camera, Star const& star, span<RenderLight const> lights,
+                      f64 aspect, ShadowPlan& plan)
     {
-        plan_cascades(scene, aspect, plan);
-        plan_spots(scene, lights, aspect, plan);
+        plan_cascades(camera, star, aspect, plan);
+        plan_spots(camera, lights, aspect, plan);
     }
 }

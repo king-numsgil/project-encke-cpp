@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render/camera.hpp"
 #include "render/components.hpp"
 
 namespace encke
@@ -40,13 +41,16 @@ namespace encke
     // frame only.
     struct RenderList
     {
+        CameraView           camera;
         vector<RenderObject> objects;
         vector<RenderLight>  lights;
     };
 
-    // Replaces `list` with the scene's Renderables and Lights, in registry
-    // order, capped at config::kMaxObjects and kMaxLights: the excess is
-    // dropped, and logged once. Reads WorldTransform, so call it after
-    // Scene::update. Reuse one list, and its storage is reused too.
+    // Replaces `list` with the scene's active camera, Renderables and
+    // Lights, in registry order, capped at config::kMaxObjects and
+    // kMaxLights: the excess is dropped, and logged once. A scene without a
+    // usable camera keeps the last one, logged once. Reads WorldTransform,
+    // so call it after Scene::update. Reuse one list, and its storage is
+    // reused too.
     void extract(Scene const& scene, AssetManager const& assets, RenderList& list);
 }

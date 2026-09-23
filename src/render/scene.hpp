@@ -104,13 +104,20 @@ namespace encke
 
         // Away from the centre of the one body this scene has, unit: where
         // the environment's horizon lies. Lighting only; the camera has its
-        // own frame. With several bodies this becomes the nearest one's, or
+        // own frame and nothing levels it against this. With several bodies this becomes the nearest one's, or
         // a blend, and is the scene's decision. World +Y means nothing here.
         f64vec3 up_at(f64vec3 const& position) const;
 
-        // Every object and light is an entity: a Transform, plus a
-        // Renderable or a Light (render/components.hpp).
+        // Every object, light and camera is an entity: a Transform, plus a
+        // Renderable or a Light (render/components.hpp), or a Camera
+        // (render/camera.hpp).
         entt::registry registry;
+
+        // The camera the frame is drawn from: an entity with a Transform and
+        // a Camera. Anything that moves it does so through its Transform,
+        // before update() composes world transforms, or it draws a frame
+        // late.
+        entt::entity camera = entt::null;
 
         Star star;
 
@@ -131,8 +138,6 @@ namespace encke
         // a two-colour environment cannot know about.
         f32vec3 ground_albedo{0.0f};   // linear
         f32     sky_fill = 0.0f;
-
-        Camera camera;
 
     private:
         // A mesh at `position` from the pole, flat material.

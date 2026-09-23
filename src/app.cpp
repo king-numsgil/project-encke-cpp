@@ -257,8 +257,11 @@ namespace encke
         // moved to the pole, so its directions pass through unchanged.
         if (optional<CameraPose> const pose = initial_camera())
         {
-            scene_.camera.position = scene_.origin() + pose->eye;
-            fly_.aim(scene_.camera, pose->target - pose->eye, pose->up);
+            // The test scene's camera is a root, so its local transform is
+            // its world one.
+            Transform& camera = scene_.registry.get<Transform>(scene_.camera);
+            camera.position   = scene_.origin() + pose->eye;
+            fly_.aim(camera, pose->target - pose->eye, pose->up);
         }
         log::info("scene: %zu entities, %zu renderables, %zu lights",
                   scene_.registry.view<Transform>().size(),
@@ -413,7 +416,10 @@ namespace encke
             .slow  = either(SDL_SCANCODE_LALT, SDL_SCANCODE_RALT),
         };
 
-        fly_.update(scene_.camera, input, seconds);
+        if (Transform* const camera = scene_.registry.try_get<Transform>(scene_.camera))
+        {
+            fly_.update(*camera, input, seconds);
+        }
     }
 
     void App::draw_ui()
@@ -576,9 +582,11 @@ namespace encke
             }
             last_tick_ = tick;
 
+            // Flown first: the camera is an entity, and Scene::update is what
+            // composes its world transform for this frame.
+            fly(events, delta);
             assets_.update();
             scene_.update(seconds, assets_);
-            fly(events, delta);
 
             draw_ui();
 

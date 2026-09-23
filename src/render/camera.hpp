@@ -13,19 +13,30 @@ namespace encke
     //
     // The rule, stated once: **every world -> view transform happens in f64 on
     // the CPU.** A shader that sees a world-space position is a bug.
+
+    // The lens of a camera entity. Its pose is the entity's WorldTransform,
+    // looking down the entity's -Z with +Y up, so parenting the entity to a
+    // ship puts the camera in the ship. Scale is not read.
     struct Camera
     {
-        f64vec3 position{0.0};
-
-        // View -> world rotation. Constructor order is (w, x, y, z).
-        f64quat orientation{1.0, 0.0, 0.0, 0.0};
-
         f64 vertical_fov = 1.2217304763960306;   // 70 degrees
 
         // 5 cm: close enough for instruments in a cockpit. With reversed-Z and
         // an infinite far plane, pulling this in costs far less precision than
         // it would with a conventional depth mapping.
         f64 near_plane = 0.05;
+    };
+
+    // A camera as the renderer takes it: its world pose and its lens, from
+    // one frame's extract.
+    struct CameraView
+    {
+        f64vec3 position{0.0};
+
+        // View -> world rotation. Constructor order is (w, x, y, z).
+        f64quat orientation{1.0, 0.0, 0.0, 0.0};
+
+        Camera lens;
 
         // World -> view, full f64 including the translation.
         f64mat4 view() const;

@@ -901,10 +901,11 @@ namespace encke
 
         // Everything below reads the list, not the scene's registry.
         extract(scene, assets, render_list_);
+        CameraView const& camera = render_list_.camera;
 
         // The first frame has no last one, so nothing has moved.
-        f64mat4 const view                = scene.camera.view();
-        f64mat4 const projection          = scene.camera.projection(aspect);
+        f64mat4 const view                = camera.view();
+        f64mat4 const projection          = camera.projection(aspect);
         f64mat4 const previous_view       = previous_view_.value_or(view);
         f64mat4 const previous_projection = previous_view_.has_value() ? previous_projection_
                                                                        : projection;
@@ -920,15 +921,15 @@ namespace encke
         // Direction and strength of the star from where the camera is: the
         // whole scene is small against an astronomical unit, so one direction
         // and one illuminance serve every pixel.
-        f64vec3 const sun_world   = scene.star.direction_from(scene.camera.position);
+        f64vec3 const sun_world   = scene.star.direction_from(camera.position);
         f64vec3 const sun_view    = f64vec3{view * f64vec4{sun_world, 0.0}};
-        f32 const     illuminance = static_cast<f32>(scene.star.illuminance_at(scene.camera.position));
+        f32 const     illuminance = static_cast<f32>(scene.star.illuminance_at(camera.position));
 
         // The environment's ground is a Lambertian plane lit by the star:
         // radiance albedo * E * cos(elevation) / pi, zero once the star sets.
         constexpr f64 kPi = 3.14159265358979323846;
 
-        f64vec3 const up_world  = scene.up_at(scene.camera.position);
+        f64vec3 const up_world  = scene.up_at(camera.position);
         f64vec3 const up_view   = glm::normalize(f64vec3{view * f64vec4{up_world, 0.0}});
         f64 const     sun_up    = std::max(glm::dot(up_world, sun_world), 0.0);
         f32vec3 const ground    = scene.ground_albedo * scene.star.colour *
@@ -939,7 +940,7 @@ namespace encke
         u32 const light_count  = static_cast<u32>(render_list_.lights.size());
         u32 const object_count = static_cast<u32>(render_list_.objects.size());
 
-        plan_shadows(scene, render_list_.lights, aspect, shadow_plan_);
+        plan_shadows(camera, scene.star, render_list_.lights, aspect, shadow_plan_);
 
         f32 const shadow_far = config::kShadowDistance;
 

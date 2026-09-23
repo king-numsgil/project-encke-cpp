@@ -386,10 +386,16 @@ namespace encke
         }
 
         // Standing 16 m from the pole at eye height, facing across the field.
-        f64 const facing   = 0.25;
-        camera.position    = origin_ + f64vec3{16.0 * std::sin(facing), 1.7, 16.0 * std::cos(facing)};
-        camera.orientation = glm::angleAxis(facing, f64vec3{0.0, 1.0, 0.0}) *
-                             glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0});
+        f64 const facing = 0.25;
+        camera           = registry.create();
+        registry.emplace<Transform>(
+            camera, Transform{
+                        .position = origin_ + f64vec3{16.0 * std::sin(facing), 1.7,
+                                                      16.0 * std::cos(facing)},
+                        .rotation = glm::angleAxis(facing, f64vec3{0.0, 1.0, 0.0}) *
+                                    glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0}),
+                    });
+        registry.emplace<Camera>(camera);
     }
 
     f64vec3 Scene::up_at(f64vec3 const& position) const
@@ -432,9 +438,8 @@ namespace encke
             transform.rotation = glm::angleAxis(seconds * spin.rate, glm::normalize(spin.axis));
         });
 
-        // The camera is not animated or in the registry: the app flies it
-        // (render/fly_camera). Last frame's transforms, for motion vectors,
-        // are the renderer's to keep.
+        // Last frame's transforms, for motion vectors, are the renderer's to
+        // keep, the camera's included.
         propagate_transforms(registry);
     }
 }

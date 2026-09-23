@@ -17,8 +17,25 @@ namespace encke
         // Per-frame, so once each per run.
         static bool warned_objects = false;
         static bool warned_lights  = false;
+        static bool warned_camera  = false;
 
         entt::registry const& registry = scene.registry;
+
+        if (registry.valid(scene.camera) && registry.all_of<WorldTransform, Camera>(scene.camera))
+        {
+            WorldTransform const& world = registry.get<WorldTransform>(scene.camera);
+            list.camera = CameraView{
+                .position    = world.position,
+                .orientation = world.rotation,
+                .lens        = registry.get<Camera>(scene.camera),
+            };
+        }
+        else if (!warned_camera)
+        {
+            log::warn("extract: the scene's camera has no Transform or Camera; drawing from "
+                      "the last one");
+            warned_camera = true;
+        }
 
         for (auto const [entity, world, renderable] :
              registry.view<WorldTransform const, Renderable const>().each())
