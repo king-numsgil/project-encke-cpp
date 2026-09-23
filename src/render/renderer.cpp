@@ -834,27 +834,42 @@ namespace encke
         model.min = f64vec3{source.min};
         model.max = f64vec3{source.max};
 
-        for (GltfPrimitive const& primitive : source.primitives)
+        // Each primitive once, however many nodes instance its mesh.
+        for (GltfMesh const& source_mesh : source.meshes)
         {
-            optional<u32> const mesh = geometry_.add(primitive.vertices, primitive.indices);
-            if (!mesh.has_value())
+            ModelMesh& mesh = model.meshes.emplace_back();
+            for (GltfPrimitive const& primitive : source_mesh.primitives)
             {
-                return nullopt;
+                optional<u32> const id = geometry_.add(primitive.vertices, primitive.indices);
+                if (!id.has_value())
+                {
+                    return nullopt;
+                }
+
+                GltfMaterial const& material = source.materials[primitive.material];
+                f64vec3 const       min{primitive.min};
+                f64vec3 const       max{primitive.max};
+
+                mesh.parts.push_back(ModelPart{
+                    .mesh          = *id,
+                    .material      = first_material + primitive.material,
+                    .albedo        = material.base_colour,
+                    .roughness     = material.roughness,
+                    .metallic      = material.metallic,
+                    .emissive      = material.emissive,
+                    .bounds_centre = (min + max) * 0.5,
+                    .bounds_radius = glm::length(max - min) * 0.5,
+                });
             }
+        }
 
-            GltfMaterial const& material = source.materials[primitive.material];
-            f64vec3 const       min{primitive.min};
-            f64vec3 const       max{primitive.max};
-
-            model.parts.push_back(ModelPart{
-                .mesh          = *mesh,
-                .material      = first_material + primitive.material,
-                .albedo        = material.base_colour,
-                .roughness     = material.roughness,
-                .metallic      = material.metallic,
-                .emissive      = material.emissive,
-                .bounds_centre = (min + max) * 0.5,
-                .bounds_radius = glm::length(max - min) * 0.5,
+        for (GltfNode const& node : source.nodes)
+        {
+            model.nodes.push_back(ModelNode{
+                .name   = node.name,
+                .parent = node.parent,
+                .local  = f64mat4{node.local},
+                .mesh   = node.mesh,
             });
         }
 

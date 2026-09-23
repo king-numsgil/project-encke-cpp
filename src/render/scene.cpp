@@ -92,22 +92,42 @@ namespace encke
                                   glm::mat4_cast(orientation) *
                                   glm::scale(f64mat4{1.0}, f64vec3{scale});
 
-        for (ModelPart const& part : model.parts)
+        // Parents precede children, so each node's parent is already
+        // composed when it is reached.
+        vector<f64mat4> world(model.nodes.size());
+        for (size_t index = 0; index < model.nodes.size(); ++index)
         {
-            SceneObject object;
-            object.mesh           = part.mesh;
-            object.material       = part.material;
-            object.albedo         = part.albedo;
-            object.roughness      = part.roughness;
-            object.metallic       = part.metallic;
-            object.emissive       = part.emissive * luminance;
-            object.position       = position;
-            object.scale          = f64vec3{scale};
-            object.model          = transform;
-            object.previous_model = transform;
-            object.bounds_centre  = f64vec3{transform * f64vec4{part.bounds_centre, 1.0}};
-            object.bounds_radius  = part.bounds_radius * scale;
-            objects.push_back(object);
+            ModelNode const& node = model.nodes[index];
+            world[index] = (node.parent.has_value() ? world[*node.parent] : transform) * node.local;
+
+            if (!node.mesh.has_value())
+            {
+                continue;
+            }
+
+            // A node may scale, unevenly too; the longest axis bounds it.
+            f64mat4 const& matrix  = world[index];
+            f64 const      stretch = std::max({glm::length(f64vec3{matrix[0]}),
+                                               glm::length(f64vec3{matrix[1]}),
+                                               glm::length(f64vec3{matrix[2]})});
+
+            for (ModelPart const& part : model.meshes[*node.mesh].parts)
+            {
+                SceneObject object;
+                object.mesh           = part.mesh;
+                object.material       = part.material;
+                object.albedo         = part.albedo;
+                object.roughness      = part.roughness;
+                object.metallic       = part.metallic;
+                object.emissive       = part.emissive * luminance;
+                object.position       = f64vec3{matrix[3]};
+                object.scale          = f64vec3{scale};
+                object.model          = matrix;
+                object.previous_model = matrix;
+                object.bounds_centre  = f64vec3{matrix * f64vec4{part.bounds_centre, 1.0}};
+                object.bounds_radius  = part.bounds_radius * stretch;
+                objects.push_back(object);
+            }
         }
     }
 

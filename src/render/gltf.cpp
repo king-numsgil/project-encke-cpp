@@ -377,7 +377,7 @@ namespace encke
         // False only for a malformed primitive; unsupported ones are skipped
         // with a warning and leave `out` empty.
         bool convert_primitive(fastgltf::Asset const& asset, fastgltf::Primitive const& primitive,
-                               f32mat4 const& world, GltfPrimitive& out)
+                               GltfPrimitive& out)
         {
             if (primitive.type != fastgltf::PrimitiveType::Triangles)
             {
@@ -448,35 +448,6 @@ namespace encke
                 }
             }
 
-            // Bake the node transform in. Normals go through the inverse
-            // transpose; a mirroring transform reverses the winding, and
-            // the tangent frame's handedness with it.
-            f32mat3 const linear{world};
-            f32mat3 const normal_matrix = glm::transpose(glm::inverse(linear));
-            bool const    mirrored      = glm::determinant(linear) < 0.0f;
-
-            for (Vertex& vertex : out.vertices)
-            {
-                vertex.position = f32vec3{world * f32vec4{vertex.position, 1.0f}};
-                if (has_normals)
-                {
-                    vertex.normal = glm::normalize(normal_matrix * vertex.normal);
-                }
-                if (has_tangents)
-                {
-                    vertex.tangent = f32vec4{glm::normalize(linear * f32vec3{vertex.tangent}),
-                                             mirrored ? -vertex.tangent.w : vertex.tangent.w};
-                }
-            }
-
-            if (mirrored)
-            {
-                for (size_t at = 0; at + 2 < out.indices.size(); at += 3)
-                {
-                    std::swap(out.indices[at + 1], out.indices[at + 2]);
-                }
-            }
-
             if (!has_normals)
             {
                 generate_normals(out.vertices, out.indices);
@@ -539,69 +510,155 @@ namespace encke
         // fully metallic and rough, as the spec defines it.
         optional<u32> default_material;
 
+        // Each mesh is converted once, the first time a node uses it, so
+        // meshes the default scene never instances are not loaded at all.
+        vector<optional<u32>> mesh_ids(asset.meshes.size());
+        auto load_mesh = [&](size_t source_index) -> optional<u32> {
+            if (mesh_ids[source_index].has_value())
+            {
+                return mesh_ids[source_index];
+            }
+
+            fastgltf::Mesh const& source = asset.meshes[source_index];
+            GltfMesh              mesh;
+            mesh.name = string{source.name.c_str()};
+
+            for (fastgltf::Primitive const& primitive : source.primitives)
+            {
+                GltfPrimitive converted;
+                if (!convert_primitive(asset, primitive, converted))
+                {
+                    return nullopt;
+                }
+                if (converted.vertices.empty())
+                {
+                    continue;
+                }
+
+                if (primitive.materialIndex.has_value())
+                {
+                    converted.material = static_cast<u32>(*primitive.materialIndex);
+                }
+                else
+                {
+                    if (!default_material.has_value())
+                    {
+                        default_material = static_cast<u32>(model.materials.size());
+                        model.materials.emplace_back();
+                    }
+                    converted.material = *default_material;
+                }
+
+                mesh.primitives.push_back(std::move(converted));
+            }
+
+            mesh_ids[source_index] = static_cast<u32>(model.meshes.size());
+            model.meshes.push_back(std::move(mesh));
+            return mesh_ids[source_index];
+        };
+
+        // Depth first, so a parent is always pushed before its children.
+        // glTF forbids a node having two parents, so each is visited once.
         bool ok = true;
-        fastgltf::iterateSceneNodes(
-            asset, asset.defaultScene.value_or(0), fastgltf::math::fmat4x4(1.0f),
-            [&](fastgltf::Node& node, fastgltf::math::fmat4x4 const& matrix) {
-                if (!ok || !node.meshIndex.has_value())
+        auto visit = [&](size_t source_index, optional<u32> parent, auto& self) -> void {
+            fastgltf::Node const& source = asset.nodes[source_index];
+
+            GltfNode node;
+            node.name   = string{source.name.c_str()};
+            node.parent = parent;
+            node.local  = to_glm(fastgltf::getTransformMatrix(source));
+            if (source.meshIndex.has_value())
+            {
+                node.mesh = load_mesh(*source.meshIndex);
+                if (!node.mesh.has_value())
+                {
+                    ok = false;
+                    return;
+                }
+            }
+
+            u32 const index = static_cast<u32>(model.nodes.size());
+            model.nodes.push_back(std::move(node));
+
+            for (size_t const child : source.children)
+            {
+                self(child, index, self);
+                if (!ok)
                 {
                     return;
                 }
+            }
+        };
 
-                f32mat4 const world = to_glm(matrix);
-                for (fastgltf::Primitive const& primitive : asset.meshes[*node.meshIndex].primitives)
-                {
-                    GltfPrimitive converted;
-                    if (!convert_primitive(asset, primitive, world, converted))
-                    {
-                        ok = false;
-                        return;
-                    }
-                    if (converted.vertices.empty())
-                    {
-                        continue;
-                    }
-
-                    if (primitive.materialIndex.has_value())
-                    {
-                        converted.material = static_cast<u32>(*primitive.materialIndex);
-                    }
-                    else
-                    {
-                        if (!default_material.has_value())
-                        {
-                            default_material = static_cast<u32>(model.materials.size());
-                            model.materials.emplace_back();
-                        }
-                        converted.material = *default_material;
-                    }
-
-                    model.primitives.push_back(std::move(converted));
-                }
-            });
-
-        if (!ok)
+        for (size_t const root : asset.scenes[asset.defaultScene.value_or(0)].nodeIndices)
         {
-            return false;
+            visit(root, nullopt, visit);
+            if (!ok)
+            {
+                return false;
+            }
         }
-        if (model.primitives.empty())
+
+        // Model-space transforms, for the bounds, and to catch a mirroring
+        // one: a mirrored instance needs its winding reversed, which a mesh
+        // shared with unmirrored instances cannot have baked in.
+        vector<f32mat4> world(model.nodes.size());
+        model.min = f32vec3{std::numeric_limits<f32>::max()};
+        model.max = f32vec3{std::numeric_limits<f32>::lowest()};
+        size_t instances = 0;
+        size_t vertex_count = 0;
+
+        for (size_t index = 0; index < model.nodes.size(); ++index)
+        {
+            GltfNode const& node = model.nodes[index];
+            world[index] = node.parent.has_value() ? world[*node.parent] * node.local : node.local;
+
+            if (!node.mesh.has_value())
+            {
+                continue;
+            }
+
+            if (glm::determinant(f32mat3{world[index]}) < 0.0f)
+            {
+                log::warn("gltf: node \"%s\" mirrors its mesh; drawn with the wrong winding",
+                          node.name.c_str());
+            }
+
+            for (GltfPrimitive const& primitive : model.meshes[*node.mesh].primitives)
+            {
+                ++instances;
+                for (u32 corner = 0; corner < 8; ++corner)
+                {
+                    f32vec3 const local{(corner & 1u) != 0 ? primitive.max.x : primitive.min.x,
+                                        (corner & 2u) != 0 ? primitive.max.y : primitive.min.y,
+                                        (corner & 4u) != 0 ? primitive.max.z : primitive.min.z};
+                    f32vec3 const at{world[index] * f32vec4{local, 1.0f}};
+                    model.min = glm::min(model.min, at);
+                    model.max = glm::max(model.max, at);
+                }
+            }
+        }
+
+        if (instances == 0)
         {
             log::error("%s: no triangle primitives in the default scene", path.c_str());
             return false;
         }
 
-        model.min = model.primitives.front().min;
-        model.max = model.primitives.front().max;
-        size_t vertex_count = 0;
-        for (GltfPrimitive const& primitive : model.primitives)
+        size_t primitive_count = 0;
+        for (GltfMesh const& mesh : model.meshes)
         {
-            model.min = glm::min(model.min, primitive.min);
-            model.max = glm::max(model.max, primitive.max);
-            vertex_count += primitive.vertices.size();
+            primitive_count += mesh.primitives.size();
+            for (GltfPrimitive const& primitive : mesh.primitives)
+            {
+                vertex_count += primitive.vertices.size();
+            }
         }
 
-        log::info("gltf %s: %zu primitives, %zu vertices, %zu materials", path.c_str(),
-                  model.primitives.size(), vertex_count, model.materials.size());
+        log::info("gltf %s: %zu nodes, %zu meshes, %zu primitives drawn as %zu instances, "
+                  "%zu vertices, %zu materials", path.c_str(), model.nodes.size(),
+                  model.meshes.size(), primitive_count, instances, vertex_count,
+                  model.materials.size());
         return true;
     }
 }

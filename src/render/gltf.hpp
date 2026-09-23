@@ -26,9 +26,10 @@ namespace encke
         function<bool(MaterialMaps& maps)> decode;
     };
 
-    // One triangle list with one material, in the model's own space: node
-    // transforms are baked in. UVs are glTF's texture coordinates, 0..1 over
-    // the atlas, not metres; the renderer knows not to stretch them.
+    // One triangle list with one material, in its mesh's own space: no node
+    // transform is applied, so every node using the mesh shares it. UVs are
+    // glTF's texture coordinates, 0..1 over the atlas, not metres; the
+    // renderer knows not to stretch them.
     struct GltfPrimitive
     {
         vector<Vertex> vertices;
@@ -38,19 +39,40 @@ namespace encke
         f32vec3        max{0.0f};
     };
 
-    struct GltfModel
+    // A glTF mesh: its triangle primitives, loaded once however many nodes
+    // instance it. May be empty if every primitive was unsupported.
+    struct GltfMesh
     {
+        string                name;
         vector<GltfPrimitive> primitives;
-        vector<GltfMaterial>  materials;
-        f32vec3               min{0.0f};   // over every primitive
-        f32vec3               max{0.0f};
     };
 
-    // Reads a .gltf or .glb, the default scene's triangle primitives only.
-    // Tangents are generated where the file has none. Images may be embedded
-    // or external JPG/PNG files beside it; they are only located here, and
-    // decoded later by each material's `decode`. Unsupported features (texture
-    // coordinate sets other than 0, alpha blending and masking, double-sided
-    // materials, other primitive modes) are logged and ignored, not fatal.
+    // A node of the default scene. Parents come before their children, so
+    // one pass in order composes every node's model-space transform.
+    struct GltfNode
+    {
+        string        name;
+        optional<u32> parent;   // into GltfModel::nodes; none for a scene root
+        f32mat4       local{1.0f};
+        optional<u32> mesh;     // into GltfModel::meshes
+    };
+
+    struct GltfModel
+    {
+        vector<GltfMesh>     meshes;
+        vector<GltfNode>     nodes;
+        vector<GltfMaterial> materials;
+        f32vec3              min{0.0f};   // model space, over every instanced primitive
+        f32vec3              max{0.0f};
+    };
+
+    // Reads a .gltf or .glb: the default scene's node hierarchy and the
+    // triangle primitives of the meshes it instances. Tangents are generated
+    // where the file has none. Images may be embedded or external JPG/PNG
+    // files beside it; they are only located here, and decoded later by each
+    // material's `decode`. Unsupported features (texture coordinate sets
+    // other than 0, alpha blending and masking, double-sided materials,
+    // mirroring node transforms, other primitive modes) are logged and
+    // ignored, not fatal.
     bool load_gltf(string const& path, GltfModel& model);
 }

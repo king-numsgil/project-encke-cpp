@@ -17,15 +17,32 @@ namespace encke
         f32     metallic  = 1.0f;
         f32vec3 emissive{0.0f};   // relative; the scene scales it to luminance
 
-        // Model space, for shadow caster culling.
+        // In its mesh's own space, for shadow caster culling.
         f64vec3 bounds_centre{0.0};
         f64     bounds_radius = 0.0;
     };
 
-    struct Model
+    // One mesh, uploaded once and drawn once per node that uses it.
+    struct ModelMesh
     {
         vector<ModelPart> parts;
-        f64vec3           min{0.0};   // model space, over every part
+    };
+
+    // The file's node hierarchy, parents before children. A node's transform
+    // is relative to its parent's, or to the model when it has none.
+    struct ModelNode
+    {
+        string        name;
+        optional<u32> parent;   // into Model::nodes
+        f64mat4       local{1.0};
+        optional<u32> mesh;     // into Model::meshes
+    };
+
+    struct Model
+    {
+        vector<ModelMesh> meshes;
+        vector<ModelNode> nodes;
+        f64vec3           min{0.0};   // model space, over every instanced part
         f64vec3           max{0.0};
     };
 }

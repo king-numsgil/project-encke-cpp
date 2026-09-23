@@ -635,6 +635,27 @@ A glTF material is **non-tiling**: its UVs are 0..1 over an atlas, and the
 renderer sends `texture_scale = (1, 1, 1, 1)`, which makes the stretch
 exactly 1 at any object scale. `MaterialTextures::tiling` decides which.
 
+### glTF nodes: instanced, hierarchy kept
+
+`load_gltf` keeps the default scene's node tree rather than baking
+transforms into vertices. Each glTF mesh is converted and uploaded once, in
+its own space, and only if some node uses it; `Model::nodes` holds every
+node's local transform and parent, parents first. `Scene::add_model` composes
+them in one pass and makes one `SceneObject` per primitive per node, so a
+mesh used by eight nodes is eight draws from one range of the geometry pool.
+The hierarchy stops there: the scene is still flat, so moving a node means
+recomposing its subtree's objects. Node extras are not read.
+
+- **A mirroring node transform is logged and drawn with the wrong winding.**
+  A shared mesh cannot have its indices flipped for one instance; fixing it
+  needs `vkCmdSetFrontFace` and a separate indirect draw for mirrored
+  instances. No model here has one.
+- **`doubleSided` is ignored, and for Blender exports that is right.** Blender
+  sets it on every material whose backface culling is off, the default. A
+  Blender-made ship (hull, decks, props; tested and removed 2026-09-23) was
+  compared with culling disabled: no surface appeared, only back faces
+  leaking through cracks at wall joins.
+
 Known gaps:
 
 - No specular antialiasing. Normal-mapped metal at a distance sparkles; that
