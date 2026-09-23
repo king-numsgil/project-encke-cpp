@@ -33,6 +33,7 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(SDL3_image CONFIG REQUIRED)
 find_package(fastgltf CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
+find_package(cpuinfo CONFIG REQUIRED)
 
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
     "Shared download cache so each build directory does not refetch sources")
@@ -145,6 +146,7 @@ add_executable(encke
     src/core/log.cpp
     src/core/memory.cpp
 
+    src/platform/cpu.cpp
     src/platform/window.cpp
 
     src/render/camera.cpp
@@ -269,6 +271,7 @@ target_link_libraries(encke PUBLIC
     $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>
     fastgltf::fastgltf
     glm::glm
+    cpuinfo::cpuinfo
     encke_imgui
 )
 

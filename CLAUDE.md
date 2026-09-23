@@ -75,6 +75,7 @@ src/
     log.{hpp,cpp}     unbuffered stderr diagnostics, millisecond stamps
   platform/
     window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
+    cpu.{hpp,cpp}     physical and logical core counts, via pytorch/cpuinfo
   vulkan/
     context.{hpp,cpp}    volk, instance, validation, surface
     device.{hpp,cpp}     device selection, queues, submit_immediate
@@ -1075,8 +1076,17 @@ backend, so it has no equivalent failure mode.
 
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
-`sdl3`, `sdl3-image`, `glm`. Three come from CPM instead: mimalloc (see
-*Allocator*), and Dear ImGui and ImPlot.
+`sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`. Three come from CPM
+instead: mimalloc (see *Allocator*), and Dear ImGui and ImPlot.
+
+- **cpuinfo (pytorch/cpuinfo) is for sizing worker pools by physical core.**
+  Hyperthreads share a core's vector units and caches, so heavy SIMD workers
+  count physical cores; the plan is one core left for the window and Vulkan
+  thread. Only `platform/cpu.cpp` includes it. It builds on MinGW through
+  the vcpkg port unpatched. Debug builds print its `Debug (cpuinfo)` topology
+  trace to stdout at startup, because the port compiles the debug library
+  with that log level baked in; release is quiet. It reports the hardware,
+  not the process's affinity or container limits.
 
 - **sdl3-image needs its format features explicitly.** The port has no
   default features and builds with its stb backend off, so a bare

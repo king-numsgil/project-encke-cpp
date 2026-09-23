@@ -4,6 +4,7 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "platform/cpu.hpp"
 #include "render/gltf.hpp"
 #include "render/pixels.hpp"
 #include "ui/image_window.hpp"
@@ -207,6 +208,10 @@ namespace encke
     {
         log::init();
         log::info("allocator: %s", memory::backend_name());
+
+        CpuInfo const cpu = query_cpu();
+        log::info("cpu: %u physical cores, %u logical processors", cpu.physical_cores,
+                  cpu.logical_processors);
 
         // Must precede SDL_Init, which window_.init performs.
         if (!memory::install_sdl_allocator())
