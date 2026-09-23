@@ -75,9 +75,10 @@ namespace encke::gpu
         f32vec4 albedo_roughness;    // linear rgb, a roughness
         f32vec4 emissive_metallic;   // linear HDR rgb, a metallic
 
-        // x albedo, y normal, z occlusion-roughness-metalness: bindless
-        // sampled images. w the sampler. x is kNoTexture on an untextured
-        // object, and then none of the others is read.
+        // Bindless sampled images: x albedo, y normal, z occlusion-
+        // roughness-metalness, w emission. x is kNoTexture on an untextured
+        // object, and then none of the others is read. On a textured one, y
+        // and w may still be kNoTexture, and are then skipped.
         u32vec4 textures;
 
         // xyz the object's scale divided by the tile's width in metres; w the
@@ -134,11 +135,14 @@ namespace encke::gpu
 
         // Only the exposure passes read this.
         u32 exposure_histogram;      // u32 per bin, writable
+
+        // Trilinear anisotropic repeat, for every material texture.
+        u32 material_sampler;
     };
 
     static_assert(sizeof(Frame) == 240);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
     static_assert(sizeof(Object) == 320);
-    static_assert(sizeof(Push) == 116, "must fit the 128-byte guaranteed minimum");
+    static_assert(sizeof(Push) == 120, "must fit the 128-byte guaranteed minimum");
 }

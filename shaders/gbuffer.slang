@@ -9,9 +9,10 @@
 //
 // The layout is mirrored by the attachment formats in render/renderer.cpp.
 //
-// A textured object samples albedo, a tangent-space normal and packed
-// occlusion-roughness-metalness, and multiplies them by its factors, as glTF
-// does. An untextured one is its factors alone, exactly as before textures.
+// A textured object samples albedo, packed occlusion-roughness-metalness and,
+// where it has them, a tangent-space normal and an emission map, and
+// multiplies them by its factors, as glTF does. An untextured one is its
+// factors alone, exactly as before textures.
 
 import lib.bindless;
 import lib.gpu_types;
@@ -83,6 +84,7 @@ GBuffer fragment_main(VertexOut input)
     float3 albedo    = object.albedo_roughness.rgb;
     float  roughness = object.albedo_roughness.a;
     float  metallic  = object.emissive_metallic.a;
+    float3 emissive  = object.emissive_metallic.rgb;
     float  ao        = 1.0f;
     float3 normal    = normalize(input.normal);
 
@@ -90,10 +92,9 @@ GBuffer fragment_main(VertexOut input)
     // and the object from a push constant.
     if (object.textures.x != kNoTexture)
     {
-        SamplerState filter = g_samplers[NonUniformResourceIndex(object.textures.w)];
+        SamplerState filter = g_samplers[NonUniformResourceIndex(push.material_sampler)];
 
         float4 colour = g_textures[NonUniformResourceIndex(object.textures.x)].Sample(filter, input.uv);
-        float3 bumped = g_textures[NonUniformResourceIndex(object.textures.y)].Sample(filter, input.uv).xyz;
         float3 orm    = g_textures[NonUniformResourceIndex(object.textures.z)].Sample(filter, input.uv).rgb;
 
         albedo    *= colour.rgb;
@@ -101,19 +102,31 @@ GBuffer fragment_main(VertexOut input)
         roughness *= orm.g;
         metallic  *= orm.b;
 
-        // Tangent frame in view space, re-orthogonalised against the
-        // interpolated normal. The bitangent is the top of the image, which
-        // is where an OpenGL-convention normal map's green points.
-        float3 tangent   = normalize(input.tangent.xyz - normal * dot(normal, input.tangent.xyz));
-        float3 bitangent = cross(normal, tangent) * input.tangent.w;
+        if (object.textures.y != kNoTexture)
+        {
+            float3 bumped =
+                g_textures[NonUniformResourceIndex(object.textures.y)].Sample(filter, input.uv).xyz;
 
-        // Mips average normals to shorter vectors; normalising after the
-        // decode undoes that.
-        float3 perturbed = bumped * 2.0f - 1.0f;
-        // Normal strength, glTF's normalTexture.scale. Fixed at 2 for every
-        // material by eye; at 1 the maps read too flat under the low sun.
-        perturbed.xy *= 2.0f;
-        normal = normalize(tangent * perturbed.x + bitangent * perturbed.y + normal * perturbed.z);
+            // Tangent frame in view space, re-orthogonalised against the
+            // interpolated normal. The bitangent is the top of the image,
+            // which is where an OpenGL-convention normal map's green points.
+            float3 tangent   = normalize(input.tangent.xyz - normal * dot(normal, input.tangent.xyz));
+            float3 bitangent = cross(normal, tangent) * input.tangent.w;
+
+            // Mips average normals to shorter vectors; normalising after
+            // the decode undoes that.
+            float3 perturbed = bumped * 2.0f - 1.0f;
+            // Normal strength, glTF's normalTexture.scale. Fixed at 2 for
+            // every material by eye; at 1 the maps read too flat under the
+            // low sun.
+            perturbed.xy *= 2.0f;
+            normal = normalize(tangent * perturbed.x + bitangent * perturbed.y + normal * perturbed.z);
+        }
+
+        if (object.textures.w != kNoTexture)
+        {
+            emissive *= g_textures[NonUniformResourceIndex(object.textures.w)].Sample(filter, input.uv).rgb;
+        }
     }
 
     GBuffer output;
@@ -121,6 +134,6 @@ GBuffer fragment_main(VertexOut input)
     output.normal    = encode_normal(normal);
     output.material  = float2(roughness, metallic);
     output.motion    = previous_uv - current_uv;
-    output.emissive  = float4(object.emissive_metallic.rgb, 1.0f);
+    output.emissive  = float4(emissive, 1.0f);
     return output;
 }

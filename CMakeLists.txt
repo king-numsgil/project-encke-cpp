@@ -31,6 +31,7 @@ find_package(volk CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 find_package(SDL3_image CONFIG REQUIRED)
+find_package(fastgltf CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm" CACHE PATH
@@ -148,9 +149,11 @@ add_executable(encke
 
     src/render/camera.cpp
     src/render/fly_camera.cpp
+    src/render/gltf.cpp
     src/render/material.cpp
     src/render/mesh.cpp
     src/render/pipeline.cpp
+    src/render/pixels.cpp
     src/render/renderer.cpp
     src/render/scene.cpp
     src/render/shadows.cpp
@@ -261,6 +264,7 @@ target_link_libraries(encke PUBLIC
     GPUOpen::VulkanMemoryAllocator
     SDL3::SDL3
     $<IF:$<TARGET_EXISTS:SDL3_image::SDL3_image-shared>,SDL3_image::SDL3_image-shared,SDL3_image::SDL3_image-static>
+    fastgltf::fastgltf
     glm::glm
     encke_imgui
 )
@@ -269,6 +273,18 @@ if(ENCKE_USE_MIMALLOC)
     target_link_libraries(encke PUBLIC
         $<IF:$<TARGET_EXISTS:mimalloc-static>,mimalloc-static,mimalloc>
     )
+
+    # The C++ runtime must be linked statically, or mimalloc replaces
+    # operator new only in code compiled into encke.exe. A replacement does
+    # not reach into a DLL on Windows: libstdc++-6.dll keeps its own new,
+    # which is malloc, so anything it allocates and encke's inlined code
+    # frees crosses heaps. std::filesystem::path did exactly that and
+    # corrupted mimalloc's pages; MI_DEBUG=FULL caught it as
+    # "mi_free_size: invalid pointer". Statically linked, libstdc++'s
+    # references to operator new resolve to mimalloc's like everything else.
+    if(MINGW)
+        target_link_options(encke PRIVATE -static-libstdc++ -static-libgcc)
+    endif()
 endif()
 
 target_compile_definitions(encke PUBLIC

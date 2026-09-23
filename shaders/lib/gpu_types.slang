@@ -57,7 +57,8 @@ public struct GpuObject
     public float4x4 normal_view;
     public float4   albedo_roughness;
     public float4   emissive_metallic;
-    public uint4    textures;          // x albedo, y normal, z ORM, w sampler; x kNoTexture if untextured
+    public uint4    textures;          // x albedo, y normal, z ORM, w emission; x kNoTexture if
+                                       // untextured, y and w kNoTexture when that map is absent
     public float4   texture_scale;     // xyz scale / tile width (m), w tile width / height
 };
 
@@ -101,6 +102,8 @@ public struct Push
 
     // Only the exposure passes read these.
     public uint exposure_histogram; // u32 per bin, writable
+
+    public uint material_sampler;   // trilinear anisotropic repeat, every material texture
 };
 
 // Byte strides must match sizeof() on the C++ side.

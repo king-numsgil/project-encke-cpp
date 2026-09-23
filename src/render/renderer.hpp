@@ -1,8 +1,11 @@
 #pragma once
 
 #include "render/config.hpp"
+#include "render/gltf.hpp"
+#include "render/gpu_types.hpp"
 #include "render/material.hpp"
 #include "render/mesh.hpp"
+#include "render/model.hpp"
 #include "render/pipeline.hpp"
 #include "render/shadows.hpp"
 #include "vulkan/bindless.hpp"
@@ -100,6 +103,12 @@ namespace encke
         // place, and rebuilds per-image semaphores. Caller waits for idle.
         bool on_swapchain_changed(VulkanSwapchain const& swapchain);
 
+        // Uploads a loaded glTF's meshes and textures and returns the ids a
+        // scene places it by. Blocking, startup-time work, and it registers
+        // new bindless slots: call it before the first frame, or with the
+        // device idle.
+        optional<Model> add_model(GltfModel const& model);
+
         // `overlay` may be null.
         FrameResult draw(VulkanSwapchain const& swapchain, Scene const& scene, Overlay* overlay);
 
@@ -165,14 +174,18 @@ namespace encke
         };
 
         // Filled once at startup and read-only after, so unlike the targets
-        // they need no per-frame barriers.
+        // they need no per-frame barriers. A tiling material repeats over
+        // the surface at `tile` metres, stretched by the object's scale; a
+        // non-tiling one is a glTF atlas whose UVs are used as they are.
         struct MaterialTextures
         {
             Texture albedo;
             Texture normal;
             Texture orm;
-            u32vec4 handles{BindlessSet::kInvalid};   // as gpu::Object::textures
-            f32vec2 tile{1.0f};                       // metres per repeat
+            Texture emission;
+            u32vec4 handles{gpu::kNoTexture};   // as gpu::Object::textures
+            f32vec2 tile{1.0f};                 // metres per repeat
+            bool    tiling = true;
         };
 
         bool create_targets(VkExtent2D extent);
@@ -259,12 +272,21 @@ namespace encke
         ComputePipeline  histogram_pipeline_;
         ComputePipeline  adapt_pipeline_;
 
-        array<Mesh, kMeshKindCount> meshes_;
+        // SceneObject::mesh and ::material index these. The built-ins come
+        // first, in MeshKind and MaterialKind order, then whatever add_model
+        // loaded. Neither type is movable, hence the pointers. materials_[0]
+        // is MaterialKind::None and stays null.
+        vector<std::unique_ptr<Mesh>>             meshes_;
+        vector<std::unique_ptr<MaterialTextures>> materials_;
+        VkSampler                            material_sampler_        = VK_NULL_HANDLE;
+        u32                                  material_sampler_handle_ = BindlessSet::kInvalid;
 
-        // Indexed by MaterialKind; None's slot stays empty.
-        array<MaterialTextures, kMaterialKindCount> materials_;
-        VkSampler                                   material_sampler_        = VK_NULL_HANDLE;
-        u32                                         material_sampler_handle_ = BindlessSet::kInvalid;
+        // 1x1 white, standing in for a glTF material's missing albedo or
+        // ORM map so its factors alone decide.
+        Texture white_srgb_;
+        Texture white_unorm_;
+        u32     white_srgb_handle_  = BindlessSet::kInvalid;
+        u32     white_unorm_handle_ = BindlessSet::kInvalid;
 
         VkCommandPool command_pool_ = VK_NULL_HANDLE;
 

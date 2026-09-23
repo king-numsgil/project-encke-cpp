@@ -57,7 +57,7 @@ namespace encke
                             f32 roughness, f32 metallic, f32vec3 emissive)
     {
         SceneObject object;
-        object.mesh      = mesh;
+        object.mesh      = static_cast<u32>(mesh);
         object.position  = origin_ + position;
         object.scale     = scale;
         object.albedo    = srgb_to_linear(albedo_srgb);
@@ -81,11 +81,37 @@ namespace encke
     SceneObject& Scene::add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material)
     {
         SceneObject& object = add(mesh, position, scale, f32vec3{1.0f}, 1.0f, 1.0f);
-        object.material     = material;
+        object.material     = static_cast<u32>(material);
         return object;
     }
 
-    void Scene::build_test_planet()
+    void Scene::add_model(Model const& model, f64vec3 const& position, f64quat const& orientation,
+                          f64 scale, f32 luminance)
+    {
+        f64mat4 const transform = glm::translate(f64mat4{1.0}, position) *
+                                  glm::mat4_cast(orientation) *
+                                  glm::scale(f64mat4{1.0}, f64vec3{scale});
+
+        for (ModelPart const& part : model.parts)
+        {
+            SceneObject object;
+            object.mesh           = part.mesh;
+            object.material       = part.material;
+            object.albedo         = part.albedo;
+            object.roughness      = part.roughness;
+            object.metallic       = part.metallic;
+            object.emissive       = part.emissive * luminance;
+            object.position       = position;
+            object.scale          = f64vec3{scale};
+            object.model          = transform;
+            object.previous_model = transform;
+            object.bounds_centre  = f64vec3{transform * f64vec4{part.bounds_centre, 1.0}};
+            object.bounds_radius  = part.bounds_radius * scale;
+            objects.push_back(object);
+        }
+    }
+
+    void Scene::build_test_planet(Model const* helmet)
     {
         objects.clear();
         lights.clear();
@@ -100,8 +126,8 @@ namespace encke
         // object field can treat it as flat.
         {
             SceneObject planet;
-            planet.mesh          = MeshKind::Planet;
-            planet.material      = MaterialKind::Ground;
+            planet.mesh          = static_cast<u32>(MeshKind::Planet);
+            planet.material      = static_cast<u32>(MaterialKind::Ground);
             planet.position      = origin_;
             planet.albedo        = f32vec3{1.0f};
             planet.roughness     = 1.0f;
@@ -149,13 +175,38 @@ namespace encke
         add(MeshKind::Cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, MaterialKind::MetalPlates);
 
         // A table: a slab on legs, whose underside only a spot can light.
-        add(MeshKind::Cube, {-3.0, 1.0, -2.0}, {3.0, 0.12, 1.8}, MaterialKind::Planks);
+        f64vec3 const table{-3.0, 1.0, -2.0};
+        f64 const     table_thickness = 0.12;
+        add(MeshKind::Cube, table, {3.0, table_thickness, 1.8}, MaterialKind::Planks);
         for (f64 const x : {-4.3, -1.7})
         {
             for (f64 const z : {-2.75, -1.25})
             {
                 add(MeshKind::Cube, {x, 0.47, z}, {0.12, 0.94, 0.12}, MaterialKind::Planks);
             }
+        }
+
+        // The glTF sample helmet, life-size, resting on the table and
+        // turned three-quarters toward the camera's starting point. glTF
+        // models face +Z.
+        if (helmet != nullptr)
+        {
+            constexpr f64 kHelmetWidth = 0.32;   // metres, across its widest axis
+            constexpr f64 kHelmetYaw   = 0.9;    // radians about +Y
+
+            f64vec3 const extent = helmet->max - helmet->min;
+            f64 const     scale  = kHelmetWidth / std::max({extent.x, extent.y, extent.z});
+
+            // Its lowest point on the table top: yaw leaves height alone.
+            f64vec3 const at{table.x, table.y + table_thickness * 0.5 - helmet->min.y * scale,
+                             table.z};
+
+            // The visor's glow, in cd/m^2 for an emissive factor of 1:
+            // bright enough to read in daylight, well under the lamp heads.
+            constexpr f32 kVisorLuminance = 2.0e4f;
+
+            add_model(*helmet, origin_ + at, glm::angleAxis(kHelmetYaw, f64vec3{0.0, 1.0, 0.0}),
+                      scale, kVisorLuminance);
         }
 
         // Crates.
@@ -258,8 +309,7 @@ namespace encke
         f64 const facing   = 0.25;
         camera.position    = origin_ + f64vec3{16.0 * std::sin(facing), 1.7, 16.0 * std::cos(facing)};
         camera.orientation = glm::angleAxis(facing, f64vec3{0.0, 1.0, 0.0}) *
-                             glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0});
-        previous_camera    = camera;
+                             glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0});        previous_camera    = camera;
     }
 
     void Scene::update(f64 seconds)

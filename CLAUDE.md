@@ -59,9 +59,10 @@ maps, a G-buffer pass, compute light clustering, compute lighting and a tonemap
 pass. The test scene is the north pole of an Earth-sized planet, strewn with
 boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
 cascades), shadowed spot lights on masts and a ring of point lamps, with the
-Moon overhead at its real distance. All geometry is generated in code (cube, UV
-sphere, planet). The ground and about half the objects carry CC0 PBR textures
-from ambientCG; the rest keep flat materials. A Dear ImGui overlay shows frame
+Moon overhead at its real distance. The built-in geometry is generated in code
+(cube, UV sphere, planet); glTF models load through fastgltf, and the Khronos
+DamagedHelmet sits on the table. The ground and about half the objects carry
+CC0 PBR textures from ambientCG; the rest keep flat materials. A Dear ImGui overlay shows frame
 and per-pass GPU timings, graphed with ImPlot.
 
 ```
@@ -94,6 +95,9 @@ src/
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
     scene.{hpp,cpp}      f64 world: test planet, star, objects, lights
     material.{hpp,cpp}   MaterialKind, loading and packing a texture set with SDL3_image
+    gltf.{hpp,cpp}       glTF -> CPU meshes and packed material images, via fastgltf
+    model.hpp            a loaded model as renderer mesh and material ids, for the scene
+    pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
     mesh.{hpp,cpp}       Vertex, Mesh, procedural cube, sphere, pole-relative planet
     config.hpp           every renderer capacity and tuning constant
     shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
@@ -120,6 +124,7 @@ shaders/
     colour.slang         sRGB <-> linear, luminance
 assets/
   textures/            one directory per ambientCG set; CREDITS.md says where each came from
+  models/              glTF files; CREDITS.md holds their licences
 ```
 
 **Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
@@ -396,7 +401,7 @@ the same formula the CPU uses for a fixed EV. Every knob is in
   lamp heads on screen against empty sky, the camera exposes for the lamps and
   anything dimmer darkens. Centre weighting would change that; there is none.
 
-The push constants are at 116 of the guaranteed 128 bytes.
+The push constants are at 120 of the guaranteed 128 bytes.
 
 ## Shadows — built, first draft
 
@@ -489,6 +494,10 @@ object (`gpu::kNoTexture` in `Object::textures.x`) skips the samples and the
 factors are the material, exactly as before textures, so the untextured part
 of the scene renders unchanged.
 
+`Object::textures` is albedo, normal, ORM, emission. On a textured object
+albedo and ORM are always sampled; normal and emission may be `kNoTexture`
+and are then skipped. The sampler is `push.material_sampler`, one for all.
+
 - **Mips are blitted at load**, level from level, in one blocking
   `submit_immediate` per texture. An `_SRGB` blit filters in linear space, so
   the albedo mips need no special handling. The normal map's mips average to
@@ -526,6 +535,10 @@ non-uniformly scaled sphere would smear.
 - **Planet**: planar, the local x and z in metres. Exact on the flat ground
   near the pole; far out the coordinates are large enough to lose f32
   precision, and by then every sample comes from the smallest mips.
+
+A glTF material is **non-tiling**: its UVs are 0..1 over an atlas, and the
+renderer sends `texture_scale = (1, 1, 1, 1)`, which makes the stretch
+exactly 1 at any object scale. `MaterialTextures::tiling` decides which.
 
 Known gaps:
 
@@ -742,6 +755,17 @@ mimalloc backs `operator new`/`delete` (via `mimalloc-new-delete.h` in
 it), SDL3 through `SDL_SetMemoryFunctions`, Dear ImGui and ImPlot through
 `ImGui::SetAllocatorFunctions`, and Vulkan host allocations through
 `memory::vulkan_callbacks()`.
+
+**With mimalloc on, the C++ runtime is linked statically** (`-static-libstdc++
+-static-libgcc`). A replacement `operator new` does not reach into a DLL on
+Windows, so with `libstdc++-6.dll` anything the DLL allocates (it uses
+`malloc`) and encke's inlined code frees goes to mimalloc's `free`. That
+corrupts mimalloc's pages silently and crashes somewhere unrelated later, or
+spins a core on a garbage lock. `std::filesystem::path` was the first thing to
+do it; a build with `-DMI_DEBUG_FULL=ON` named it at once as
+`mi_free_size: invalid pointer`, with a stack through `~path`. That is the
+tool for any future heap corruption under mimalloc. Check with `objdump -p
+encke.exe`: no `libstdc++-6.dll` among the imports.
 
 `ENCKE_USE_MIMALLOC` gates all of it. When off, `vulkan_callbacks()` returns
 `nullptr`, which is exactly what Vulkan reads as "use the driver's allocator",

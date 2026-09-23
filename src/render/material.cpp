@@ -3,10 +3,8 @@
 #include "render/material.hpp"
 
 #include "core/log.hpp"
+#include "render/pixels.hpp"
 
-#include <SDL3_image/SDL_image.h>
-
-#include <cstring>
 #include <utility>
 
 namespace encke
@@ -41,51 +39,8 @@ namespace encke
 
         string map_path(char const* set, char const* map)
         {
-            return string{ENCKE_ASSET_DIR} + "/textures/" + set + "/" + set + "_" + kResolution +
-                   "_" + map + ".jpg";
-        }
-
-        struct Pixels
-        {
-            u32        width  = 0;
-            u32        height = 0;
-            vector<u8> rgba;
-        };
-
-        // Decodes any format SDL_image reads into tightly packed RGBA8. A
-        // greyscale map comes back with the grey in R, G and B.
-        bool load_rgba(string const& path, Pixels& pixels)
-        {
-            SDL_Surface* const loaded = IMG_Load(path.c_str());
-            if (loaded == nullptr)
-            {
-                log::error("%s: %s", path.c_str(), SDL_GetError());
-                return false;
-            }
-
-            SDL_Surface* const rgba = SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32);
-            SDL_DestroySurface(loaded);
-            if (rgba == nullptr)
-            {
-                log::error("%s: conversion to RGBA failed: %s", path.c_str(), SDL_GetError());
-                return false;
-            }
-
-            pixels.width  = static_cast<u32>(rgba->w);
-            pixels.height = static_cast<u32>(rgba->h);
-
-            // The surface's rows may be padded; the upload wants them packed.
-            size_t const row = size_t{pixels.width} * 4;
-            pixels.rgba.resize(row * pixels.height);
-            auto const* const source = static_cast<u8 const*>(rgba->pixels);
-            for (u32 y = 0; y < pixels.height; ++y)
-            {
-                std::memcpy(pixels.rgba.data() + row * y,
-                            source + static_cast<size_t>(rgba->pitch) * y, row);
-            }
-
-            SDL_DestroySurface(rgba);
-            return true;
+            return asset_path(string{"textures/"} + set + "/" + set + "_" + kResolution + "_" +
+                              map + ".jpg");
         }
 
         bool same_size(Pixels const& a, Pixels const& b, string const& path)
@@ -113,7 +68,7 @@ namespace encke
             }
 
             pixels.emplace();
-            return load_rgba(path, *pixels) && same_size(reference, *pixels, path);
+            return load_pixels(path, *pixels) && same_size(reference, *pixels, path);
         }
     }
 
@@ -135,9 +90,9 @@ namespace encke
         string const normal_path    = map_path(set, "NormalGL");
         string const roughness_path = map_path(set, "Roughness");
 
-        if (!load_rgba(colour_path, colour) ||
-            !load_rgba(normal_path, normal) || !same_size(colour, normal, normal_path) ||
-            !load_rgba(roughness_path, roughness) ||
+        if (!load_pixels(colour_path, colour) ||
+            !load_pixels(normal_path, normal) || !same_size(colour, normal, normal_path) ||
+            !load_pixels(roughness_path, roughness) ||
             !same_size(colour, roughness, roughness_path))
         {
             return false;

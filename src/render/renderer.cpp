@@ -311,21 +311,27 @@ namespace encke
         vector<Vertex> vertices;
         vector<u32>    indices;
 
+        // In MeshKind order, so a MeshKind is its own mesh id.
+        auto add_mesh = [&] {
+            meshes_.push_back(std::make_unique<Mesh>());
+            return meshes_.back()->init(allocator, device, vertices, indices);
+        };
+
         build_cube(vertices, indices);
-        if (!meshes_[static_cast<u32>(MeshKind::Cube)].init(allocator, device, vertices, indices))
+        if (!add_mesh())
         {
             return false;
         }
 
         build_sphere(vertices, indices, kSphereSlices, kSphereStacks);
-        if (!meshes_[static_cast<u32>(MeshKind::Sphere)].init(allocator, device, vertices, indices))
+        if (!add_mesh())
         {
             return false;
         }
 
         build_planet(vertices, indices, kEarthRadius, kPlanetSlices, kPlanetFirstRing,
                      kPlanetRingGrowth);
-        if (!meshes_[static_cast<u32>(MeshKind::Planet)].init(allocator, device, vertices, indices))
+        if (!add_mesh())
         {
             return false;
         }
@@ -596,6 +602,22 @@ namespace encke
 
         VkImageLayout const read_only = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
 
+        array<u8, 4> const white{{255, 255, 255, 255}};
+        if (!white_srgb_.init(*allocator_, *device_, {VK_FORMAT_R8G8B8A8_SRGB, "white srgb"}, 1, 1,
+                              white) ||
+            !white_unorm_.init(*allocator_, *device_, {VK_FORMAT_R8G8B8A8_UNORM, "white unorm"}, 1,
+                               1, white))
+        {
+            return false;
+        }
+        white_srgb_handle_  = bindless_.add_sampled_image(white_srgb_.view(), read_only);
+        white_unorm_handle_ = bindless_.add_sampled_image(white_unorm_.view(), read_only);
+
+        // In MaterialKind order, so a MaterialKind is its own material id.
+        // None has no textures.
+        materials_.clear();
+        materials_.push_back(nullptr);
+
         for (u32 index = 1; index < kMaterialKindCount; ++index)
         {
             auto const kind = static_cast<MaterialKind>(index);
@@ -606,7 +628,8 @@ namespace encke
                 return false;
             }
 
-            MaterialTextures& material = materials_[index];
+            materials_.push_back(std::make_unique<MaterialTextures>());
+            MaterialTextures& material = *materials_.back();
             u32 const width  = images.width;
             u32 const height = images.height;
 
@@ -627,12 +650,92 @@ namespace encke
                 bindless_.add_sampled_image(material.albedo.view(), read_only),
                 bindless_.add_sampled_image(material.normal.view(), read_only),
                 bindless_.add_sampled_image(material.orm.view(), read_only),
-                material_sampler_handle_,
+                gpu::kNoTexture,
             };
-            material.tile = material_tile_metres(kind);
+            material.tile   = material_tile_metres(kind);
+            material.tiling = true;
         }
 
         return true;
+    }
+
+    optional<Model> Renderer::add_model(GltfModel const& source)
+    {
+        VkImageLayout const read_only = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+
+        auto upload = [&](Texture& texture, optional<Pixels> const& pixels, VkFormat format,
+                          char const* name) -> optional<u32> {
+            if (!pixels.has_value())
+            {
+                return gpu::kNoTexture;
+            }
+            if (!texture.init(*allocator_, *device_, {format, name}, pixels->width, pixels->height,
+                              pixels->rgba))
+            {
+                return nullopt;
+            }
+            return bindless_.add_sampled_image(texture.view(), read_only);
+        };
+
+        u32 const first_material = static_cast<u32>(materials_.size());
+        for (GltfMaterial const& material : source.materials)
+        {
+            materials_.push_back(std::make_unique<MaterialTextures>());
+            MaterialTextures& textures = *materials_.back();
+
+            optional<u32> const albedo   = upload(textures.albedo, material.albedo,
+                                                  VK_FORMAT_R8G8B8A8_SRGB, "gltf albedo");
+            optional<u32> const normal   = upload(textures.normal, material.normal,
+                                                  VK_FORMAT_R8G8B8A8_UNORM, "gltf normal");
+            optional<u32> const orm      = upload(textures.orm, material.orm,
+                                                  VK_FORMAT_R8G8B8A8_UNORM, "gltf orm");
+            optional<u32> const emission = upload(textures.emission, material.emission,
+                                                  VK_FORMAT_R8G8B8A8_SRGB, "gltf emission");
+            if (!albedo || !normal || !orm || !emission)
+            {
+                return nullopt;
+            }
+
+            // Albedo and ORM are always sampled once an object is textured,
+            // so a missing one is white; normal and emission are skipped.
+            textures.handles = u32vec4{
+                *albedo != gpu::kNoTexture ? *albedo : white_srgb_handle_,
+                *normal,
+                *orm != gpu::kNoTexture ? *orm : white_unorm_handle_,
+                *emission,
+            };
+            textures.tiling = false;
+        }
+
+        Model model;
+        model.min = f64vec3{source.min};
+        model.max = f64vec3{source.max};
+
+        for (GltfPrimitive const& primitive : source.primitives)
+        {
+            meshes_.push_back(std::make_unique<Mesh>());
+            if (!meshes_.back()->init(*allocator_, *device_, primitive.vertices, primitive.indices))
+            {
+                return nullopt;
+            }
+
+            GltfMaterial const& material = source.materials[primitive.material];
+            f64vec3 const       min{primitive.min};
+            f64vec3 const       max{primitive.max};
+
+            model.parts.push_back(ModelPart{
+                .mesh          = static_cast<u32>(meshes_.size() - 1),
+                .material      = first_material + primitive.material,
+                .albedo        = material.base_colour,
+                .roughness     = material.roughness,
+                .metallic      = material.metallic,
+                .emissive      = material.emissive,
+                .bounds_centre = (min + max) * 0.5,
+                .bounds_radius = glm::length(max - min) * 0.5,
+            });
+        }
+
+        return model;
     }
 
     bool Renderer::create_targets(VkExtent2D extent)
@@ -871,12 +974,17 @@ namespace encke
 
             u32vec4 textures{gpu::kNoTexture};
             f32vec4 texture_scale{0.0f};
-            if (object.material != MaterialKind::None)
+            if (object.material != 0)
             {
-                MaterialTextures const& material = materials_[static_cast<u32>(object.material)];
-                textures      = material.handles;
-                texture_scale = f32vec4{f32vec3{object.scale} / material.tile.x,
-                                        material.tile.x / material.tile.y};
+                MaterialTextures const& material = *materials_[object.material];
+                textures = material.handles;
+
+                // (1, 1, 1, 1) makes the shader's stretch exactly 1, which
+                // leaves an atlas's UVs alone whatever the object's scale.
+                texture_scale = material.tiling
+                                    ? f32vec4{f32vec3{object.scale} / material.tile.x,
+                                              material.tile.x / material.tile.y}
+                                    : f32vec4{1.0f};
             }
 
             gpu::Object const gpu_object{
@@ -974,6 +1082,7 @@ namespace encke
             .shadow_sampler     = shadow_sampler_handle_,
             .exposure_image     = BindlessSet::kInvalid,
             .exposure_histogram = exposure_histogram_handle_,
+            .material_sampler   = material_sampler_handle_,
         };
 
         u32 const shadow_view_count = shadow_plan_.cascade_count + shadow_plan_.spot_count;
@@ -1067,7 +1176,7 @@ namespace encke
                 push.object_index = index * kMaxObjects + object;
                 vkCmdPushConstants(command, shadow_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                                    sizeof(push), &push);
-                meshes_[static_cast<u32>(scene.objects[object].mesh)].draw(command);
+                meshes_[scene.objects[object].mesh]->draw(command);
             }
 
             vkCmdEndRendering(command);
@@ -1114,7 +1223,7 @@ namespace encke
                 push.object_index = index;
                 vkCmdPushConstants(command, gbuffer_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
                                    sizeof(push), &push);
-                meshes_[static_cast<u32>(scene.objects[index].mesh)].draw(command);
+                meshes_[scene.objects[index].mesh]->draw(command);
             }
 
             vkCmdEndRendering(command);
@@ -1608,17 +1717,10 @@ namespace encke
         exposure_histogram_.shutdown();
         exposure_image_.shutdown();
 
-        for (Mesh& mesh : meshes_)
-        {
-            mesh.shutdown();
-        }
-
-        for (MaterialTextures& material : materials_)
-        {
-            material.albedo.shutdown();
-            material.normal.shutdown();
-            material.orm.shutdown();
-        }
+        meshes_.clear();
+        materials_.clear();
+        white_srgb_.shutdown();
+        white_unorm_.shutdown();
 
         if (material_sampler_ != VK_NULL_HANDLE)
         {

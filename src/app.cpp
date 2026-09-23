@@ -4,6 +4,8 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "render/gltf.hpp"
+#include "render/pixels.hpp"
 #include "ui/image_window.hpp"
 
 #include <algorithm>
@@ -153,7 +155,21 @@ namespace encke
         }
         window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
 
-        scene_.build_test_planet();
+        // Not fatal: without it the scene is only missing the helmet.
+        optional<Model> helmet;
+        {
+            GltfModel file;
+            if (load_gltf(asset_path("models/DamagedHelmet/DamagedHelmet.glb"), file))
+            {
+                helmet = renderer_.add_model(file);
+            }
+            if (!helmet.has_value())
+            {
+                log::warn("the helmet did not load; the table stays empty");
+            }
+        }
+
+        scene_.build_test_planet(helmet.has_value() ? &*helmet : nullptr);
         fly_.reset(scene_.camera);
         log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
 

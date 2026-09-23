@@ -3,6 +3,7 @@
 #include "render/camera.hpp"
 #include "render/material.hpp"
 #include "render/mesh.hpp"
+#include "render/model.hpp"
 
 namespace encke
 {
@@ -19,8 +20,10 @@ namespace encke
         f64mat4 model{1.0};
         f64mat4 previous_model{1.0};   // last frame, for motion vectors
 
-        MeshKind     mesh     = MeshKind::Cube;
-        MaterialKind material = MaterialKind::None;
+        // Renderer ids. A MeshKind or MaterialKind converts to its own id;
+        // loaded models get ids past them. Material 0 is untextured.
+        u32 mesh     = static_cast<u32>(MeshKind::Cube);
+        u32 material = static_cast<u32>(MaterialKind::None);
 
         // With a material these are glTF-style factors on its maps; without,
         // they are the whole material.
@@ -91,7 +94,16 @@ namespace encke
         // handful of spot and point lights, with the Moon overhead at its real
         // distance. Places the camera at the edge of the field. Built far from the world origin on purpose, so any
         // regression in camera-relative rendering shows up as visible jitter.
-        void build_test_planet();
+        //
+        // `helmet`, when given, is set on the table.
+        void build_test_planet(Model const* helmet);
+
+        // One object per part, sharing a transform: `orientation` and a
+        // uniform `scale` about the model's origin, which lands at
+        // `position` (world). Emissive factors are relative, and `luminance`
+        // turns 1 into cd/m^2.
+        void add_model(Model const& model, f64vec3 const& position, f64quat const& orientation,
+                       f64 scale, f32 luminance);
 
         // Advances animation and rolls this frame's transforms, camera
         // included, into last frame's, which is what motion vectors are
