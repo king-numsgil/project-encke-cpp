@@ -401,6 +401,21 @@ the same formula the CPU uses for a fixed EV. Every knob is in
   lamp heads on screen against empty sky, the camera exposes for the lamps and
   anything dimmer darkens. Centre weighting would change that; there is none.
 
+Known gaps, seen 2026-09-22 and not yet worked on:
+
+- **Bright frames wash colour out, most visibly on the glTF helmet.** Looking
+  at it from a mostly shaded view (the table in the tower's shadow), the meter
+  raises exposure and sunlit colour goes pale; from a mostly dark view the
+  same helmet looks right. sRGB was checked and ruled out: every colour map
+  and target is `_SRGB` where it should be, and ORM and normals are `UNORM`.
+- **The tonemap is the likely cause.** `shaders/tonemap.slang` is Narkowicz's
+  per-channel ACES fit, which desaturates bright values toward white, and its
+  own comment calls it a placeholder for AgX or PBR Neutral. The test is two
+  captures of one view, same pinned exposure, ACES against the replacement.
+- **Ambient is flat and unshadowed.** `Scene::ambient` is one colour added
+  everywhere times albedo and AO, a stand-in for bounce light, so shade gets a
+  uniform bluish fill that lowers contrast. Normal maps do not show in it.
+
 The push constants are at 120 of the guaranteed 128 bytes.
 
 ## Shadows — built, first draft
