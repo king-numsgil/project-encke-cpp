@@ -94,8 +94,8 @@ namespace encke::gpu
     inline constexpr u32 kNoTexture = ~0u;
 
     // One struct for every pass; each pass reads the fields it needs. All
-    // pipelines share one push range, so this is pushed once per pass and the
-    // object index patched per draw.
+    // pipelines share one push range, so this is pushed once per pass. Draws
+    // carry their object index as firstInstance, not in here.
     struct Push
     {
         u32 frame;
@@ -111,7 +111,7 @@ namespace encke::gpu
         u32 gbuffer_depth;
         u32 hdr_storage;
         u32 hdr_sampled;
-        u32 object_index;
+        u32 pad0;                    // keeps ui_transform 16-byte aligned
 
         f32 exposure;
         u32 debug_view;
@@ -126,9 +126,9 @@ namespace encke::gpu
         f32     debug_gain;          // motion view magnification
 
         u32 shadow_views;            // ShadowView per map, cascades first
-        u32 shadow_matrices;         // f32mat4 per (shadow view, object): object -> map clip.
-                                     // The shadow pass sets object_index to
-                                     // view * kMaxObjects + object and reads it directly.
+        u32 shadow_matrices;         // f32mat4 per (shadow view, object): object -> map clip,
+                                     // at view * kMaxObjects + object, which the shadow
+                                     // pass's firstInstance carries.
         u32 shadow_sampler;          // comparison sampler
 
         // 1x1 R32F holding the adapted EV100. Patched per pass like

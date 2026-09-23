@@ -72,7 +72,7 @@ namespace encke
         }
     }
 
-    bool load_material(MaterialKind kind, MaterialImages& images)
+    bool load_material(MaterialKind kind, MaterialMaps& maps)
     {
         if (kind == MaterialKind::None)
         {
@@ -108,27 +108,27 @@ namespace encke
 
         size_t const texels = size_t{colour.width} * colour.height;
 
-        images.width  = colour.width;
-        images.height = colour.height;
-        images.albedo = std::move(colour.rgba);
-        images.normal = std::move(normal.rgba);
-        images.orm.resize(texels * 4);
-
+        Pixels orm{.width = colour.width, .height = colour.height, .rgba = vector<u8>(texels * 4)};
         for (size_t texel = 0; texel < texels; ++texel)
         {
             size_t const at = texel * 4;
-            images.albedo[at + 3] = 255;
-            images.normal[at + 3] = 255;
+            colour.rgba[at + 3] = 255;
+            normal.rgba[at + 3] = 255;
 
-            images.orm[at + 0] = occlusion.has_value() ? occlusion->rgba[at] : u8{255};
-            images.orm[at + 1] = roughness.rgba[at];
-            images.orm[at + 2] = metalness.has_value() ? metalness->rgba[at] : u8{0};
-            images.orm[at + 3] = 255;
+            orm.rgba[at + 0] = occlusion.has_value() ? occlusion->rgba[at] : u8{255};
+            orm.rgba[at + 1] = roughness.rgba[at];
+            orm.rgba[at + 2] = metalness.has_value() ? metalness->rgba[at] : u8{0};
+            orm.rgba[at + 3] = 255;
         }
 
-        log::info("material %s: %ux%u%s%s", set, images.width, images.height,
+        log::info("material %s: %ux%u%s%s", set, colour.width, colour.height,
                   occlusion.has_value() ? ", occlusion" : "",
                   metalness.has_value() ? ", metalness" : "");
+
+        maps          = MaterialMaps{};
+        maps.albedo   = std::move(colour);
+        maps.normal   = std::move(normal);
+        maps.orm      = std::move(orm);
         return true;
     }
 

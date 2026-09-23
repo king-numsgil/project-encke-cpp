@@ -74,14 +74,53 @@ namespace encke
         shutdown();
     }
 
+    VkDeviceSize Texture::upload_bytes(u32 width, u32 height)
+    {
+        return VkDeviceSize{width} * height * kBytesPerTexel;
+    }
+
     bool Texture::init(VulkanAllocator const& allocator, VulkanDevice const& device,
                        Config const& config, u32 width, u32 height, span<u8 const> texels)
     {
-        if (width == 0 || height == 0 ||
-            texels.size() != u64{width} * height * kBytesPerTexel)
+        if (texels.size() != upload_bytes(width, height))
         {
             log::error("%s: %zu bytes of texels for %ux%u", config.name, texels.size(), width,
                        height);
+            return false;
+        }
+
+        if (!create(allocator, device, config, width, height))
+        {
+            return false;
+        }
+
+        Buffer staging;
+        if (!staging.init_mapped(allocator, texels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+        {
+            shutdown();
+            return false;
+        }
+        std::memcpy(staging.mapped(), texels.data(), texels.size());
+
+        bool const uploaded = device.submit_immediate([&](VkCommandBuffer command) {
+            record_upload(command, staging.handle(), 0);
+        });
+
+        if (!uploaded)
+        {
+            shutdown();
+            return false;
+        }
+
+        return true;
+    }
+
+    bool Texture::create(VulkanAllocator const& allocator, VulkanDevice const& device,
+                         Config const& config, u32 width, u32 height)
+    {
+        if (width == 0 || height == 0)
+        {
+            log::error("%s: %ux%u is empty", config.name, width, height);
             return false;
         }
 
@@ -103,6 +142,8 @@ namespace encke
 
         allocator_  = &allocator;
         device_     = &device;
+        width_      = width;
+        height_     = height;
         mip_levels_ = static_cast<u32>(std::bit_width(std::max(width, height)));
 
         VkImageCreateInfo const image_info{
@@ -173,14 +214,11 @@ namespace encke
             return false;
         }
 
-        Buffer staging;
-        if (!staging.init_mapped(allocator, texels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-        {
-            shutdown();
-            return false;
-        }
-        std::memcpy(staging.mapped(), texels.data(), texels.size());
+        return true;
+    }
 
+    void Texture::record_upload(VkCommandBuffer command, VkBuffer staging, VkDeviceSize offset) const
+    {
         constexpr VkPipelineStageFlags2 kCopy = VK_PIPELINE_STAGE_2_COPY_BIT;
         constexpr VkPipelineStageFlags2 kBlit = VK_PIPELINE_STAGE_2_BLIT_BIT;
         constexpr VkPipelineStageFlags2 kRead = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
@@ -192,52 +230,44 @@ namespace encke
         constexpr VkImageLayout  kReadOnly = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
 
         u32 const levels = mip_levels_;
+        u32 const width  = width_;
+        u32 const height = height_;
 
-        bool const uploaded = device.submit_immediate([&](VkCommandBuffer command) {
-            transition(command, image_, {0, levels, VK_IMAGE_LAYOUT_UNDEFINED, kDst,
-                                         VK_PIPELINE_STAGE_2_NONE, 0, kCopy | kBlit, kWrite});
+        transition(command, image_, {0, levels, VK_IMAGE_LAYOUT_UNDEFINED, kDst,
+                                     VK_PIPELINE_STAGE_2_NONE, 0, kCopy | kBlit, kWrite});
 
-            VkBufferImageCopy const region{
-                .bufferOffset      = 0,
-                .bufferRowLength   = 0,
-                .bufferImageHeight = 0,
-                .imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-                .imageOffset       = {0, 0, 0},
-                .imageExtent       = {width, height, 1},
-            };
-            vkCmdCopyBufferToImage(command, staging.handle(), image_, kDst, 1, &region);
+        VkBufferImageCopy const region{
+            .bufferOffset      = offset,
+            .bufferRowLength   = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .imageOffset       = {0, 0, 0},
+            .imageExtent       = {width, height, 1},
+        };
+        vkCmdCopyBufferToImage(command, staging, image_, kDst, 1, &region);
 
-            // Each level is read by the blit that fills the next, then handed
-            // to the fragment stage. The last is written and never read here.
-            for (u32 level = 1; level < levels; ++level)
-            {
-                VkPipelineStageFlags2 const filled = level == 1 ? kCopy : kBlit;
-                transition(command, image_, {level - 1, 1, kDst, kSrc, filled, kWrite, kBlit, kSource});
-
-                VkImageBlit const blit{
-                    .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1},
-                    .srcOffsets     = {{0, 0, 0},
-                                       {level_size(width, level - 1), level_size(height, level - 1), 1}},
-                    .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
-                    .dstOffsets     = {{0, 0, 0},
-                                       {level_size(width, level), level_size(height, level), 1}},
-                };
-                vkCmdBlitImage(command, image_, kSrc, image_, kDst, 1, &blit, VK_FILTER_LINEAR);
-
-                transition(command, image_, {level - 1, 1, kSrc, kReadOnly, kBlit, 0, kRead, kSampled});
-            }
-
-            VkPipelineStageFlags2 const last = levels == 1 ? kCopy : kBlit;
-            transition(command, image_, {levels - 1, 1, kDst, kReadOnly, last, kWrite, kRead, kSampled});
-        });
-
-        if (!uploaded)
+        // Each level is read by the blit that fills the next, then handed
+        // to the fragment stage. The last is written and never read here.
+        for (u32 level = 1; level < levels; ++level)
         {
-            shutdown();
-            return false;
+            VkPipelineStageFlags2 const filled = level == 1 ? kCopy : kBlit;
+            transition(command, image_, {level - 1, 1, kDst, kSrc, filled, kWrite, kBlit, kSource});
+
+            VkImageBlit const blit{
+                .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1},
+                .srcOffsets     = {{0, 0, 0},
+                                   {level_size(width, level - 1), level_size(height, level - 1), 1}},
+                .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
+                .dstOffsets     = {{0, 0, 0},
+                                   {level_size(width, level), level_size(height, level), 1}},
+            };
+            vkCmdBlitImage(command, image_, kSrc, image_, kDst, 1, &blit, VK_FILTER_LINEAR);
+
+            transition(command, image_, {level - 1, 1, kSrc, kReadOnly, kBlit, 0, kRead, kSampled});
         }
 
-        return true;
+        VkPipelineStageFlags2 const last = levels == 1 ? kCopy : kBlit;
+        transition(command, image_, {levels - 1, 1, kDst, kReadOnly, last, kWrite, kRead, kSampled});
     }
 
     void Texture::shutdown()
@@ -260,6 +290,8 @@ namespace encke
             allocation_ = nullptr;
         }
 
+        width_      = 0;
+        height_     = 0;
         mip_levels_ = 0;
         allocator_  = nullptr;
         device_     = nullptr;

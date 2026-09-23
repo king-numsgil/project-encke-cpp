@@ -1,14 +1,17 @@
 #pragma once
 
+#include "render/material.hpp"
 #include "render/mesh.hpp"
-#include "render/pixels.hpp"
 
 namespace encke
 {
-    // A glTF material, decoded and packed for upload. Factors are glTF's and
-    // multiply the maps. A missing map is nullopt; the renderer substitutes
-    // white for albedo and ORM, which leaves the factor alone, and skips the
-    // normal and emissive samples.
+    // A glTF material. Factors are glTF's and multiply the maps.
+    //
+    // The maps are not decoded here: `decode` does that, reading the model's
+    // images from bytes and paths it holds itself, so it can run on the
+    // material loader's worker after load_gltf has returned. It packs
+    // occlusion and metallic-roughness into one ORM map and leaves absent
+    // maps nullopt. Null when the material has no maps at all.
     struct GltfMaterial
     {
         f32vec3 base_colour{1.0f};   // linear
@@ -16,10 +19,11 @@ namespace encke
         f32     metallic  = 1.0f;
         f32vec3 emissive{0.0f};      // linear, emissiveFactor times KHR_materials_emissive_strength
 
-        optional<Pixels> albedo;     // sRGB
-        optional<Pixels> normal;     // tangent space, glTF convention, as encke's
-        optional<Pixels> orm;        // R occlusion, G roughness, B metalness
-        optional<Pixels> emission;   // sRGB
+        // The emissive factor is meant to be multiplied by a map; drawn
+        // without it before the map lands, the whole surface would glow.
+        bool has_emission_map = false;
+
+        function<bool(MaterialMaps& maps)> decode;
     };
 
     // One triangle list with one material, in the model's own space: node
@@ -44,7 +48,8 @@ namespace encke
 
     // Reads a .gltf or .glb, the default scene's triangle primitives only.
     // Tangents are generated where the file has none. Images may be embedded
-    // or external JPG/PNG files beside it. Unsupported features (texture
+    // or external JPG/PNG files beside it; they are only located here, and
+    // decoded later by each material's `decode`. Unsupported features (texture
     // coordinate sets other than 0, alpha blending and masking, double-sided
     // materials, other primitive modes) are logged and ignored, not fatal.
     bool load_gltf(string const& path, GltfModel& model);

@@ -81,7 +81,7 @@ public struct Push
     public uint gbuffer_depth;
     public uint hdr_storage;
     public uint hdr_sampled;
-    public uint object_index;
+    public uint pad0;              // keeps ui_transform 16-byte aligned
 
     public float exposure;
     public uint  debug_view;
@@ -96,8 +96,8 @@ public struct Push
     public float  debug_gain;      // motion view magnification
 
     public uint shadow_views;      // GpuShadowView per map, cascades first
-    public uint shadow_matrices;   // float4x4 per (shadow view, object); the shadow
-                                   // pass indexes it with object_index directly
+    public uint shadow_matrices;   // float4x4 per (shadow view, object), at
+                                   // view * max objects + object: the shadow pass's instance
     public uint shadow_sampler;    // comparison sampler
     public uint exposure_image;    // 1x1 R32F adapted EV100: storage handle in the exposure
                                    // pass, sampled in tonemap, where ~0 means use push.exposure

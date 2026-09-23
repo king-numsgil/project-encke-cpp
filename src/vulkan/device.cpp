@@ -133,6 +133,9 @@ namespace encke
         //  depthClamp -- shadow cascades clamp casters nearer the sun than
         //      the near plane instead of clipping them away.
         //  samplerAnisotropy -- material textures on ground seen edge-on.
+        //  multiDrawIndirect, drawIndirectFirstInstance -- each pass is one
+        //      indirect draw of many meshes, and firstInstance carries the
+        //      object index to the shader.
         bool require_features(FeatureChain const& have, FeatureChain& want, char const*& missing)
         {
             bool ok = true;
@@ -155,6 +158,8 @@ namespace encke
             ENCKE_REQUIRE(core.features.shaderStorageImageWriteWithoutFormat);
             ENCKE_REQUIRE(core.features.depthClamp);
             ENCKE_REQUIRE(core.features.samplerAnisotropy);
+            ENCKE_REQUIRE(core.features.multiDrawIndirect);
+            ENCKE_REQUIRE(core.features.drawIndirectFirstInstance);
 
             ENCKE_REQUIRE(v11.shaderDrawParameters);
 

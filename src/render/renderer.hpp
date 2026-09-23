@@ -1,9 +1,11 @@
 #pragma once
 
 #include "render/config.hpp"
+#include "render/geometry_pool.hpp"
 #include "render/gltf.hpp"
 #include "render/gpu_types.hpp"
 #include "render/material.hpp"
+#include "render/material_loader.hpp"
 #include "render/mesh.hpp"
 #include "render/model.hpp"
 #include "render/pipeline.hpp"
@@ -11,6 +13,7 @@
 #include "vulkan/bindless.hpp"
 #include "vulkan/buffer.hpp"
 #include "vulkan/image.hpp"
+#include "vulkan/staging.hpp"
 #include "vulkan/texture.hpp"
 #include "vulkan/timestamps.hpp"
 
@@ -168,6 +171,13 @@ namespace encke
         // empty if none was recorded.
         optional<Capture> take_capture();
 
+        // Every streamed material has been decoded and uploaded. Until then
+        // frames differ as materials land, so a capture waits for it.
+        bool streaming_idle() const
+        {
+            return loader_.idle() && decoded_.empty() && geometry_.idle();
+        }
+
         void    set_tonemap(Tonemap tonemap) { tonemap_ = tonemap; }
         Tonemap tonemap() const { return tonemap_; }
 
@@ -201,6 +211,10 @@ namespace encke
             Buffer shadow_views;
             Buffer shadow_matrices;
 
+            // VkDrawIndexedIndirectCommand: the G-buffer's at 0, then shadow
+            // view v's at (1 + v) * kMaxObjects.
+            Buffer draws;
+
             u32 frame_handle           = BindlessSet::kInvalid;
             u32 objects_handle         = BindlessSet::kInvalid;
             u32 lights_handle          = BindlessSet::kInvalid;
@@ -208,8 +222,8 @@ namespace encke
             u32 shadow_matrices_handle = BindlessSet::kInvalid;
         };
 
-        // Filled once at startup and read-only after, so unlike the targets
-        // they need no per-frame barriers. A tiling material repeats over
+        // Streamed in once and read-only after, so unlike the targets they
+        // need no per-frame barriers. A tiling material repeats over
         // the surface at `tile` metres, stretched by the object's scale; a
         // non-tiling one is a glTF atlas whose UVs are used as they are.
         struct MaterialTextures
@@ -221,12 +235,26 @@ namespace encke
             u32vec4 handles{gpu::kNoTexture};   // as gpu::Object::textures
             f32vec2 tile{1.0f};                 // metres per repeat
             bool    tiling = true;
+
+            // Objects draw with no emission until the maps land: set for a
+            // material whose emissive factor is meant to be masked by a map.
+            bool hide_emission = false;
         };
 
         bool create_targets(VkExtent2D extent);
         void register_targets(bool first_time);
         bool create_shadow_maps();
         bool create_materials();
+
+        // Takes what the loader has finished and, within this frame's staging
+        // budget, creates its textures and stages their texels. Call after
+        // the slot's fence and the acquire, before upload(), which then sees
+        // the new handles; the copies go into this frame's command buffer.
+        void stream_materials();
+
+        // Records the copies stream_materials() staged. First in the frame,
+        // outside any rendering scope.
+        void record_uploads(VkCommandBuffer command);
 
         // Also plans this frame's shadows, which record() then draws.
         void upload(Scene const& scene, VkExtent2D extent, FrameResources& resources);
@@ -279,10 +307,11 @@ namespace encke
         VkSampler                              shadow_sampler_        = VK_NULL_HANDLE;
         u32                                    shadow_sampler_handle_ = BindlessSet::kInvalid;
 
-        // This frame's shadow views and, per view, the objects that may cast
-        // into it. Written by upload(), read by record().
-        ShadowPlan                                     shadow_plan_;
-        array<vector<u32>, config::kShadowViewCount>   shadow_casters_;
+        // This frame's shadow views, and how many indirect draws upload()
+        // wrote for the G-buffer and for each view's casters. Read by record().
+        ShadowPlan                               shadow_plan_;
+        u32                                      gbuffer_draws_ = 0;
+        array<u32, config::kShadowViewCount>     shadow_draws_{};
 
         // Auto-exposure. The histogram is GPU-only and zeroed by the adapt
         // pass after reading, so it starts each frame empty. The EV100 image
@@ -302,6 +331,29 @@ namespace encke
         // Neutral keeps the most colour and hue of the three; see CLAUDE.md.
         Tonemap tonemap_ = Tonemap::PbrNeutral;
 
+        // Per-frame uploads. Decoded materials wait in decoded_ until the
+        // budget has room; pending_uploads_ are this frame's staged copies.
+        struct PendingUpload
+        {
+            Texture const* texture = nullptr;
+            VkBuffer       buffer  = VK_NULL_HANDLE;
+            VkDeviceSize   offset  = 0;
+        };
+
+        // A decoded material and how far through its maps (albedo, normal,
+        // ORM, emission, in that order, absent ones skipped) staging has
+        // got. Its handles go live with the last one.
+        struct StreamingMaterial
+        {
+            MaterialLoader::Decoded decoded;
+            u32                     staged = 0;
+        };
+
+        StagingArena              staging_;
+        MaterialLoader            loader_;
+        vector<StreamingMaterial> decoded_;
+        vector<PendingUpload>     pending_uploads_;
+
         // Host memory the swapchain image is copied into, created on the
         // first capture. `capture_` describes what the copy recorded.
         Buffer  capture_buffer_;
@@ -320,9 +372,9 @@ namespace encke
 
         // SceneObject::mesh and ::material index these. The built-ins come
         // first, in MeshKind and MaterialKind order, then whatever add_model
-        // loaded. Neither type is movable, hence the pointers. materials_[0]
-        // is MaterialKind::None and stays null.
-        vector<std::unique_ptr<Mesh>>             meshes_;
+        // loaded. MaterialTextures is not movable, hence the pointers.
+        // materials_[0] is MaterialKind::None and stays null.
+        GeometryPool                              geometry_;
         vector<std::unique_ptr<MaterialTextures>> materials_;
         VkSampler                            material_sampler_        = VK_NULL_HANDLE;
         u32                                  material_sampler_handle_ = BindlessSet::kInvalid;

@@ -2,9 +2,6 @@
 
 #include "render/mesh.hpp"
 
-#include "core/log.hpp"
-#include "vulkan/device.hpp"
-
 #include <cmath>
 
 namespace encke
@@ -226,46 +223,4 @@ namespace encke
                     });
     }
 
-    bool Mesh::init(VulkanAllocator const& allocator, VulkanDevice const& device,
-                    span<Vertex const> vertices, span<u32 const> indices)
-    {
-        if (vertices.empty() || indices.empty())
-        {
-            log::error("mesh needs both vertices and indices");
-            return false;
-        }
-
-        if (!vertices_.init_device(allocator, device, vertices.size() * sizeof(Vertex),
-                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data()))
-        {
-            return false;
-        }
-
-        if (!indices_.init_device(allocator, device, indices.size() * sizeof(u32),
-                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data()))
-        {
-            return false;
-        }
-
-        index_count_ = static_cast<u32>(indices.size());
-        log::info("mesh uploaded: %zu vertices, %u indices", vertices.size(), index_count_);
-        return true;
-    }
-
-    void Mesh::draw(VkCommandBuffer command) const
-    {
-        VkBuffer const     buffer = vertices_.handle();
-        VkDeviceSize const offset = 0;
-
-        vkCmdBindVertexBuffers(command, 0, 1, &buffer, &offset);
-        vkCmdBindIndexBuffer(command, indices_.handle(), 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(command, index_count_, 1, 0, 0, 0);
-    }
-
-    void Mesh::shutdown()
-    {
-        indices_.shutdown();
-        vertices_.shutdown();
-        index_count_ = 0;
-    }
 }

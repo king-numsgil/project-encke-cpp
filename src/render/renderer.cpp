@@ -170,6 +170,19 @@ namespace encke
             return 1.0f / (1.2f * std::exp2(ev100));
         }
 
+        // One mesh, one instance: `instance` reaches the shader as
+        // SV_VulkanInstanceID and says which object, or matrix, it is.
+        VkDrawIndexedIndirectCommand draw_command(GeometryPool::Range const& range, u32 instance)
+        {
+            return VkDrawIndexedIndirectCommand{
+                .indexCount    = range.index_count,
+                .instanceCount = 1,
+                .firstIndex    = range.first_index,
+                .vertexOffset  = static_cast<i32>(range.first_vertex),
+                .firstInstance = instance,
+            };
+        }
+
         void set_viewport(VkCommandBuffer command, VkExtent2D extent)
         {
             VkViewport const viewport = flipped_viewport(static_cast<f32>(extent.width),
@@ -277,6 +290,14 @@ namespace encke
                 return false;
             }
 
+            if (!resources.draws.init_mapped(
+                    allocator, u64{1 + kShadowViewCount} * kMaxObjects *
+                                   sizeof(VkDrawIndexedIndirectCommand),
+                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT))
+            {
+                return false;
+            }
+
             resources.shadow_views_handle = bindless_.add_storage_buffer(
                 resources.shadow_views.handle(), resources.shadow_views.size());
             resources.shadow_matrices_handle = bindless_.add_storage_buffer(
@@ -308,13 +329,21 @@ namespace encke
         exposure_sampled_handle_ =
             bindless_.add_sampled_image(exposure_image_.view(), VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 
+        if (!geometry_.init(allocator, device, config::kGeometryVertexCapacity,
+                            config::kGeometryIndexCapacity, kFramesInFlight))
+        {
+            return false;
+        }
+
         vector<Vertex> vertices;
         vector<u32>    indices;
 
-        // In MeshKind order, so a MeshKind is its own mesh id.
+        // First into an empty pool, in MeshKind order, so a MeshKind is its
+        // own mesh id. They upload with the first frame.
+        u32  expected = 0;
         auto add_mesh = [&] {
-            meshes_.push_back(std::make_unique<Mesh>());
-            return meshes_.back()->init(allocator, device, vertices, indices);
+            optional<u32> const mesh = geometry_.add(vertices, indices);
+            return mesh.has_value() && *mesh == expected++;
         };
 
         build_cube(vertices, indices);
@@ -613,98 +642,192 @@ namespace encke
         white_srgb_handle_  = bindless_.add_sampled_image(white_srgb_.view(), read_only);
         white_unorm_handle_ = bindless_.add_sampled_image(white_unorm_.view(), read_only);
 
+        if (!staging_.init(*allocator_, config::kStagingBytesPerFrame, kFramesInFlight))
+        {
+            return false;
+        }
+
         // In MaterialKind order, so a MaterialKind is its own material id.
-        // None has no textures.
+        // None has no textures. The rest start untextured -- kNoTexture, so
+        // their objects draw with flat factors -- and fill in as the loader
+        // finishes them.
         materials_.clear();
         materials_.push_back(nullptr);
+        loader_.start();
 
         for (u32 index = 1; index < kMaterialKindCount; ++index)
         {
             auto const kind = static_cast<MaterialKind>(index);
 
-            MaterialImages images;
-            if (!load_material(kind, images))
-            {
-                return false;
-            }
-
             materials_.push_back(std::make_unique<MaterialTextures>());
             MaterialTextures& material = *materials_.back();
-            u32 const width  = images.width;
-            u32 const height = images.height;
-
-            if (!material.albedo.init(*allocator_, *device_,
-                                      {VK_FORMAT_R8G8B8A8_SRGB, "material albedo"}, width, height,
-                                      images.albedo) ||
-                !material.normal.init(*allocator_, *device_,
-                                      {VK_FORMAT_R8G8B8A8_UNORM, "material normal"}, width,
-                                      height, images.normal) ||
-                !material.orm.init(*allocator_, *device_,
-                                   {VK_FORMAT_R8G8B8A8_UNORM, "material orm"}, width, height,
-                                   images.orm))
-            {
-                return false;
-            }
-
-            material.handles = u32vec4{
-                bindless_.add_sampled_image(material.albedo.view(), read_only),
-                bindless_.add_sampled_image(material.normal.view(), read_only),
-                bindless_.add_sampled_image(material.orm.view(), read_only),
-                gpu::kNoTexture,
-            };
             material.tile   = material_tile_metres(kind);
             material.tiling = true;
+
+            loader_.submit(MaterialLoader::Job{
+                .material = index,
+                .name     = material_name(kind),
+                .decode   = [kind](MaterialMaps& maps) { return load_material(kind, maps); },
+            });
         }
 
         return true;
     }
 
-    optional<Model> Renderer::add_model(GltfModel const& source)
+    void Renderer::stream_materials()
     {
+        for (MaterialLoader::Decoded& decoded : loader_.take())
+        {
+            decoded_.push_back(StreamingMaterial{.decoded = std::move(decoded), .staged = 0});
+        }
+
         VkImageLayout const read_only = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
 
-        auto upload = [&](Texture& texture, optional<Pixels> const& pixels, VkFormat format,
-                          char const* name) -> optional<u32> {
-            if (!pixels.has_value())
-            {
-                return gpu::kNoTexture;
-            }
-            if (!texture.init(*allocator_, *device_, {format, name}, pixels->width, pixels->height,
-                              pixels->rgba))
-            {
-                return nullopt;
-            }
-            return bindless_.add_sampled_image(texture.view(), read_only);
-        };
-
-        u32 const first_material = static_cast<u32>(materials_.size());
-        for (GltfMaterial const& material : source.materials)
+        // In completion order, map by map, as many as fit. A map that does
+        // not fit waits, and so does everything behind it, so materials land
+        // in the order they were decoded. A material's handles go live only
+        // with its last map, so nothing samples a half-uploaded set; the
+        // earlier maps' copies were recorded in earlier frames, which the
+        // queue has ordered ahead of this one.
+        size_t done = 0;
+        for (; done < decoded_.size(); ++done)
         {
+            StreamingMaterial&             entry   = decoded_[done];
+            MaterialLoader::Decoded const& decoded = entry.decoded;
+            if (!decoded.ok)
+            {
+                continue;   // the loader logged why; the material stays flat
+            }
+
+            MaterialTextures& material = *materials_[decoded.material];
+
+            struct Map
+            {
+                Texture&                texture;
+                VkFormat                format;
+                char const*             name;
+                optional<Pixels> const& pixels;
+            };
+            Map const maps[]{
+                {material.albedo, VK_FORMAT_R8G8B8A8_SRGB, "material albedo", decoded.maps.albedo},
+                {material.normal, VK_FORMAT_R8G8B8A8_UNORM, "material normal", decoded.maps.normal},
+                {material.orm, VK_FORMAT_R8G8B8A8_UNORM, "material orm", decoded.maps.orm},
+                {material.emission, VK_FORMAT_R8G8B8A8_SRGB, "material emission",
+                 decoded.maps.emission},
+            };
+
+            bool out_of_budget = false;
+            bool failed        = false;
+            for (; entry.staged < std::size(maps); ++entry.staged)
+            {
+                Map const& map = maps[entry.staged];
+                if (!map.pixels.has_value())
+                {
+                    continue;
+                }
+
+                Pixels const&      pixels = *map.pixels;
+                VkDeviceSize const bytes  = Texture::upload_bytes(pixels.width, pixels.height);
+
+                // 16 bytes of slack covers the allocation's alignment.
+                if (bytes + 16 > staging_.bytes_per_slot())
+                {
+                    log::error("material %s: a %ux%u map needs %llu bytes of staging, over the "
+                               "%llu a frame allows", decoded.name.c_str(), pixels.width,
+                               pixels.height, static_cast<unsigned long long>(bytes),
+                               static_cast<unsigned long long>(staging_.bytes_per_slot()));
+                    failed = true;
+                    break;
+                }
+
+                optional<StagingArena::Allocation> const staged = staging_.allocate(bytes);
+                if (!staged.has_value())
+                {
+                    out_of_budget = true;
+                    break;
+                }
+                if (!map.texture.create(*allocator_, *device_, {map.format, map.name},
+                                        pixels.width, pixels.height))
+                {
+                    failed = true;
+                    break;
+                }
+
+                std::memcpy(staged->data, pixels.rgba.data(), bytes);
+                pending_uploads_.push_back(
+                    PendingUpload{.texture = &map.texture, .buffer = staged->buffer,
+                                  .offset = staged->offset});
+            }
+
+            if (out_of_budget)
+            {
+                break;
+            }
+            if (failed)
+            {
+                // Maps already uploaded are never sampled; they are freed
+                // with the rest of the materials.
+                log::error("material %s stays untextured", decoded.name.c_str());
+                continue;
+            }
+
+            // Registered now, sampled from this very frame: the copies are
+            // recorded ahead of every pass, and the slots are fresh, so no
+            // pending command buffer can be reading them. Albedo and ORM are
+            // always sampled once an object is textured, so a missing one is
+            // white; normal and emission are skipped.
+            auto handle = [&](Map const& map, u32 missing) {
+                return map.pixels.has_value() ? bindless_.add_sampled_image(map.texture.view(),
+                                                                            read_only)
+                                              : missing;
+            };
+            material.handles = u32vec4{
+                handle(maps[0], white_srgb_handle_),
+                handle(maps[1], gpu::kNoTexture),
+                handle(maps[2], white_unorm_handle_),
+                handle(maps[3], gpu::kNoTexture),
+            };
+            material.hide_emission = false;
+            log::info("material %s streamed in", decoded.name.c_str());
+        }
+
+        decoded_.erase(decoded_.begin(), decoded_.begin() + static_cast<std::ptrdiff_t>(done));
+    }
+
+    void Renderer::record_uploads(VkCommandBuffer command)
+    {
+        geometry_.record(command);
+
+        for (PendingUpload const& upload : pending_uploads_)
+        {
+            upload.texture->record_upload(command, upload.buffer, upload.offset);
+        }
+        pending_uploads_.clear();
+    }
+
+    optional<Model> Renderer::add_model(GltfModel const& source)
+    {
+        // Textures stream in like the built-in materials: each material
+        // starts untextured, with its emission held back if a map is meant
+        // to mask it, and its decode job goes to the loader.
+        u32 const first_material = static_cast<u32>(materials_.size());
+        for (size_t index = 0; index < source.materials.size(); ++index)
+        {
+            GltfMaterial const& material = source.materials[index];
+
             materials_.push_back(std::make_unique<MaterialTextures>());
             MaterialTextures& textures = *materials_.back();
+            textures.tiling        = false;
+            textures.hide_emission = material.has_emission_map;
 
-            optional<u32> const albedo   = upload(textures.albedo, material.albedo,
-                                                  VK_FORMAT_R8G8B8A8_SRGB, "gltf albedo");
-            optional<u32> const normal   = upload(textures.normal, material.normal,
-                                                  VK_FORMAT_R8G8B8A8_UNORM, "gltf normal");
-            optional<u32> const orm      = upload(textures.orm, material.orm,
-                                                  VK_FORMAT_R8G8B8A8_UNORM, "gltf orm");
-            optional<u32> const emission = upload(textures.emission, material.emission,
-                                                  VK_FORMAT_R8G8B8A8_SRGB, "gltf emission");
-            if (!albedo || !normal || !orm || !emission)
+            if (material.decode)
             {
-                return nullopt;
+                loader_.submit(MaterialLoader::Job{
+                    .material = static_cast<u32>(materials_.size() - 1),
+                    .name     = "gltf material " + std::to_string(index),
+                    .decode   = material.decode,
+                });
             }
-
-            // Albedo and ORM are always sampled once an object is textured,
-            // so a missing one is white; normal and emission are skipped.
-            textures.handles = u32vec4{
-                *albedo != gpu::kNoTexture ? *albedo : white_srgb_handle_,
-                *normal,
-                *orm != gpu::kNoTexture ? *orm : white_unorm_handle_,
-                *emission,
-            };
-            textures.tiling = false;
         }
 
         Model model;
@@ -713,8 +836,8 @@ namespace encke
 
         for (GltfPrimitive const& primitive : source.primitives)
         {
-            meshes_.push_back(std::make_unique<Mesh>());
-            if (!meshes_.back()->init(*allocator_, *device_, primitive.vertices, primitive.indices))
+            optional<u32> const mesh = geometry_.add(primitive.vertices, primitive.indices);
+            if (!mesh.has_value())
             {
                 return nullopt;
             }
@@ -724,7 +847,7 @@ namespace encke
             f64vec3 const       max{primitive.max};
 
             model.parts.push_back(ModelPart{
-                .mesh          = static_cast<u32>(meshes_.size() - 1),
+                .mesh          = *mesh,
                 .material      = first_material + primitive.material,
                 .albedo        = material.base_colour,
                 .roughness     = material.roughness,
@@ -892,8 +1015,9 @@ namespace encke
         // radiance albedo * E * cos(elevation) / pi, zero once the star sets.
         constexpr f64 kPi = 3.14159265358979323846;
 
-        f64vec3 const up_view   = glm::normalize(f64vec3{view * f64vec4{scene.up, 0.0}});
-        f64 const     sun_up    = std::max(glm::dot(scene.up, sun_world), 0.0);
+        f64vec3 const up_world  = scene.up_at(scene.camera.position);
+        f64vec3 const up_view   = glm::normalize(f64vec3{view * f64vec4{up_world, 0.0}});
+        f64 const     sun_up    = std::max(glm::dot(up_world, sun_world), 0.0);
         f32vec3 const ground    = scene.ground_albedo * scene.star.colour *
                                   static_cast<f32>(static_cast<f64>(illuminance) * sun_up / kPi);
         f32vec3 const sky       = ground * scene.sky_fill;
@@ -941,6 +1065,8 @@ namespace encke
         u32 const shadow_view_count = shadow_plan_.cascade_count + shadow_plan_.spot_count;
         auto* const shadow_views = static_cast<gpu::ShadowView*>(resources.shadow_views.mapped());
         auto* const shadow_matrices = static_cast<f32mat4*>(resources.shadow_matrices.mapped());
+        auto* const draws = static_cast<VkDrawIndexedIndirectCommand*>(resources.draws.mapped());
+        gbuffer_draws_    = 0;
 
         for (u32 index = 0; index < shadow_view_count; ++index)
         {
@@ -956,21 +1082,29 @@ namespace encke
             };
             std::memcpy(&shadow_views[index], &gpu_view, sizeof(gpu_view));
 
-            vector<u32>& casters = shadow_casters_[index];
-            casters.clear();
+            // One indirect draw per caster, its firstInstance the matrix slot.
+            u32& casters = shadow_draws_[index];
+            casters      = 0;
             for (u32 object = 0; object < object_count; ++object)
             {
                 SceneObject const& scene_object = scene.objects[object];
-                if (!map.may_cast(scene_object.bounds_centre, scene_object.bounds_radius))
+                if (!geometry_.range(scene_object.mesh).resident ||
+                    !map.may_cast(scene_object.bounds_centre, scene_object.bounds_radius))
                 {
                     continue;
                 }
 
-                casters.push_back(object);
+                u32 const slot = index * kMaxObjects + object;
                 f32mat4 const matrix{world_to_clip * scene_object.model};
-                std::memcpy(&shadow_matrices[index * kMaxObjects + object], &matrix,
-                            sizeof(matrix));
+                std::memcpy(&shadow_matrices[slot], &matrix, sizeof(matrix));
+
+                draws[(1 + index) * kMaxObjects + casters++] =
+                    draw_command(geometry_.range(scene_object.mesh), slot);
             }
+        }
+        for (u32 index = shadow_view_count; index < kShadowViewCount; ++index)
+        {
+            shadow_draws_[index] = 0;
         }
 
         // Composing view * model in f64 cancels the large world translations
@@ -986,10 +1120,12 @@ namespace encke
 
             u32vec4 textures{gpu::kNoTexture};
             f32vec4 texture_scale{0.0f};
+            bool    hide_emission = false;
             if (object.material != 0)
             {
                 MaterialTextures const& material = *materials_[object.material];
-                textures = material.handles;
+                textures      = material.handles;
+                hide_emission = material.hide_emission;
 
                 // (1, 1, 1, 1) makes the shader's stretch exactly 1, which
                 // leaves an atlas's UVs alone whatever the object's scale.
@@ -1005,11 +1141,19 @@ namespace encke
                 .model_view        = f32mat4{model_view},
                 .normal_view       = f32mat4{f64mat4{normal_matrix}},
                 .albedo_roughness  = f32vec4{object.albedo, object.roughness},
-                .emissive_metallic = f32vec4{object.emissive, object.metallic},
+                .emissive_metallic = f32vec4{hide_emission ? f32vec3{0.0f} : object.emissive,
+                                             object.metallic},
                 .textures          = textures,
                 .texture_scale     = texture_scale,
             };
             std::memcpy(&objects[index], &gpu_object, sizeof(gpu_object));
+
+            // A mesh still waiting for its upload is left out, not drawn
+            // from memory that holds nothing yet.
+            if (geometry_.range(object.mesh).resident)
+            {
+                draws[gbuffer_draws_++] = draw_command(geometry_.range(object.mesh), index);
+            }
         }
 
         auto* const lights = static_cast<gpu::Light*>(resources.lights.mapped());
@@ -1067,6 +1211,13 @@ namespace encke
         // which its colour output stage is gated on -- see CLAUDE.md.
         timestamps_.begin(command, frame_);
 
+        // -- 0. uploads ------------------------------------------------------
+        // Before every pass, so anything uploaded is readable this frame.
+        // Each texture's own barriers end in READ_ONLY_OPTIMAL for the
+        // fragment stage, which is where materials are sampled.
+        record_uploads(command);
+        timestamps_.mark(command, "uploads");
+
         gpu::Push push{
             .frame            = resources.frame_handle,
             .objects          = resources.objects_handle,
@@ -1079,7 +1230,7 @@ namespace encke
             .gbuffer_depth    = depth_handle_,
             .hdr_storage      = hdr_storage_handle_,
             .hdr_sampled      = hdr_sampled_handle_,
-            .object_index     = 0,
+            .pad0             = 0,
             .exposure         = exposure_from_ev100(scene.ev100),
             .debug_view       = static_cast<u32>(debug_view_),
             .gbuffer_motion   = motion_handle_,
@@ -1156,7 +1307,14 @@ namespace encke
         // -- 2. shadow maps --------------------------------------------------
         // Depth only, before the G-buffer. Nothing here waits on the acquire
         // semaphore, which gates colour output only.
+        // Every pass draws from the one geometry pool, bound once here: vertex
+        // and index buffers are command buffer state, not pipeline state.
+        constexpr VkDeviceSize kDrawStride = sizeof(VkDrawIndexedIndirectCommand);
+        geometry_.bind(command);
+
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_.handle());
+        vkCmdPushConstants(command, shadow_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
+                           sizeof(push), &push);
         for (u32 index = 0; index < shadow_view_count; ++index)
         {
             u32 const  size = index < config::kCascadeCount ? config::kCascadeResolution
@@ -1184,12 +1342,13 @@ namespace encke
             vkCmdSetDepthBias(command, config::kShadowBiasConstant, 0.0f,
                               config::kShadowBiasSlope);
 
-            for (u32 const object : shadow_casters_[index])
+            // Still begun and cleared with no casters: lighting samples every
+            // map the plan names.
+            if (shadow_draws_[index] > 0)
             {
-                push.object_index = index * kMaxObjects + object;
-                vkCmdPushConstants(command, shadow_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
-                                   sizeof(push), &push);
-                meshes_[scene.objects[object].mesh]->draw(command);
+                vkCmdDrawIndexedIndirect(command, resources.draws.handle(),
+                                         (1 + index) * kMaxObjects * kDrawStride,
+                                         shadow_draws_[index], static_cast<u32>(kDrawStride));
             }
 
             vkCmdEndRendering(command);
@@ -1228,15 +1387,13 @@ namespace encke
             vkCmdBeginRendering(command, &rendering);
             set_viewport(command, extent);
             vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, gbuffer_pipeline_.handle());
+            vkCmdPushConstants(command, gbuffer_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
+                               sizeof(push), &push);
 
-            u32 const object_count =
-                static_cast<u32>(std::min<size_t>(scene.objects.size(), kMaxObjects));
-            for (u32 index = 0; index < object_count; ++index)
+            if (gbuffer_draws_ > 0)
             {
-                push.object_index = index;
-                vkCmdPushConstants(command, gbuffer_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
-                                   sizeof(push), &push);
-                meshes_[scene.objects[index].mesh]->draw(command);
+                vkCmdDrawIndexedIndirect(command, resources.draws.handle(), 0, gbuffer_draws_,
+                                         static_cast<u32>(kDrawStride));
             }
 
             vkCmdEndRendering(command);
@@ -1665,7 +1822,13 @@ namespace encke
         }
 
         // The fence proved this slot's buffers are no longer read by the GPU,
-        // so they can be rewritten now.
+        // so they can be rewritten now. Not before the acquire: a frame that
+        // returns OutOfDate reuses this slot, and would rewind the staging
+        // arena over copies it never recorded.
+        // Geometry first, so objects draw as soon as they can, even untextured.
+        staging_.begin(frame_);
+        geometry_.stage(staging_, frame_);
+        stream_materials();
         upload(scene, swapchain.extent(), frames_[frame_]);
 
         // Only reset once the frame is definitely going to be submitted --
@@ -1802,6 +1965,13 @@ namespace encke
 
         VkDevice const device = device_->handle();
 
+        // The worker writes into loader state only, but it must be gone
+        // before anything it could be decoding for is torn down.
+        loader_.stop();
+        decoded_.clear();
+        pending_uploads_.clear();
+        staging_.shutdown();
+
         timestamps_.shutdown();
 
         gbuffer_pipeline_.shutdown();
@@ -1817,7 +1987,7 @@ namespace encke
         exposure_image_.shutdown();
         capture_buffer_.shutdown();
 
-        meshes_.clear();
+        geometry_.shutdown();
         materials_.clear();
         white_srgb_.shutdown();
         white_unorm_.shutdown();

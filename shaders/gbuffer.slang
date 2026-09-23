@@ -35,6 +35,10 @@ struct VertexOut
     float2 uv        : TEXCOORD2;   // tile repeats
     float4 current   : TEXCOORD0;
     float4 previous  : TEXCOORD1;
+
+    // The object index, which the draw's firstInstance carries. Flat, and
+    // the same for every vertex of a draw.
+    nointerpolation uint object : OBJECT;
 };
 
 struct GBuffer
@@ -47,9 +51,10 @@ struct GBuffer
 };
 
 [shader("vertex")]
-VertexOut vertex_main(VertexIn input)
+VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID)
 {
-    GpuObject object = load_object(push.object_index);
+    // SV_VulkanInstanceID includes firstInstance; SV_InstanceID would not.
+    GpuObject object = load_object(instance);
     float4    local  = float4(input.position, 1.0f);
 
     // Mesh UVs are metres at unit scale. Scaling by how much the object's
@@ -68,13 +73,14 @@ VertexOut vertex_main(VertexIn input)
     output.tangent  = float4(mul(object.model_view, float4(input.tangent.xyz, 0.0f)).xyz,
                              input.tangent.w);
     output.uv       = input.uv * stretch;
+    output.object   = instance;
     return output;
 }
 
 [shader("fragment")]
 GBuffer fragment_main(VertexOut input)
 {
-    GpuObject object = load_object(push.object_index);
+    GpuObject object = load_object(input.object);
 
     // Motion in UV space, so a later reprojection is uv + motion. Both NDC
     // positions go through the same ndc_to_uv, which carries the Y flip.
@@ -88,8 +94,8 @@ GBuffer fragment_main(VertexOut input)
     float  ao        = 1.0f;
     float3 normal    = normalize(input.normal);
 
-    // Uniform across the draw: every texture handle comes from the object,
-    // and the object from a push constant.
+    // Uniform across one draw of the indirect batch, but not across the
+    // batch: hence NonUniformResourceIndex on every handle.
     if (object.textures.x != kNoTexture)
     {
         SamplerState filter = g_samplers[NonUniformResourceIndex(push.material_sampler)];

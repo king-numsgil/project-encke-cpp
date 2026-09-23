@@ -11,12 +11,27 @@ namespace encke::log
     {
         std::chrono::steady_clock::time_point g_start = std::chrono::steady_clock::now();
 
+        // Formatted whole, then written in one call: stderr is unbuffered,
+        // so three separate writes from two threads could interleave
+        // mid-line. The material loader logs from its worker.
         void emit(char const* level, char const* fmt, std::va_list args)
         {
-            std::fprintf(stderr, "[%6lld ms] [%s] ",
-                         static_cast<long long>(elapsed_ms()), level);
-            std::vfprintf(stderr, fmt, args);
-            std::fputc('\n', stderr);
+            char line[1024];
+            int  length = std::snprintf(line, sizeof(line), "[%6lld ms] [%s] ",
+                                        static_cast<long long>(elapsed_ms()), level);
+            if (length < 0)
+            {
+                return;
+            }
+
+            size_t const used = std::min(static_cast<size_t>(length), sizeof(line) - 1);
+            int const    body = std::vsnprintf(line + used, sizeof(line) - used, fmt, args);
+            size_t const end =
+                body < 0 ? used : std::min(used + static_cast<size_t>(body), sizeof(line) - 2);
+
+            line[end]     = '\n';
+            line[end + 1] = '\0';
+            std::fputs(line, stderr);
         }
     }
 

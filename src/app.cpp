@@ -145,13 +145,15 @@ namespace encke
             return static_cast<f32>(std::strtod(value, nullptr));
         }
 
-        // ENCKE_CAMERA="px py pz tx ty tz" starts the camera at p looking at t,
-        // both in metres from the test planet's pole, so a capture can frame
-        // something other than the default view. Commas work as separators too.
+        // ENCKE_CAMERA="px py pz tx ty tz [ux uy uz]" starts the camera at p
+        // looking at t, its up toward u, all in the test scene's frame: metres
+        // from the pole, +Y up by the transform convention. u defaults to that
+        // +Y. Commas work as separators too.
         struct CameraPose
         {
             f64vec3 eye;
             f64vec3 target;
+            f64vec3 up;
         };
 
         optional<CameraPose> initial_camera()
@@ -162,9 +164,9 @@ namespace encke
                 return nullopt;
             }
 
-            array<f64, 6> numbers{};
+            array<f64, 9> numbers{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0}};
             char const*   cursor = value;
-            for (f64& number : numbers)
+            for (size_t index = 0; index < numbers.size(); ++index)
             {
                 while (*cursor == ' ' || *cursor == ',')
                 {
@@ -172,17 +174,25 @@ namespace encke
                 }
 
                 char* end = nullptr;
-                number    = std::strtod(cursor, &end);
+                f64 const number = std::strtod(cursor, &end);
                 if (end == cursor)
                 {
-                    log::warn("ENCKE_CAMERA wants six numbers, \"px py pz tx ty tz\"; ignored");
+                    // Six is complete, the up is optional; anything else is not.
+                    if (index == 6 && *cursor == '\0')
+                    {
+                        break;
+                    }
+                    log::warn("ENCKE_CAMERA wants \"px py pz tx ty tz\" with an optional "
+                              "\"ux uy uz\"; ignored");
                     return nullopt;
                 }
-                cursor = end;
+                numbers[index] = number;
+                cursor         = end;
             }
 
             return CameraPose{.eye    = f64vec3{numbers[0], numbers[1], numbers[2]},
-                              .target = f64vec3{numbers[3], numbers[4], numbers[5]}};
+                              .target = f64vec3{numbers[3], numbers[4], numbers[5]},
+                              .up     = f64vec3{numbers[6], numbers[7], numbers[8]}};
         }
     }
 
@@ -252,20 +262,14 @@ namespace encke
 
         scene_.build_test_planet(helmet.has_value() ? &*helmet : nullptr);
 
-        // Yaw about +Y, then pitch, the way FlyCamera composes them, so
-        // flying on from here does not snap.
+        // The test scene's frame is the world's rotated by nothing, only
+        // moved to the pole, so its directions pass through unchanged.
         if (optional<CameraPose> const pose = initial_camera())
         {
-            f64vec3 const forward = glm::normalize(pose->target - pose->eye);
-            f64 const     yaw     = std::atan2(-forward.x, -forward.z);
-            f64 const     pitch   = std::asin(std::clamp(forward.y, -1.0, 1.0));
-
-            scene_.camera.position    = scene_.origin() + pose->eye;
-            scene_.camera.orientation = glm::angleAxis(yaw, f64vec3{0.0, 1.0, 0.0}) *
-                                        glm::angleAxis(pitch, f64vec3{1.0, 0.0, 0.0});
-            scene_.previous_camera    = scene_.camera;
+            scene_.camera.position = scene_.origin() + pose->eye;
+            fly_.aim(scene_.camera, pose->target - pose->eye, pose->up);
+            scene_.previous_camera = scene_.camera;
         }
-        fly_.reset(scene_.camera);
         log::info("scene: %zu objects, %zu lights", scene_.objects.size(), scene_.lights.size());
 
         fixed_time_ = fixed_time();
@@ -314,8 +318,8 @@ namespace encke
         }
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
-        log::info("camera: hold right mouse to look; WASD move, E/Q up/down, "
-                  "Shift fast, Ctrl slow, wheel scales speed");
+        log::info("camera: hold right mouse to look; WASD move, Space/Ctrl up/down, "
+                  "Q/E roll, Shift fast, Alt slow, wheel scales speed");
 
         return true;
     }
@@ -400,14 +404,21 @@ namespace encke
             return (window_.key_down(positive) ? 1.0 : 0.0) - (window_.key_down(negative) ? 1.0 : 0.0);
         };
 
+        auto const either = [this](SDL_Scancode left, SDL_Scancode right) {
+            return window_.key_down(left) || window_.key_down(right);
+        };
+
+        f64 const strafe_up = (window_.key_down(SDL_SCANCODE_SPACE) ? 1.0 : 0.0) -
+                              (either(SDL_SCANCODE_LCTRL, SDL_SCANCODE_RCTRL) ? 1.0 : 0.0);
+
         FlyInput const input{
             .look  = events.mouse_delta,
-            .move  = f64vec3{axis(SDL_SCANCODE_D, SDL_SCANCODE_A),
-                             axis(SDL_SCANCODE_E, SDL_SCANCODE_Q),
+            .move  = f64vec3{axis(SDL_SCANCODE_D, SDL_SCANCODE_A), strafe_up,
                              axis(SDL_SCANCODE_W, SDL_SCANCODE_S)},
+            .roll  = axis(SDL_SCANCODE_Q, SDL_SCANCODE_E),
             .wheel = events.wheel,
-            .fast  = window_.key_down(SDL_SCANCODE_LSHIFT) || window_.key_down(SDL_SCANCODE_RSHIFT),
-            .slow  = window_.key_down(SDL_SCANCODE_LCTRL) || window_.key_down(SDL_SCANCODE_RCTRL),
+            .fast  = either(SDL_SCANCODE_LSHIFT, SDL_SCANCODE_RSHIFT),
+            .slow  = either(SDL_SCANCODE_LALT, SDL_SCANCODE_RALT),
         };
 
         fly_.update(scene_.camera, input, seconds);
@@ -583,7 +594,10 @@ namespace encke
             // start.
             renderer_.set_frame_time(delta, fixed_time_.has_value());
 
-            bool const capturing = capture_path_.has_value() && frames_drawn_ == capture_frame_;
+            // Not before streaming has settled: until then which materials
+            // have landed depends on timing, and captures would differ.
+            bool const capturing = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
+                                   renderer_.streaming_idle();
             if (capturing)
             {
                 renderer_.request_capture();

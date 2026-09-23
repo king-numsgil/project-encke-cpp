@@ -83,6 +83,7 @@ src/
     buffer.{hpp,cpp}     device-local (staged) and host-mapped buffers
     image.{hpp,cpp}      any screen-sized target: G-buffer, HDR, depth
     texture.{hpp,cpp}    immutable sampled image with a blitted mip chain
+    staging.{hpp,cpp}    per-frame upload arena, one per frame in flight: the upload budget
     swapchain.{hpp,cpp}  swapchain, images, views (scene and UI), recreation
     timestamps.{hpp,cpp} GPU timestamp queries, one range per frame in flight
   ui/
@@ -95,10 +96,12 @@ src/
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
     scene.{hpp,cpp}      f64 world: test planet, star, objects, lights
     material.{hpp,cpp}   MaterialKind, loading and packing a texture set with SDL3_image
-    gltf.{hpp,cpp}       glTF -> CPU meshes and packed material images, via fastgltf
+    material_loader.{hpp,cpp} worker thread running material decode jobs for streaming
+    gltf.{hpp,cpp}       glTF -> CPU meshes, material factors and decode jobs, via fastgltf
     model.hpp            a loaded model as renderer mesh and material ids, for the scene
     pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
-    mesh.{hpp,cpp}       Vertex, Mesh, procedural cube, sphere, pole-relative planet
+    mesh.{hpp,cpp}       Vertex, procedural cube, sphere, pole-relative planet
+    geometry_pool.{hpp,cpp} every mesh in one vertex and one index buffer, VMA virtual blocks
     config.hpp           every renderer capacity and tuning constant
     shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
     gpu_types.hpp        structs shared with the shaders
@@ -171,6 +174,34 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
 - **Buffers are device-local, filled once through a staging copy** driven by
   `VulkanDevice::submit_immediate`, which blocks on `vkQueueWaitIdle`. That is
   fine for startup and wrong for anything per-frame.
+- **Per-frame uploads go through `StagingArena`**, never `submit_immediate`.
+  One arena per frame in flight, bump-allocated and rewound once that slot's
+  fence has signalled, which also proves the GPU finished copying out of it.
+  Its size, `config::kStagingBytesPerFrame`, is the per-frame upload budget:
+  what does not fit waits for a later frame. The copies are recorded first in
+  the frame's command buffer, under the "uploads" timestamp. Staging happens
+  after the acquire, never before: a frame that returns OutOfDate reuses its
+  slot, and would rewind the arena over copies it never recorded. 80 MiB per
+  frame, sized for a 4K RGBA8 map; materials stage map by map and go live
+  with their last one.
+- **Every mesh lives in one `GeometryPool`**: one vertex buffer and one index
+  buffer, carved up by VMA virtual blocks that count in elements, so a range's
+  offset is directly a `vertexOffset` or `firstIndex`. A mesh id is dense and
+  reused after `release`, which frees the ranges only when the releasing
+  frame's slot comes round again. Meshes upload through the staging arena
+  like textures and draw from the frame they are staged in; until then
+  they are left out of the draw lists. `release` is not yet called by
+  anything, so its deferred free is untested.
+- **Each raster pass is one indirect draw.** `upload()` writes one
+  `VkDrawIndexedIndirectCommand` per object into a per-frame buffer (the
+  G-buffer's first, then each shadow view's casters), and `record()` binds
+  the pool once and issues one `vkCmdDrawIndexedIndirect` per pass or map.
+  The object index is the command's `firstInstance`, read as
+  `SV_VulkanInstanceID`: plain `SV_InstanceID` is lowered to
+  `InstanceIndex - BaseInstance` and would always read 0. The G-buffer
+  passes it to the fragment stage flat. `multiDrawIndirect` and
+  `drawIndirectFirstInstance` are required at device selection. The draw
+  lists are still built on the CPU and still capped at `kMaxObjects`.
 - **The Y flip lives in the viewport**, via `flipped_viewport()` — negative
   height, set per frame. Projection matrices stay conventional.
 - **Back-face culling is on with `frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE`,
@@ -537,8 +568,28 @@ of the scene renders unchanged.
 albedo and ORM are always sampled; normal and emission may be `kNoTexture`
 and are then skipped. The sampler is `push.material_sampler`, one for all.
 
-- **Mips are blitted at load**, level from level, in one blocking
-  `submit_immediate` per texture. An `_SRGB` blit filters in linear space, so
+- **Every material streams in, ambientCG and glTF alike.** `MaterialLoader`
+  runs decode jobs on a worker thread while the scene already draws: an
+  ambientCG set's job is `load_material`, a glTF material's is the `decode`
+  that `load_gltf` builds over the model's image bytes and paths, which it
+  only locates, never decodes. Each frame the renderer takes what is finished
+  and uploads it map by map (albedo, normal, ORM, emission, absent ones
+  skipped), in completion order, while the staging budget allows; a
+  material's handles go live with its last map. Until then an object keeps
+  `kNoTexture` and draws with its flat factors, which for a textured object
+  means white. A glTF material with an emission map has its emission held at
+  zero until then (`hide_emission`), or its emissive factor would light the
+  whole surface. Slots are registered the frame the copies are recorded:
+  fresh slots, so no pending command buffer can be reading them.
+  `ENCKE_CAPTURE` waits for `Renderer::streaming_idle()`, so captures stay
+  byte-identical. Only the 1x1 whites use the blocking `Texture::init`.
+- **One asset worker, on purpose.** Decoding is serial on a single thread,
+  and that is a decision, not a gap: the cores are meant for the SDF workers,
+  f64 field evaluation and meshing on the CPU, which will be far heavier.
+  Asset decoding should not compete with them.
+- **Mips are blitted on the GPU**, level from level, by
+  `Texture::record_upload`, into a frame's command buffer when streamed or a
+  blocking `submit_immediate` through `init`. An `_SRGB` blit filters in linear space, so
   the albedo mips need no special handling. The normal map's mips average to
   shorter vectors, which the shader's renormalise absorbs.
 - **One sampler for every material**: trilinear, repeat, anisotropic up to
@@ -583,8 +634,11 @@ Known gaps:
 
 - No specular antialiasing. Normal-mapped metal at a distance sparkles; that
   wants Toksvig or similar folded into roughness, or TAA.
-- Loading is synchronous at startup, decoding JPGs on one thread. Fine for six
-  sets, not for a real asset count.
+- Streaming is whole textures only. A texture larger than the per-frame
+  budget can never land (it is logged and stays flat); uploading mip by mip,
+  smallest first, would fix that and give a blurry version sooner. Textures
+  are never evicted either. glTF images shared
+  between materials are decoded once per material, not once per model.
 - Materials are a compile-time list with tile sizes in `render/material.cpp`.
   No material description files.
 - Normal strength is hardcoded at 2 in `shaders/gbuffer.slang` for every
@@ -593,10 +647,11 @@ Known gaps:
 ## Camera control
 
 `render/fly_camera` flies the camera, editor-style: everything happens while
-the right mouse button is held. Mouse looks (yaw about world +Y, pitch
-clamped, no roll), WASD moves along the view, E/Q go up and down, Shift is
-5x, Ctrl is 0.2x, and the wheel scales the base speed by 1.25 per notch
-between 2 m/s and 10,000 km/s. Position is f64 like the rest of the world.
+the right mouse button is held. It is six-degrees-of-freedom: mouse yaws and
+pitches about the camera's own axes, Q/E roll, WASD moves along the view,
+Space/Ctrl strafe along the camera's up, Shift is 5x, Alt is 0.2x, and the
+wheel scales the base speed by 1.25 per notch between 2 m/s and 10,000 km/s.
+Position is f64 like the rest of the world.
 
 The time step is wall clock from one fixed point in the loop to the same
 point next iteration, clamped to 0.1 s. It was once measured from where the
@@ -607,14 +662,25 @@ present -- most of a frame -- and made movement slow and violently uneven.
   mouse mode hides the cursor, and the UI gets `ImGuiConfigFlags_NoMouse |
   NoKeyboard` until release. A right click that lands on a UI window stays
   with the UI.
-- **Up and down are E/Q, not Space/Ctrl**, because ImGui's keyboard
-  navigation activates the focused widget on Space.
+- **Space is safe only because the UI is blocked while flying.** ImGui's
+  keyboard navigation activates the focused widget on Space; with
+  `NoKeyboard` set for as long as the button is held, it never sees it.
 - **Losing focus counts as release**, since the button-up may never arrive.
 - **The camera moves after `Scene::update`**, which rolls this frame's camera
   into `previous_camera` for motion vectors. Moving it before would make every
   frame's motion zero.
-- **World +Y as up is a test-planet assumption.** Anywhere else on a planet,
-  or in a ship, wants a local up; `FlyCamera` is where it goes.
+- **The camera has no up but its own.** "+Y is up" is the convention for
+  matrices and model space, not the direction away from the ground, and the
+  camera is not levelled against any body: it has to fly from one planet to
+  another. Nothing in `FlyCamera` reads world +Y or a planet.
+- **The environment's up is the scene's**: `Scene::up_at`, radial from the
+  one planet here. With several bodies, choosing it is the scene's job.
+- **`ENCKE_CAMERA` takes an optional up**, `"px py pz tx ty tz ux uy uz"`,
+  defaulting to the test scene's +Y. A look-at needs one: keeping the
+  camera's previous up instead turned its starting pitch into roll.
+- The test scene's own placements are still authored as translations from
+  the pole, which only works because the pole's normal is world +Y; the SDF
+  scenes will replace it.
 
 ## CPU-written buffers are host-coherent, required
 

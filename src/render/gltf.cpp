@@ -12,6 +12,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <utility>
 
 namespace encke
@@ -20,97 +21,148 @@ namespace encke
     {
         namespace fs = std::filesystem;
 
-        // Decoded images, by glTF image index, so one shared by several
-        // textures is decoded once.
-        class ImageCache
+        // Where one glTF image's encoded data is: the bytes, copied out of
+        // the asset, or a file path. Neither when it cannot be loaded.
+        struct ImageSource
         {
-        public:
-            ImageCache(fastgltf::Asset const& asset, fs::path directory)
-                : asset_(asset), directory_(std::move(directory)), images_(asset.images.size())
+            vector<byte> bytes;
+            string       path;
+        };
+
+        // By image index. Shared by every material's decode job, which runs
+        // on the loader's worker after the asset itself is gone.
+        using ImageSources = vector<ImageSource>;
+
+        ImageSources locate_images(fastgltf::Asset const& asset, fs::path const& directory)
+        {
+            ImageSources sources(asset.images.size());
+
+            for (size_t index = 0; index < asset.images.size(); ++index)
             {
-            }
+                ImageSource& source = sources[index];
 
-            // Null when the texture has no loadable image; the reason is logged.
-            Pixels const* texture(fastgltf::TextureInfo const* info)
-            {
-                if (info == nullptr)
-                {
-                    return nullptr;
-                }
-
-                if (info->texCoordIndex != 0)
-                {
-                    log::warn("gltf: texture %zu uses TEXCOORD_%zu; only TEXCOORD_0 is loaded",
-                              info->textureIndex, info->texCoordIndex);
-                }
-
-                fastgltf::Texture const& texture = asset_.textures[info->textureIndex];
-                if (!texture.imageIndex.has_value())
-                {
-                    log::warn("gltf: texture %zu has no core image", info->textureIndex);
-                    return nullptr;
-                }
-
-                size_t const index = *texture.imageIndex;
-                if (!images_[index].has_value())
-                {
-                    Pixels pixels;
-                    if (!decode(asset_.images[index], index, pixels))
-                    {
-                        return nullptr;
-                    }
-                    images_[index] = std::move(pixels);
-                }
-
-                return &*images_[index];
-            }
-
-        private:
-            bool decode(fastgltf::Image const& image, size_t index, Pixels& pixels) const
-            {
-                string const what = "gltf image " + std::to_string(index);
-
-                auto from_bytes = [&](span<byte const> bytes) {
-                    return decode_pixels(bytes, what.c_str(), pixels);
+                auto copy = [&](span<byte const> bytes) {
+                    source.bytes.assign(bytes.begin(), bytes.end());
                 };
 
-                return std::visit(
+                std::visit(
                     fastgltf::visitor{
                         [&](fastgltf::sources::BufferView const& view) {
                             auto const bytes =
-                                fastgltf::DefaultBufferDataAdapter{}(asset_, view.bufferViewIndex);
-                            return from_bytes(span<byte const>{bytes.data(), bytes.size()});
+                                fastgltf::DefaultBufferDataAdapter{}(asset, view.bufferViewIndex);
+                            copy(span<byte const>{bytes.data(), bytes.size()});
                         },
                         [&](fastgltf::sources::Array const& array) {
-                            return from_bytes(span<byte const>{array.bytes.data(), array.bytes.size()});
+                            copy(span<byte const>{array.bytes.data(), array.bytes.size()});
                         },
                         [&](fastgltf::sources::URI const& uri) {
                             if (!uri.uri.isLocalPath() || uri.fileByteOffset != 0)
                             {
-                                log::error("%s: only whole local image files are supported",
-                                           what.c_str());
-                                return false;
+                                log::error("gltf image %zu: only whole local image files are "
+                                           "supported", index);
+                                return;
                             }
-                            return load_pixels((directory_ / uri.uri.fspath()).string(), pixels);
+                            source.path = (directory / uri.uri.fspath()).string();
                         },
                         [&](auto const&) {
-                            log::error("%s: unsupported image source", what.c_str());
-                            return false;
+                            log::error("gltf image %zu: unsupported image source", index);
                         },
                     },
-                    image.data);
+                    asset.images[index].data);
             }
 
-            fastgltf::Asset const&   asset_;
-            fs::path                 directory_;
+            return sources;
+        }
+
+        // Decoded images for one job, by image index, so an image shared by
+        // two of a material's textures -- occlusion and metallic-roughness,
+        // often -- is decoded once.
+        class ImageDecoder
+        {
+        public:
+            explicit ImageDecoder(ImageSources const& sources)
+                : sources_(sources), images_(sources.size())
+            {
+            }
+
+            // Null when there is no image or it failed to decode; logged.
+            Pixels const* image(optional<size_t> index)
+            {
+                if (!index.has_value())
+                {
+                    return nullptr;
+                }
+
+                if (!images_[*index].has_value())
+                {
+                    ImageSource const& source = sources_[*index];
+                    string const       what   = "gltf image " + std::to_string(*index);
+
+                    Pixels pixels;
+                    bool   decoded = false;
+                    if (!source.bytes.empty())
+                    {
+                        decoded = decode_pixels(source.bytes, what.c_str(), pixels);
+                    }
+                    else if (!source.path.empty())
+                    {
+                        decoded = load_pixels(source.path, pixels);
+                    }
+                    if (!decoded)
+                    {
+                        return nullptr;
+                    }
+                    images_[*index] = std::move(pixels);
+                }
+
+                return &*images_[*index];
+            }
+
+        private:
+            ImageSources const&      sources_;
             vector<optional<Pixels>> images_;
         };
 
-        // Any of fastgltf's optional texture infos, as a nullable pointer.
-        template<class OptionalInfo>
-        fastgltf::TextureInfo const* info_of(OptionalInfo const& info)
+        // Which image each of a material's textures reads, resolved from the
+        // asset up front so the decode job needs nothing but the sources.
+        struct MaterialImages
         {
-            return info.has_value() ? &*info : nullptr;
+            optional<size_t> albedo;
+            optional<size_t> normal;
+            optional<size_t> emission;
+            optional<size_t> occlusion;
+            optional<size_t> metal_rough;
+            f32              occlusion_strength = 1.0f;
+
+            bool any() const
+            {
+                return albedo || normal || emission || occlusion || metal_rough;
+            }
+        };
+
+        // The image a texture info points at. Nullopt, logged, when it has
+        // no core image; absent infos are nullopt silently.
+        template<class OptionalInfo>
+        optional<size_t> image_of(fastgltf::Asset const& asset, OptionalInfo const& info)
+        {
+            if (!info.has_value())
+            {
+                return nullopt;
+            }
+
+            if (info->texCoordIndex != 0)
+            {
+                log::warn("gltf: texture %zu uses TEXCOORD_%zu; only TEXCOORD_0 is loaded",
+                          info->textureIndex, info->texCoordIndex);
+            }
+
+            fastgltf::Texture const& texture = asset.textures[info->textureIndex];
+            if (!texture.imageIndex.has_value())
+            {
+                log::warn("gltf: texture %zu has no core image", info->textureIndex);
+                return nullopt;
+            }
+            return *texture.imageIndex;
         }
 
         // glTF keeps occlusion (R) apart from metallic-roughness (G, B),
@@ -159,7 +211,8 @@ namespace encke
             return orm;
         }
 
-        GltfMaterial convert_material(fastgltf::Material const& source, ImageCache& images)
+        GltfMaterial convert_material(fastgltf::Material const& source, fastgltf::Asset const& asset,
+                                      std::shared_ptr<ImageSources const> const& sources)
         {
             GltfMaterial material;
 
@@ -183,19 +236,41 @@ namespace encke
                           source.name.c_str());
             }
 
-            auto copy = [](Pixels const* pixels) -> optional<Pixels> {
-                return pixels != nullptr ? optional<Pixels>{*pixels} : nullopt;
+            MaterialImages images;
+            images.albedo      = image_of(asset, pbr.baseColorTexture);
+            images.normal      = image_of(asset, source.normalTexture);
+            images.emission    = image_of(asset, source.emissiveTexture);
+            images.occlusion   = image_of(asset, source.occlusionTexture);
+            images.metal_rough = image_of(asset, pbr.metallicRoughnessTexture);
+            if (source.occlusionTexture.has_value())
+            {
+                images.occlusion_strength = source.occlusionTexture->strength;
+            }
+
+            material.has_emission_map = images.emission.has_value();
+            if (!images.any())
+            {
+                return material;
+            }
+
+            // Everything the job reads is captured by value or shared, so it
+            // runs safely after load_gltf and its asset are gone. A map that
+            // fails to decode is logged and left out, as if absent.
+            material.decode = [sources, images](MaterialMaps& maps) {
+                ImageDecoder decoder{*sources};
+
+                auto copy = [](Pixels const* pixels) -> optional<Pixels> {
+                    return pixels != nullptr ? optional<Pixels>{*pixels} : nullopt;
+                };
+
+                maps          = MaterialMaps{};
+                maps.albedo   = copy(decoder.image(images.albedo));
+                maps.normal   = copy(decoder.image(images.normal));
+                maps.emission = copy(decoder.image(images.emission));
+                maps.orm      = pack_orm(decoder.image(images.occlusion), images.occlusion_strength,
+                                         decoder.image(images.metal_rough));
+                return true;
             };
-
-            material.albedo   = copy(images.texture(info_of(pbr.baseColorTexture)));
-            material.normal   = copy(images.texture(info_of(source.normalTexture)));
-            material.emission = copy(images.texture(info_of(source.emissiveTexture)));
-
-            f32 const strength = source.occlusionTexture.has_value()
-                                     ? source.occlusionTexture->strength
-                                     : 1.0f;
-            material.orm = pack_orm(images.texture(info_of(source.occlusionTexture)), strength,
-                                    images.texture(info_of(pbr.metallicRoughnessTexture)));
 
             return material;
         }
@@ -452,10 +527,12 @@ namespace encke
             return false;
         }
 
-        ImageCache images{asset, fs::path{path}.parent_path()};
+        // Only located here; the materials' decode jobs read them later.
+        auto const sources = std::make_shared<ImageSources const>(
+            locate_images(asset, fs::path{path}.parent_path()));
         for (fastgltf::Material const& material : asset.materials)
         {
-            model.materials.push_back(convert_material(material, images));
+            model.materials.push_back(convert_material(material, asset, sources));
         }
 
         // Primitives without a material get glTF's default one: white,

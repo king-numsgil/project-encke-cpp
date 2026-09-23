@@ -28,6 +28,21 @@ namespace encke::config
     // Capped further by the device's maxSamplerAnisotropy.
     inline constexpr f32 kMaxAnisotropy = 16.0f;
 
+    // -- geometry pool ----------------------------------------------------------------
+    // Every mesh shares one vertex buffer and one index buffer of these many
+    // elements: 96 MiB and 32 MiB of device memory. The test scene uses a
+    // fraction; the room is for streamed chunks.
+    inline constexpr u32 kGeometryVertexCapacity = 2u << 20;
+    inline constexpr u32 kGeometryIndexCapacity  = 8u << 20;
+
+    // -- uploads ----------------------------------------------------------------------
+    // Staging memory each frame may copy to the GPU, per frame in flight, so
+    // twice this in host memory. It is the per-frame upload budget: what does
+    // not fit waits for a later frame. Materials stage map by map, so the
+    // floor is one map: 80 MiB takes a 4K RGBA8 map (64 MiB) with room over.
+    // A single texture or mesh bigger than this can never be streamed.
+    inline constexpr u64 kStagingBytesPerFrame = 80ull << 20;
+
     // -- sun: cascaded shadow maps ------------------------------------------------
     // Splits blend logarithmic and uniform by kCascadeSplitLambda (1 is fully
     // logarithmic). Past kShadowDistance the sun is unshadowed; the last

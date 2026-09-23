@@ -149,8 +149,10 @@ add_executable(encke
 
     src/render/camera.cpp
     src/render/fly_camera.cpp
+    src/render/geometry_pool.cpp
     src/render/gltf.cpp
     src/render/material.cpp
+    src/render/material_loader.cpp
     src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/pixels.cpp
@@ -169,6 +171,7 @@ add_executable(encke
     src/vulkan/context.cpp
     src/vulkan/device.cpp
     src/vulkan/image.cpp
+    src/vulkan/staging.cpp
     src/vulkan/swapchain.cpp
     src/vulkan/texture.cpp
     src/vulkan/timestamps.cpp

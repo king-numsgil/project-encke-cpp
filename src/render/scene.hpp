@@ -114,6 +114,12 @@ namespace encke
         // out around.
         f64vec3 origin() const { return origin_; }
 
+        // Away from the centre of the one body this scene has, unit: where
+        // the environment's horizon lies. Lighting only; the camera has its
+        // own frame. With several bodies this becomes the nearest one's, or
+        // a blend, and is the scene's decision. World +Y means nothing here.
+        f64vec3 up_at(f64vec3 const& position) const;
+
         vector<SceneObject> objects;
         vector<SceneLight>  lights;
         Star                star;
@@ -133,7 +139,6 @@ namespace encke
         // black too. `sky_fill` gives the sky that fraction of the ground's
         // radiance anyway, for the light nearby objects would bounce, which
         // a two-colour environment cannot know about.
-        f64vec3 up{0.0, 1.0, 0.0};     // world, unit: away from the ground
         f32vec3 ground_albedo{0.0f};   // linear
         f32     sky_fill = 0.0f;
 
@@ -149,6 +154,7 @@ namespace encke
         SceneObject& add(MeshKind mesh, f64vec3 position, f64vec3 scale, MaterialKind material);
 
         f64vec3 origin_{0.0};
+        f64vec3 planet_centre_{0.0};
         bool    first_update_ = true;
     };
 }

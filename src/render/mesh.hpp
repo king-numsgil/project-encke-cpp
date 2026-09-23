@@ -1,12 +1,7 @@
 #pragma once
 
-#include "vulkan/buffer.hpp"
-
 namespace encke
 {
-    class VulkanAllocator;
-    class VulkanDevice;
-
     // Packed, and it must stay that way: GLM's default gentypes are packed in
     // this project precisely so a vertex array uploads without reinterpretation.
     // See the alignment notes in CLAUDE.md before changing any member's type.
@@ -34,32 +29,8 @@ namespace encke
     static_assert(offsetof(Vertex, tangent) == 24);
     static_assert(offsetof(Vertex, uv) == 40);
 
-    class Mesh
-    {
-    public:
-        Mesh() = default;
-        ~Mesh() = default;
-
-        Mesh(Mesh const&)            = delete;
-        Mesh& operator=(Mesh const&) = delete;
-        Mesh(Mesh&&)                 = delete;
-        Mesh& operator=(Mesh&&)      = delete;
-
-        bool init(VulkanAllocator const& allocator, VulkanDevice const& device,
-                  span<Vertex const> vertices, span<u32 const> indices);
-
-        void shutdown();
-
-        // Binds the buffers and issues the indexed draw.
-        void draw(VkCommandBuffer command) const;
-
-    private:
-        Buffer vertices_;
-        Buffer indices_;
-        u32    index_count_ = 0;
-    };
-
-    // Every mesh the renderer builds at startup. SceneObject::mesh picks one.
+    // Every mesh the renderer builds at startup, first into the geometry
+    // pool, so each is its own mesh id. SceneObject::mesh picks one.
     enum class MeshKind : u32
     {
         Cube   = 0,
