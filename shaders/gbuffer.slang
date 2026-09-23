@@ -110,6 +110,9 @@ GBuffer fragment_main(VertexOut input)
         // Mips average normals to shorter vectors; normalising after the
         // decode undoes that.
         float3 perturbed = bumped * 2.0f - 1.0f;
+        // Normal strength, glTF's normalTexture.scale. Fixed at 2 for every
+        // material by eye; at 1 the maps read too flat under the low sun.
+        perturbed.xy *= 2.0f;
         normal = normalize(tangent * perturbed.x + bitangent * perturbed.y + normal * perturbed.z);
     }
 

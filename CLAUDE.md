@@ -535,6 +535,8 @@ Known gaps:
   sets, not for a real asset count.
 - Materials are a compile-time list with tile sizes in `render/material.cpp`.
   No material description files.
+- Normal strength is hardcoded at 2 in `shaders/gbuffer.slang` for every
+  material, chosen by eye. It is meant to become a per-material parameter.
 
 ## Camera control
 
