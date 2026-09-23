@@ -532,6 +532,12 @@ Known gaps:
   frame. Only the range limit fades.
 - Shadowed spots are limited to about 120 degrees of cone; one map cannot
   cover wider without stretching badly.
+- **A spot must not sit in the plane of a face beside it.** Such a face is
+  edge-on in the spot's map, and depth clamp flattens it onto the near plane
+  as a solid occluder covering everything on one side of a straight line.
+  The mast lights once sat on their poles' axes at exactly the height of the
+  top face, and each pool was cut in half, but only within shadow range.
+  They now hang 0.2 m toward their targets, 5 cm above the pole tops.
 - Shadow maps are single-copy, like the G-buffer: each frame's entry barrier
   waits on the previous frame's lighting reads.
 

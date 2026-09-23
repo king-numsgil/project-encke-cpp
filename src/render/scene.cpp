@@ -344,9 +344,15 @@ namespace encke
             entt::entity const lamp = add(cube, head, f64vec3{0.5, 0.4, 0.5},
                                           {0.1f, 0.1f, 0.1f}, 0.5f, 0.0f, tint * 2.0e5f);
 
-            // Hung under the lamp head, which is unrotated, so directions in
-            // its frame are the scene's.
-            f64vec3 const hang{0.0, -0.3, 0.0};
+            // Under the lamp head, which is unrotated, so directions in its
+            // frame are the scene's: 5 cm below its bottom face and 5 cm
+            // above the pole's top, shifted 0.2 m toward the target so the
+            // pole is behind it. On the pole's axis the light sat in the
+            // plane of its top face, which the spot map saw edge-on and
+            // clamped onto the near plane, cutting the pool in half.
+            f64vec3 toward = mast.target - head;
+            toward.y       = 0.0;
+            f64vec3 const hang = glm::normalize(toward) * 0.2 + f64vec3{0.0, -0.25, 0.0};
             add_light(lamp, hang, mast.target - (head + hang),
                       Light{
                           .colour       = tint,
