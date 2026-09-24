@@ -3,6 +3,7 @@
   "version-string": "0.1.0",
   "dependencies": [
     "bshoshany-thread-pool",
+    "catch2",
     "cpuinfo",
     "entt",
     "fastgltf",

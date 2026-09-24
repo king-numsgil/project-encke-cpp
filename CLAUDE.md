@@ -135,6 +135,7 @@ shaders/
     normal.slang         octahedral encode and decode
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
+tests/                 Catch2, mirroring src/: camera projection and view, transform propagation
 assets/
   textures/            one directory per ambientCG set; CREDITS.md says where each came from
   models/              glTF files; CREDITS.md holds their licences
@@ -1187,8 +1188,27 @@ it will not exist in a fresh clone. Recreate it or fall back to raw `cmake` with
 
 Run directly: `build/<preset>/encke.exe`
 
-`ctest` is enabled (`enable_testing()`) but no tests are registered yet. Once
-tests exist: `ctest --test-dir build/gcc-debug -R <name>` for a single test.
+### Tests
+
+Catch2 v3, from vcpkg. Every source but `main.cpp` builds into `encke_core`,
+an OBJECT library that both `encke` and `encke_tests` link, so the tests run
+the app's own objects under the same flags, defines and allocator. It is an
+object library and not a static one because `core/memory.cpp` replaces
+`operator new`: from an archive, that object would link only if something
+happened to reference it. Tests live in `tests/`, mirroring `src/`, one
+`<name>_test.cpp` per unit, each listed in `encke_tests`'s sources.
+
+```powershell
+.claude\cmake.ps1 -Test                            # build, then ctest
+build\clang-sanitize\encke_tests.exe "[camera]"    # one tag, directly
+```
+
+`catch_discover_tests` runs in `PRE_TEST` mode, listing the tests when ctest
+starts rather than after each build, so building never executes the binary.
+Under clang-sanitize it needs `F:\msys2\clang64\bin` on PATH for the ASan
+runtime DLL; `-Test` sets that, a bare `ctest` from a terminal does not.
+`encke_tests` carries its own PCH, since clang rejects one built under another
+target's include directories.
 
 ### Do not force a reconfigure casually
 
@@ -1255,7 +1275,7 @@ backend, so it has no equivalent failure mode.
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
 `sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`,
-`entt`.
+`entt`, `catch2`.
 Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
 ImPlot.
 

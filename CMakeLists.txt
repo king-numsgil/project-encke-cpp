@@ -143,8 +143,11 @@ target_link_libraries(encke_imgui PUBLIC SDL3::SDL3)
 # Not ours to fix; keep their diagnostics out of our build output.
 target_compile_options(encke_imgui PRIVATE -w)
 
-add_executable(encke
-    src/main.cpp
+# Everything but main(), as an object library so encke and the tests link the
+# same objects. Not a static library: core/memory.cpp replaces operator new,
+# and a static archive would link that object only if something happened to
+# reference it, leaving a binary half on mimalloc.
+add_library(encke_core OBJECT
     src/app.cpp
 
     src/assets/asset_manager.cpp
@@ -190,13 +193,16 @@ add_executable(encke
     src/world/transform.cpp
 )
 
-target_include_directories(encke PRIVATE src)
-target_include_directories(encke SYSTEM PRIVATE ${BS_THREAD_POOL_INCLUDE_DIR})
+add_executable(encke src/main.cpp)
+target_link_libraries(encke PRIVATE encke_core)
+
+target_include_directories(encke_core PUBLIC src)
+target_include_directories(encke_core SYSTEM PRIVATE ${BS_THREAD_POOL_INCLUDE_DIR})
 
 # Textures are read from the source tree, not copied beside the executable the
 # way SPIR-V is: they are tens of megabytes, change rarely, and a copy per
 # build directory would buy nothing on a development machine.
-target_compile_definitions(encke PRIVATE
+target_compile_definitions(encke_core PUBLIC
     ENCKE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
 )
 
@@ -265,14 +271,15 @@ add_custom_target(encke_shaders DEPENDS
 add_dependencies(encke encke_shaders)
 
 # volk.h, SDL3 and glm are stable and heavy; our own code is not yet either.
-target_precompile_headers(encke PRIVATE src/core/pch.hpp)
+# main.cpp is one file and includes the header directly, so encke has none.
+target_precompile_headers(encke_core PRIVATE src/core/pch.hpp)
 
-set_target_properties(encke PROPERTIES
+set_target_properties(encke_core encke PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET     "hidden"
 )
 
-target_link_libraries(encke PUBLIC
+target_link_libraries(encke_core PUBLIC
     # Headers only, never Vulkan::Vulkan. The import library for vulkan-1.dll
     # defines vkCreateInstance and friends as real symbols, and volk defines the
     # same names as function pointers -- linking both is a multiple-definition
@@ -293,10 +300,10 @@ target_link_libraries(encke PUBLIC
 # build links, then the first thread throws "Enable multithreading to use
 # std::thread: Operation not permitted". Correct and harmless everywhere.
 find_package(Threads REQUIRED)
-target_link_libraries(encke PRIVATE Threads::Threads)
+target_link_libraries(encke_core PUBLIC Threads::Threads)
 
 if(ENCKE_USE_MIMALLOC)
-    target_link_libraries(encke PUBLIC
+    target_link_libraries(encke_core PUBLIC
         $<IF:$<TARGET_EXISTS:mimalloc-static>,mimalloc-static,mimalloc>
     )
 
@@ -308,16 +315,17 @@ if(ENCKE_USE_MIMALLOC)
     # corrupted mimalloc's pages; MI_DEBUG=FULL caught it as
     # "mi_free_size: invalid pointer". Statically linked, libstdc++'s
     # references to operator new resolve to mimalloc's like everything else.
+    # PUBLIC, so every executable linking encke_core gets it, tests included.
     if(MINGW)
-        target_link_options(encke PRIVATE -static-libstdc++ -static-libgcc)
+        target_link_options(encke_core PUBLIC -static-libstdc++ -static-libgcc)
     endif()
 endif()
 
-target_compile_definitions(encke PUBLIC
+target_compile_definitions(encke_core PUBLIC
     ENCKE_USE_MIMALLOC=$<BOOL:${ENCKE_USE_MIMALLOC}>
 )
 
-target_compile_definitions(encke PUBLIC
+target_compile_definitions(encke_core PUBLIC
     # volk owns every Vulkan entry point. Without this, vulkan.h declares
     # prototypes that link against the static loader and silently bypass volk,
     # and volk.h itself hard-errors if it sees vulkan.h included without it.
@@ -347,7 +355,7 @@ target_compile_definitions(encke PUBLIC
     # actually wanted.
 )
 
-target_compile_options(encke PUBLIC
+target_compile_options(encke_core PUBLIC
     $<$<CXX_COMPILER_ID:GNU,Clang>:-mavx2 -mfma>
     $<$<CXX_COMPILER_ID:MSVC>:/arch:AVX2>
 
@@ -398,9 +406,37 @@ target_compile_options(encke PUBLIC
     $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:RelWithDebInfo>>:/Gw /GL /GF>
 )
 
-target_compile_definitions(encke PUBLIC
+target_compile_definitions(encke_core PUBLIC
     $<$<CXX_COMPILER_ID:GNU,Clang>:$<$<CONFIG:Debug>:_GLIBCXX_ASSERTIONS>>
     $<$<CXX_COMPILER_ID:MSVC>:_SCL_SECURE_NO_WARNINGS _CRT_SECURE_NO_WARNINGS>
 )
 
+# --- tests -------------------------------------------------------------------
+
 enable_testing()
+
+find_package(Catch2 3 CONFIG REQUIRED)
+include(Catch)
+
+add_executable(encke_tests
+    tests/render/camera_test.cpp
+    tests/world/transform_test.cpp
+)
+
+# Every flag, define and link option comes through encke_core, so the tests
+# build exactly as the app does. Catch2WithMain supplies main().
+target_link_libraries(encke_tests PRIVATE encke_core Catch2::Catch2WithMain)
+
+# Its own, not REUSE_FROM encke_core: Catch2's include directories differ,
+# and clang rejects a PCH built under other flags.
+target_precompile_headers(encke_tests PRIVATE src/core/pch.hpp)
+
+set_target_properties(encke_tests PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET     "hidden"
+)
+
+# PRE_TEST lists the tests when ctest runs rather than as a post-build step,
+# so a build never executes the binary: under clang-sanitize that needs the
+# ASan runtime DLL on PATH, which only a test run can be expected to set.
+catch_discover_tests(encke_tests DISCOVERY_MODE PRE_TEST)
