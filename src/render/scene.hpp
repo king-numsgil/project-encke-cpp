@@ -60,8 +60,10 @@ namespace encke
         // visible jitter.
         //
         // Asks `assets` for the meshes and materials it uses; they stream in
-        // while it draws.
-        void build_test_planet(AssetManager& assets);
+        // while it draws. The Earth is a terrain::PlanetTerrain body for
+        // terrain::TerrainBuilder to mesh, at `terrain_lod`, which also sets
+        // where its height is zeroed at the pole.
+        void build_test_planet(AssetManager& assets, u32 terrain_lod);
 
         // A root entity for `spawn.model`, at `position` (world) with
         // `orientation`, returned at once so it can be placed and parented

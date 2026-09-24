@@ -58,7 +58,7 @@ namespace encke::terrain
             // The grid point of sample (i, j, k).
             i64vec3 grid(u32 i, u32 j, u32 k) const
             {
-                return request.origin + (i64vec3{i, j, k} - i64vec3{1}) * (i64{1} << request.lod);
+                return request.origin + (i64vec3{i, j, k} - i64vec3{2}) * (i64{1} << request.lod);
             }
         };
 
@@ -139,14 +139,14 @@ namespace encke::terrain
                 Chunk const a = sample(sampler, sampler.chunk(origin, lod));
                 Chunk const b = sample(sampler, sampler.chunk(origin + step, lod));
 
-                // a's samples 32 and 33 along the axis are b's 0 and 1.
+                // a's samples 32 to 35 along the axis are b's 0 to 3.
                 u32 const axis       = a.request.samples_per_axis();
                 u32       mismatches = 0;
                 for (u32 u = 0; u < axis; ++u)
                 {
                     for (u32 v = 0; v < axis; ++v)
                     {
-                        for (u32 layer = 0; layer < 2; ++layer)
+                        for (u32 layer = 0; layer < 4; ++layer)
                         {
                             // The stepped axis takes `along`; u and v run
                             // over the other two.
@@ -192,15 +192,15 @@ namespace encke::terrain
             Chunk const a = sample(sampler, coarse);
             Chunk const b = sample(sampler, fine);
 
-            // Coarse (33, j, k) and fine (1, 2j - 1, 2k - 1) are one point,
+            // Coarse (34, j, k) and fine (2, 2j - 2, 2k - 2) are one point,
             // wherever the fine chunk reaches.
             u32 mismatches = 0;
-            for (u32 j = 1; j <= 17; ++j)
+            for (u32 j = 1; j <= 18; ++j)
             {
-                for (u32 k = 1; k <= 17; ++k)
+                for (u32 k = 1; k <= 18; ++k)
                 {
-                    REQUIRE(a.grid(33, j, k) == b.grid(1, 2 * j - 1, 2 * k - 1));
-                    if (!same_bits(a.at(33, j, k), b.at(1, 2 * j - 1, 2 * k - 1)))
+                    REQUIRE(a.grid(34, j, k) == b.grid(2, 2 * j - 2, 2 * k - 2));
+                    if (!same_bits(a.at(34, j, k), b.at(2, 2 * j - 2, 2 * k - 2)))
                     {
                         ++mismatches;
                     }
@@ -241,18 +241,18 @@ namespace encke::terrain
                 {
                     for (u32 a = 0; a < n; ++a)
                     {
-                        // Coarse point a is the parent's sample a + 1.
-                        REQUIRE(child.grid(2 * a + 1, 2 * b + 1, 2 * c + 1) == p.grid(a + 1, b + 1, c + 1));
+                        // Coarse point a is the parent's sample a + 2.
+                        REQUIRE(child.grid(2 * a + 2, 2 * b + 2, 2 * c + 2) == p.grid(a + 2, b + 2, c + 2));
 
                         size_t const  index    = child.coarse_index(a, b, c);
                         f32vec3 const gradient = child.coarse_gradients[index];
                         f32vec3 const expected{
-                            central_difference(p.at(a, b + 1, c + 1), p.at(a + 2, b + 1, c + 1), voxel),
-                            central_difference(p.at(a + 1, b, c + 1), p.at(a + 1, b + 2, c + 1), voxel),
-                            central_difference(p.at(a + 1, b + 1, c), p.at(a + 1, b + 1, c + 2), voxel),
+                            central_difference(p.at(a + 1, b + 2, c + 2), p.at(a + 3, b + 2, c + 2), voxel),
+                            central_difference(p.at(a + 2, b + 1, c + 2), p.at(a + 2, b + 3, c + 2), voxel),
+                            central_difference(p.at(a + 2, b + 2, c + 1), p.at(a + 2, b + 2, c + 3), voxel),
                         };
 
-                        if (!same_bits(child.coarse_values[index], p.at(a + 1, b + 1, c + 1)))
+                        if (!same_bits(child.coarse_values[index], p.at(a + 2, b + 2, c + 2)))
                         {
                             ++value_mismatches;
                         }
@@ -276,8 +276,8 @@ namespace encke::terrain
             {
                 for (u32 b = 0; b < n; ++b)
                 {
-                    REQUIRE(neighbour.grid(1, 2 * b + 1, 2 * c + 1) == p.grid(33, b + 1, c + 1));
-                    if (!same_bits(neighbour.coarse_values[neighbour.coarse_index(0, b, c)], p.at(33, b + 1, c + 1)))
+                    REQUIRE(neighbour.grid(2, 2 * b + 2, 2 * c + 2) == p.grid(34, b + 2, c + 2));
+                    if (!same_bits(neighbour.coarse_values[neighbour.coarse_index(0, b, c)], p.at(34, b + 2, c + 2)))
                     {
                         ++face_mismatches;
                     }
@@ -290,7 +290,7 @@ namespace encke::terrain
             bool differs = false;
             for (u32 a = 0; a < n && !differs; ++a)
             {
-                differs = !same_bits(child.coarse_values[child.coarse_index(a, a, a)], child.at(2 * a + 1, 2 * a + 1, 2 * a + 1));
+                differs = !same_bits(child.coarse_values[child.coarse_index(a, a, a)], child.at(2 * a + 2, 2 * a + 2, 2 * a + 2));
             }
             CHECK(differs);
         }
@@ -302,7 +302,7 @@ namespace encke::terrain
 
         std::mt19937_64                     random{7};
         std::uniform_real_distribution<f64> direction{-1.0, 1.0};
-        std::uniform_int_distribution<u32>  interior{1, 32};
+        std::uniform_int_distribution<u32>  interior{1, 34};
 
         for (u32 const lod : {0u, 2u, 4u, 9u})
         {

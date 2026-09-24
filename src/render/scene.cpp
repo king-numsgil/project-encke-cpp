@@ -6,6 +6,7 @@
 #include "core/log.hpp"
 #include "render/mesh.hpp"
 #include "render/pixels.hpp"
+#include "terrain/planet.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -45,17 +46,16 @@ namespace encke
         }
 
         // Tessellation of the procedural meshes.
-        constexpr u32 kSphereSlices     = 48;
-        constexpr u32 kSphereStacks     = 24;
-        constexpr u32 kPlanetSlices     = 192;
-        constexpr f64 kPlanetFirstRing  = 0.25;   // metres of arc from the pole
-        constexpr f64 kPlanetRingGrowth = 1.08;
+        constexpr u32 kSphereSlices = 48;
+        constexpr u32 kSphereStacks = 24;
+
+        // The Earth's terrain noise.
+        constexpr i32 kTerrainSeed = 1337;
 
         // The test scene's ambientCG sets and how many metres one repeat
         // covers, across and down; see assets/textures/CREDITS.md.
         struct Materials
         {
-            MaterialHandle ground;
             MaterialHandle concrete;
             MaterialHandle planks;
             MaterialHandle painted_metal;
@@ -66,7 +66,6 @@ namespace encke
         Materials load_materials(AssetManager& assets)
         {
             return Materials{
-                .ground        = assets.load_ambientcg("Ground110", f32vec2{2.1f}),
                 .concrete      = assets.load_ambientcg("Concrete034", f32vec2{1.1f, 0.55f}),
                 .planks        = assets.load_ambientcg("Planks037A", f32vec2{2.0f}),
                 .painted_metal = assets.load_ambientcg("PaintedMetal006", f32vec2{1.5f}),
@@ -184,14 +183,13 @@ namespace encke
         }
     }
 
-    void Scene::build_test_planet(AssetManager& assets)
+    void Scene::build_test_planet(AssetManager& assets, u32 terrain_lod)
     {
         registry.clear();
         origin_ = kWorldOrigin;
 
         MeshHandle cube;
         MeshHandle sphere;
-        MeshHandle planet;
         {
             MeshData data;
             build_cube(data.vertices, data.indices);
@@ -200,30 +198,31 @@ namespace encke
             data = MeshData{};
             build_sphere(data.vertices, data.indices, kSphereSlices, kSphereStacks);
             sphere = assets.add_mesh("sphere", std::move(data));
-
-            data = MeshData{};
-            build_planet(data.vertices, data.indices, kEarthRadius, kPlanetSlices,
-                         kPlanetFirstRing, kPlanetRingGrowth);
-            planet = assets.add_mesh("planet", std::move(data));
         }
 
         Materials const materials = load_materials(assets);
 
         ev100 = 14.0f;
 
-        // Local frame at the pole: +Y is up, the ground is y = 0. The planet
-        // curves away by d^2 / 2R, a tenth of a millimetre at 30 m, so the
-        // object field can treat it as flat. The mesh's origin is the pole,
-        // so the body's centre is a radius below it. Ground albedo is a
-        // guess at the Ground110 set's average, not measured from it.
+        // Local frame at the pole: +Y is up, the ground is y = 0. The Earth
+        // is terrain, meshed by terrain::TerrainBuilder about its entity's
+        // origin, so the entity sits at the centre, a radius below the pole.
+        // Its height is zeroed at the pole, where the object field stands;
+        // at a coarse LOD the mesh still misses the pole by the voxels' sag.
+        // Ground albedo is a guess at the terrain's average colour.
         {
-            entt::entity const earth = add(planet, f64vec3{0.0}, f64vec3{1.0}, materials.ground);
+            auto terrain = std::make_shared<terrain::BodyTerrain>(terrain::example_planet(kTerrainSeed));
+            terrain::zero_height_at(*terrain, f64vec3{0.0, kEarthRadius, 0.0}, terrain_lod);
+
+            entt::entity const earth = registry.create();
+            registry.emplace<Transform>(earth, Transform{.position = origin_ + f64vec3{0.0, -kEarthRadius, 0.0}});
             registry.emplace<Body>(earth, Body{
                                               .radius        = kEarthRadius,
-                                              .centre        = f64vec3{0.0, -kEarthRadius, 0.0},
-                                              .ground_albedo = f32vec3{0.25f},
+                                              .centre        = f64vec3{0.0},
+                                              .ground_albedo = f32vec3{0.12f},
                                               .sky_fill      = 0.1f,
                                           });
+            registry.emplace<terrain::PlanetTerrain>(earth, terrain::PlanetTerrain{.terrain = std::move(terrain)});
         }
 
         // The Moon, straight up at its real distance from the Earth's centre.

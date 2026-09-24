@@ -7,7 +7,7 @@ namespace encke
     // Linux). Only platform/thread.cpp includes it, since on Windows it pulls
     // in <windows.h>.
     //
-    // Unused until the SDF workers exist; see CLAUDE.md.
+    // WorkerPool lowers its threads with this.
 
     enum class ThreadPriority
     {

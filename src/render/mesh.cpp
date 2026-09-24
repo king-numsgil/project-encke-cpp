@@ -186,41 +186,4 @@ namespace encke
                         };
                     });
     }
-
-    void build_planet(vector<Vertex>& vertices, vector<u32>& indices, f64 radius, u32 slices,
-                      f64 first_ring, f64 ring_growth)
-    {
-        // The last ring stops short of the south pole by at least a step, so
-        // no ring collapses onto the pole vertex.
-        vector<f64> polar;
-        for (f64 arc = first_ring; arc < kPi * radius / ring_growth; arc *= ring_growth)
-        {
-            polar.push_back(arc / radius);
-        }
-
-        // Composed in f64 relative to the pole, then narrowed: see mesh.hpp.
-        // Planar texture coordinates (x, z): the tangent is +x laid into the
-        // surface, and cross(normal, +x) at the pole is -z, the top of the
-        // image, since v = z runs down it.
-        build_rings(vertices, indices, polar, slices,
-                    [radius](f64vec3 const& direction, f64, f64) {
-                        f64vec3 const local = direction * radius - f64vec3{0.0, radius, 0.0};
-
-                        f64vec3 across = f64vec3{1.0, 0.0, 0.0} - direction * direction.x;
-                        if (glm::length(across) < 1e-6)
-                        {
-                            // Where the normal is +-x, a quarter of the way
-                            // round the planet; any tangent will do there.
-                            across = f64vec3{0.0, 0.0, 1.0};
-                        }
-
-                        return Vertex{
-                            f32vec3{local},
-                            f32vec3{direction},
-                            f32vec4{f32vec3{glm::normalize(across)}, 1.0f},
-                            f32vec2{f64vec2{local.x, local.z}},
-                        };
-                    });
-    }
-
 }

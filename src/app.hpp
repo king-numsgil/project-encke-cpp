@@ -4,9 +4,11 @@
 
 #include "assets/asset_manager.hpp"
 #include "platform/window.hpp"
+#include "platform/worker_pool.hpp"
 #include "render/fly_camera.hpp"
 #include "render/renderer.hpp"
 #include "render/scene.hpp"
+#include "terrain/planet.hpp"
 #include "ui/imgui_layer.hpp"
 #include "ui/stats_window.hpp"
 #include "vulkan/allocator.hpp"
@@ -79,6 +81,12 @@ namespace encke
         Scene     scene_;
         FlyCamera fly_;
         bool      looking_ = false;
+
+        terrain::TerrainBuilder terrain_;
+
+        // Last, so its threads stop before anything above goes: completions
+        // reach the scene and the assets, and jobs the builder's state.
+        WorkerPool pool_;
 
         // Set from ENCKE_FIXED_TIME; pins animation so captures are comparable.
         optional<f64> fixed_time_;

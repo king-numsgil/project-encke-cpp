@@ -5,6 +5,7 @@
 #include "core/log.hpp"
 #include "core/memory.hpp"
 #include "platform/cpu.hpp"
+#include "render/config.hpp"
 #include "render/pixels.hpp"
 #include "ui/image_window.hpp"
 
@@ -73,6 +74,14 @@ namespace encke
             case DebugWindow::Cascades:    return "Shadow cascades";
             }
             return "unknown";
+        }
+
+        // ENCKE_TERRAIN_LOD overrides config::kTerrainLod, the one LOD every
+        // terrain chunk is meshed at.
+        u32 terrain_lod()
+        {
+            char const* const value = std::getenv("ENCKE_TERRAIN_LOD");
+            return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : config::kTerrainLod;
         }
 
         // ENCKE_FIXED_TIME pins animation to one instant, so two runs render
@@ -254,7 +263,18 @@ namespace encke
         window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
 
         assets_.start();
-        scene_.build_test_planet(assets_);
+        u32 const lod = terrain_lod();
+        scene_.build_test_planet(assets_, lod);
+
+        // One core left for this thread and the driver's.
+        u32 const workers = std::max(cpu.physical_cores, 2u) - 1;
+        pool_.start(workers, "terrain");
+        log::info("worker pool: %u threads", pool_.size());
+        terrain_.build(scene_, assets_, pool_, terrain::TerrainBuildSettings{
+                                                   .lod            = lod,
+                                                   .cull_factor    = config::kTerrainCullFactor,
+                                                   .verify_culling = std::getenv("ENCKE_TERRAIN_VERIFY_CULL") != nullptr,
+                                               });
 
         // The test scene's frame is the world's rotated by nothing, only
         // moved to the pole, so its directions pass through unchanged.
@@ -637,6 +657,9 @@ namespace encke
             // composes its world transform for this frame.
             fly(events, delta);
             assets_.update();
+            // Finished terrain chunks become meshes and entities here, before
+            // the scene composes world transforms.
+            pool_.drain();
             scene_.update(seconds, assets_);
 
             draw_ui();
@@ -647,9 +670,10 @@ namespace encke
             renderer_.set_frame_time(delta, fixed_time_.has_value());
 
             // Not before streaming has settled: until then which materials
-            // have landed depends on timing, and captures would differ.
+            // and terrain chunks have landed depends on timing, and captures
+            // would differ.
             bool const capturing = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
-                                   assets_.idle() && renderer_.streaming_idle();
+                                   terrain_.idle() && assets_.idle() && renderer_.streaming_idle();
             if (capturing)
             {
                 renderer_.request_capture();

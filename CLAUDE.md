@@ -59,11 +59,12 @@ maps, a G-buffer pass, compute light clustering, compute lighting and a tonemap
 pass. The test scene is the north pole of an Earth-sized planet, strewn with
 boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
 cascades), shadowed spot lights on masts and a ring of point lamps, with the
-Moon overhead at its real distance. The built-in geometry is generated in code
-(cube, UV sphere, planet); glTF models load through fastgltf, and the Khronos
-DamagedHelmet sits on the table. The ground and about half the objects carry
-CC0 PBR textures from ambientCG; the rest keep flat materials. A Dear ImGui overlay shows frame
-and per-pass GPU timings, graphed with ImPlot.
+Moon overhead at its real distance. The Earth is procedural terrain, meshed
+with Surface Nets on a worker pool at one uniform LOD. The other built-in
+geometry is generated in code (cube, UV sphere); glTF models load through
+fastgltf, and the Khronos DamagedHelmet sits on the table. About half the
+objects carry CC0 PBR textures from ambientCG; the rest keep flat materials. A
+Dear ImGui overlay shows frame and per-pass GPU timings, graphed with ImPlot.
 
 ```
 src/
@@ -76,7 +77,8 @@ src/
   platform/
     window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
     cpu.{hpp,cpp}     physical and logical core counts, via pytorch/cpuinfo
-    thread.{hpp,cpp}  calling thread's OS priority and name, via BS::thread_pool; unused yet
+    thread.{hpp,cpp}  calling thread's OS priority and name, via BS::thread_pool
+    worker_pool.{hpp,cpp} jthreads at background priority; jobs return main-thread completions
   vulkan/
     context.{hpp,cpp}    volk, instance, validation, surface
     device.{hpp,cpp}     device selection, queues, submit_immediate
@@ -110,7 +112,7 @@ src/
     material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
     gltf.{hpp,cpp}       glTF -> CPU meshes, nodes, materials; image decoding, via fastgltf
     pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
-    mesh.{hpp,cpp}       Vertex, procedural cube, sphere, pole-relative planet
+    mesh.{hpp,cpp}       Vertex, procedural cube and sphere
     geometry_pool.{hpp,cpp} every mesh in one vertex and one index buffer, VMA virtual blocks
     config.hpp           every renderer capacity and tuning constant
     shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
@@ -122,6 +124,8 @@ src/
     detail_noise.{hpp,cpp} lattice-split Perlin fBm octaves, f64 origin + f32 offsets
     macro_field.{hpp,cpp}  FastNoise2 graphs per channel on a body-fixed lattice, trilinear
     terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
+    surface_nets.{hpp,cpp}  a chunk's samples -> vertices and quads, under the ownership rule
+    planet.{hpp,cpp}     PlanetTerrain component, chunk planning and culling, TerrainBuilder
     benchmark.{hpp,cpp}  `encke --headless`: octaves per LOD; samples/s per layer, apron, gradients, LOD 0 and 4
 shaders/
   shadow_depth.slang     depth only: one shadow map, cascade or spot
@@ -220,7 +224,8 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   `InstanceIndex - BaseInstance` and would always read 0. The G-buffer
   passes it to the fragment stage flat. `multiDrawIndirect` and
   `drawIndirectFirstInstance` are required at device selection. The draw
-  lists are still built on the CPU and still capped at `kMaxObjects`.
+  lists are still built on the CPU and still capped at `kMaxObjects`, which
+  is 4096 so a planet's terrain chunks fit beside the scene.
 - **The Y flip lives in the viewport**, via `flipped_viewport()` — negative
   height, set per frame. Projection matrices stay conventional.
 - **Back-face culling is on with `frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE`,
@@ -543,8 +548,9 @@ lookup, before narrowing. The GPU never sees a world position here either.
 Known gaps:
 
 - No blending between cascades; the seam can show as a change in softness.
-- Caster culling is a bounding-sphere test against each map. The planet always
-  passes and fills every map, so the shadow pass is fill-bound on it.
+- Caster culling is a bounding-sphere test against each map. Terrain chunks
+  are a thousand kilometres across at the default LOD, so the one under the
+  camera always passes and fills every map.
 - When a spot loses its slot to a nearer one, its shadow switches off in one
   frame. Only the range limit fades.
 - Shadowed spots are limited to about 120 degrees of cone; one map cannot
@@ -592,8 +598,8 @@ later run on its own threads without the renderer seeing half an update.
   `CameraView`, which is all the renderer and shadow planning read.
 - **Stars and bodies are entities** (`world/bodies.hpp`). A `Star` is
   luminous intensity and colour at its entity's position, not drawn. A
-  `Body` is a radius, its centre in the entity's frame (the planet's is a
-  radius below its pole-centred mesh) and its environment: ground albedo
+  `Body` is a radius, its centre in the entity's frame (the Earth's entity
+  sits at its centre, since its terrain is meshed about it) and its environment: ground albedo
   and sky fill. The extract picks, at the camera, the star giving the most
   illuminance and the body whose surface is nearest, into
   `RenderList::star` and `surroundings`; with neither, nothing lights the
@@ -690,11 +696,12 @@ Known gaps:
 ## The test planet
 
 `Scene::build_test_planet`: the ground is the north pole of an Earth-radius
-sphere, with `kWorldOrigin` at the pole. The planet mesh's local origin is the
-pole, not the centre, because an f32 vertex 6,371 km from its origin is good
-to about half a metre. Measured from the pole, vertices underfoot are small
-numbers with full precision. Rings are spaced geometrically, so the facets are
-centimetres underfoot and hundreds of kilometres at the horizon.
+terrain body, with `kWorldOrigin` at the pole and the body's entity a radius
+below it, at its centre. Its terrain is `terrain::example_planet`, with the
+height channel's bias moved so the macro height at the pole is zero; see
+*First light* for the meshing. At the default LOD a voxel is 33 km, so the
+mesh under the object field is a facet that misses the true pole surface by
+up to tens of metres, and the objects can float over it or sink into it.
 
 The Moon is a sphere of its real radius at its real distance straight up. It
 is a few pixels across, as it should be; look straight up to find it.
@@ -702,7 +709,8 @@ is a few pixels across, as it should be; look straight up to find it.
 ## Textures
 
 Six CC0 sets from ambientCG live in `assets/textures/`, 1K JPGs, with their
-source and licence in `CREDITS.md`. They are read from the source tree through
+source and licence in `CREDITS.md`. Ground110 covered the old planet mesh and
+is unused since the Earth became terrain. They are read from the source tree through
 `ENCKE_ASSET_DIR`, which CMake bakes in, rather than copied beside the
 executable like SPIR-V: tens of megabytes that rarely change. A shipped build
 would need that revisited.
@@ -786,9 +794,9 @@ non-uniformly scaled sphere would smear.
 - **Sphere**: u westward round the equator, v from the north pole, both arc
   length. The seam column is duplicated and each pole is a vertex per slice,
   so neither wraps nor pinches.
-- **Planet**: planar, the local x and z in metres. Exact on the flat ground
-  near the pole; far out the coordinates are large enough to lose f32
-  precision, and by then every sample comes from the smallest mips.
+- **Terrain**: not metres. u is slope and v is height, addressing a 64x64
+  lookup table built in code (`terrain/planet.cpp`), through a non-tiling
+  material.
 
 A glTF material is **non-tiling**: its UVs are 0..1 over an atlas, and the
 renderer sends `texture_scale = (1, 1, 1, 1)`, which makes the stretch
@@ -840,10 +848,10 @@ Known gaps:
 
 ## Terrain noise
 
-`src/terrain` is the procedural field for smooth-voxel terrain (Surface Nets
-with CDLOD geomorph, not yet built), for planets at 1:1 and for asteroids.
-Nothing in the running app samples it yet; `encke --headless` benchmarks it.
-The field is `|p| - radius - height(p)`, body-relative f64 metres, negative
+`src/terrain` is the procedural field for smooth-voxel terrain (Surface Nets,
+with CDLOD geomorph to come), for planets at 1:1 and for asteroids. The
+Earth is meshed from it (*First light*, below); `encke --headless` benchmarks
+it. The field is `|p| - radius - height(p)`, body-relative f64 metres, negative
 inside.
 
 Two layers. **Macro** is FastNoise2 node graphs from encoded strings, one
@@ -899,9 +907,13 @@ and floor(o * f * L) is not L * floor(o * f).
   differently for some chunks, or letting a compiler contract it (hence
   `-ffp-contract=off`) would break the seam tests, which is what they are
   for.
-- **The (N+2)^3 layout has central differences at sample offsets 0..N-1.**
-  Offset N, the corner shared with the next chunk, has no neighbour past it
-  in this chunk.
+- **A chunk is sampled on (N+4)^3, 36^3 for N = 32**, sample s at corner
+  s - 2. It follows from the mesher's ownership rule: a chunk owns corners 0
+  to N - 1 and the quad of every edge running +x, +y or +z from one; the four
+  cells around such an edge lie in -1 to N - 1, so vertices are placed there,
+  and those cells' corners run from -1 to N. A central difference at every one
+  of them needs -2 to N + 1. Change the ownership rule and this changes with
+  it.
 - **Determinism.** The port builds FastNoise2 with `FASTNOISE2_STRICT_FP` and
   AVX2 as its only feature set, and nodes are created at `kFeatureSet` (AVX2).
   The octave rotations are integer quaternions, divided once, and the
@@ -942,12 +954,56 @@ threads other than the one that allocated them. They passed under
 Known gaps:
 
 - No Node Editor live link. The port builds without the editor tools, and
-  its `NodeEditorIpc` library is not packaged. With nothing in the app drawing
-  terrain there is nothing to tune against yet.
+  its `NodeEditorIpc` library is not packaged.
 - `example_planet` stands in for authored graphs; its channel graphs are built
   in code through `encode_fbm_graph`.
 - Bit-exactness holds within one build. GCC and clang builds of FastNoise2
   are not known to agree with each other.
+
+### First light: the Earth as terrain
+
+`terrain::TerrainBuilder` meshes every entity carrying a `PlanetTerrain`
+(its `BodyTerrain`: radius, seed, graph set) at one uniform LOD,
+`config::kTerrainLod` or `ENCKE_TERRAIN_LOD`. There is no octree, geomorph or
+streaming yet: it runs once at startup.
+
+- **Planning** (`plan_chunks`) walks the body's bounding cube, radius plus
+  `height_bound`, in chunks, and culls a chunk when |SDF| at its centre is more
+  than `config::kTerrainCullFactor` half-diagonals. The field's gradient is 1
+  plus the terrain's slope, so the factor is the Lipschitz bound the cull
+  trusts, and 1 is not safe. `ENCKE_TERRAIN_VERIFY_CULL` samples every culled
+  chunk next to a kept one on the pool and logs any with surface. Those
+  suffice: the surface is closed and connected and passes through kept
+  chunks, so if it crossed a culled chunk it would cross one of them.
+  `planet_test` checks every culled chunk of a rough asteroid, and that a
+  factor of 0.3 does lose surface, which the frontier check alone finds.
+- **Meshing** runs on `WorkerPool`: `std::jthread`s, like `AssetWorker`, one per physical core less
+  one, at background priority. A job samples its chunk with its worker's own
+  `TerrainSampler`, runs `surface_nets` and converts to `Vertex`; its
+  completion, run by `WorkerPool::drain()` on the main thread before
+  `Scene::update`, adds the mesh asset and an entity parented to the body at
+  the chunk's corner. Vertices are f32 metres from that corner, so the
+  camera-relative extract handles them like any other mesh.
+- **Surface Nets** (`terrain/surface_nets`) puts one vertex per crossed cell at
+  the average of its edge crossings, with the normal from the corners'
+  central-difference gradients interpolated trilinearly. Vertices in cell -1
+  repeat the neighbour's, computed from the same samples, which is what closes
+  the seams. `surface_nets_test` merges chunks of an analytic sphere by global
+  cell and requires every directed edge exactly once each way, outward
+  winding, and normals within 1.5 degrees of the analytic.
+- **Material**: a 64x64 slope-by-height lookup table, albedo and ORM, built in
+  code; see *Textures*.
+- **Captures** wait for `TerrainBuilder::idle()` as well as asset streaming.
+- The Earth's height is zeroed at the pole so the object field stands on it
+  (`zero_height_at`), within what the LOD's facets allow.
+
+Known gaps:
+
+- Relief is invisible at the default LOD: 2.5 km of height against 33 km
+  voxels.
+- The whole planet is one LOD and is meshed once. Lower LODs need the octree
+  and streaming before they fit in memory.
+- Chunk meshes are never freed; `GeometryPool::release` is still unused.
 
 ## Camera control
 
@@ -1406,8 +1462,8 @@ Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
 ImPlot.
 
-- **BS::thread_pool is here for its native extensions, and unused until the
-  SDF work begins.** Standard C++ has no thread priority, affinity or naming,
+- **BS::thread_pool is here for its native extensions only.** `WorkerPool`
+  lowers its threads' priority and names them through them. Standard C++ has no thread priority, affinity or naming,
   and `native_handle()` does not help: under MinGW it is a winpthreads
   `pthread_t`, not a Win32 `HANDLE`, and Linux's per-thread nice value wants
   a kernel thread ID. `platform/thread` wraps the library's
@@ -1419,8 +1475,8 @@ ImPlot.
   Verified once on MinGW with a temporary call from the asset worker, since
   removed: both priority and name succeed. Untested on Linux, where an
   unprivileged thread may lower its priority but never raise it: lower the
-  workers, never raise the main thread. Its pool itself is unused; whether
-  it becomes the SDF job system is undecided.
+  workers, never raise the main thread. Its pool itself is unused: the job
+  system is `platform/worker_pool`, on `std::jthread`.
 
 - **cpuinfo (pytorch/cpuinfo) is for sizing worker pools by physical core.**
   Hyperthreads share a core's vector units and caches, so heavy SIMD workers

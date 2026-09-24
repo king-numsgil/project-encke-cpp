@@ -21,8 +21,19 @@ namespace encke::config
     // -- scene capacity -----------------------------------------------------------
     // Per-frame upload buffers are sized from these; anything past them is
     // dropped from the frame, not an error.
-    inline constexpr u32 kMaxObjects = 1024;
+    inline constexpr u32 kMaxObjects = 4096;
     inline constexpr u32 kMaxLights  = 1024;
+
+    // -- terrain -------------------------------------------------------------------
+    // One uniform LOD over each body's bounding cube until there is an octree:
+    // LOD n's voxels are 0.25 m * 2^n, so 17 is 32.8 km voxels and 1,049 km
+    // chunks. ENCKE_TERRAIN_LOD overrides it.
+    inline constexpr u32 kTerrainLod = 17;
+
+    // A chunk is culled when |SDF| at its centre exceeds this many
+    // half-diagonals. The field's gradient is 1 plus the terrain's slope, so
+    // 1 is not safe; ENCKE_TERRAIN_VERIFY_CULL checks the chosen value.
+    inline constexpr f64 kTerrainCullFactor = 1.5;
 
     // -- material textures ---------------------------------------------------------
     // Capped further by the device's maxSamplerAnisotropy.

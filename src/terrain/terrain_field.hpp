@@ -35,9 +35,15 @@ namespace encke::terrain
     // point's grid coordinate names it the same way at every LOD.
     //
     // A chunk of `cells`^3 voxels of 2^lod base voxels each, its corner at
-    // grid point `origin`, sampled on a (cells + 2)^3 grid: sample (i, j, k)
-    // is grid point origin + (i - 1, j - 1, k - 1) * 2^lod, x fastest. The
-    // extra sample on each side is there for central differences.
+    // grid point `origin`, sampled on a (cells + 4)^3 grid: sample (i, j, k)
+    // is grid point origin + (i - 2, j - 2, k - 2) * 2^lod, x fastest.
+    //
+    // The size follows from the mesher (terrain/surface_nets). A chunk owns
+    // corners 0 to cells - 1 on each axis and emits the quad of every edge
+    // starting at one; the quad joins the four cells around the edge, so
+    // vertices are placed in cells -1 to cells - 1, whose corners run from
+    // -1 to cells. A central difference at each of those needs one sample
+    // either side: -2 to cells + 1, cells + 4 samples.
     //
     // `detail_octaves` is normally octaves_for_voxel at this LOD. A fine chunk
     // sampling the face it shares with a coarser one may pass the coarser
@@ -53,7 +59,7 @@ namespace encke::terrain
         u32     detail_octaves = 0;
         u32     coarse_octaves = 0;
 
-        u32 samples_per_axis() const { return cells + 2; }
+        u32 samples_per_axis() const { return cells + 4; }
         u32 sample_count() const { return samples_per_axis() * samples_per_axis() * samples_per_axis(); }
 
         // The samples at even offsets from the origin, 0, 2, ..., cells: the
@@ -66,8 +72,8 @@ namespace encke::terrain
     // coarse_octaves, and its gradient by central differences across the
     // coarse voxel: what the parent LOD's chunk samples there, and the
     // gradient a mesher takes over the parent's samples. For geomorphing
-    // toward the parent. Point (i, j, k) is chunk sample (2i + 1, 2j + 1,
-    // 2k + 1), x fastest.
+    // toward the parent. Point (i, j, k) is chunk sample (2i + 2, 2j + 2,
+    // 2k + 2), x fastest.
     struct CoarseSamples
     {
         span<f32>     values;      // request.coarse_count() each
@@ -90,8 +96,8 @@ namespace encke::terrain
     };
 
     // Seconds spent by the last call: in each layer over the chunk's own
-    // samples, and on the coarse output (the ring of parent grid points
-    // outside the chunk, and the gradients).
+    // samples, and on the coarse output (the parent grid points past the
+    // chunk's far faces, and the gradients).
     struct LayerTiming
     {
         f64 macro  = 0.0;

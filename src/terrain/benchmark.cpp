@@ -40,10 +40,10 @@ namespace encke::terrain
             ChunkRequest request = sampler.chunk(i64vec3{0, pole - 16 * stride, 0}, lod);
             u32 const    axis    = request.samples_per_axis();
 
-            // The same chunk without its apron: 33^3, the samples 32 cells
-            // need for values alone.
+            // As many samples as the chunk without its apron, 33^3: what 32
+            // cells need for values alone.
             ChunkRequest bare = request;
-            bare.cells        = 31;
+            bare.cells        = request.cells - 3;
 
             vector<f32>     samples(request.sample_count());
             vector<f32>     bare_samples(bare.sample_count());
@@ -116,7 +116,7 @@ namespace encke::terrain
             std::printf("  total   %12.0f samples/s  %7.3f ms per chunk\n",
                         count / (plain.macro + plain.detail), (plain.macro + plain.detail) * per_chunk);
             std::printf("  33^3 without the apron          %7.3f ms per chunk\n", bare_seconds * per_chunk);
-            std::printf("  central differences, 32^3       %7.3f ms per chunk\n", gradient_seconds * per_chunk);
+            std::printf("  central differences, %u^3       %7.3f ms per chunk\n", axis - 2, gradient_seconds * per_chunk);
             std::printf("  with coarse output: own %7.3f ms + coarse %7.3f ms per chunk\n",
                         (with_coarse.macro + with_coarse.detail) * per_chunk, with_coarse.coarse * per_chunk);
             // Printed so the optimiser cannot drop the work.
