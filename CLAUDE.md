@@ -117,6 +117,12 @@ src/
     gpu_types.hpp        structs shared with the shaders
     pipeline.{hpp,cpp}   graphics and compute pipeline construction
     renderer.{hpp,cpp}   the passes, barriers, per-frame upload
+  terrain/
+    fastnoise.hpp        FastNoise2 include and the pinned feature set; terrain sources only
+    detail_noise.{hpp,cpp} lattice-split Perlin fBm octaves, f64 origin + f32 offsets
+    macro_field.{hpp,cpp}  FastNoise2 graphs per channel on a body-fixed lattice, trilinear
+    terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
+    benchmark.{hpp,cpp}  `encke --headless`: samples/s per layer, LOD 0 and 4
 shaders/
   shadow_depth.slang     depth only: one shadow map, cascade or spot
   gbuffer.slang          geometry -> G-buffer + emissive into HDR
@@ -135,7 +141,9 @@ shaders/
     normal.slang         octahedral encode and decode
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
-tests/                 Catch2, mirroring src/: camera projection and view, transform propagation
+tests/                 Catch2, mirroring src/: camera projection and view, transform propagation,
+                       terrain noise against an f64 oracle (terrain/perlin_reference), FastNoise2 under mimalloc
+ports/fastnoise2/      vcpkg overlay port: FastNoise2 v1.1.1 plus two patches
 assets/
   textures/            one directory per ambientCG set; CREDITS.md says where each came from
   models/              glTF files; CREDITS.md holds their licences
@@ -830,6 +838,90 @@ Known gaps:
 - Normal strength is hardcoded at 2 in `shaders/gbuffer.slang` for every
   material, chosen by eye. It is meant to become a per-material parameter.
 
+## Terrain noise
+
+`src/terrain` is the procedural field for smooth-voxel terrain (Surface Nets
+with CDLOD geomorph, not yet built), for planets at 1:1 and for asteroids.
+Nothing in the running app samples it yet; `encke --headless` benchmarks it.
+The field is `|p| - radius - height(p)`, body-relative f64 metres, negative
+inside.
+
+Two layers. **Macro** is FastNoise2 node graphs from encoded strings, one
+graph per channel (height, detail amplitude, ridge blend, persistence), each
+mapped `bias + scale * graph`. Graphs see f32 body-relative positions, which
+resolve to about half a metre at Earth's radius, so they are for wavelengths
+of a kilometre and up. **Detail** is fBm summed by hand, one Perlin evaluation
+per octave, not FastNoise2's FBm node: each octave has its own lattice split,
+and floor(o * f * L) is not L * floor(o * f).
+
+- **The lattice split.** Per octave, `rotation * origin * frequency` in f64 is
+  split into an int32 cell and an f32 remainder. The cell goes to FastNoise2
+  as `Perlin::SetLatticeOffset`, which our port patch adds: it is added to the
+  floored coordinate before the prime multiply, with wrapping int32 maths, so
+  the hash sees absolute cells and the interpolation sees small floats. Only
+  Perlin 3D is patched. Simplex would need the offset in skewed space.
+- **One `TerrainSampler` per thread.** It owns FastNoise2 nodes, and the
+  lattice offset is a member the sampler changes per octave.
+- **Chunk and point paths are one code path** over different point sets: a
+  chunk's (N+2)^3 grid, or a point and its six neighbours one voxel away
+  for a central-difference gradient. They agree to f32 rounding of the output.
+  Macro values are exactly equal. The detail layer differs in the last bits,
+  because each path splits about a different origin.
+- **The macro lattice is fixed to the body**, `lattice_spacing` apart, or one
+  voxel apart where voxels are larger. Chunks and point queries interpolate the
+  same nodes, so seams match. **Voxel sizes and the spacing must be powers of
+  two**: then a coarse LOD's samples are nodes of the finer lattice too, and
+  chunk positions are exact in both f32 and f64.
+- **Octaves under two voxels are skipped.** Adjacent LODs therefore carry
+  different detail. At a shared face the finer chunk passes the coarser one's
+  `detail_octaves` in its `ChunkRequest`; geomorphing the rest is the mesher's
+  job.
+- **Determinism.** The port builds FastNoise2 with `FASTNOISE2_STRICT_FP` and
+  AVX2 as its only feature set, and nodes are created at `kFeatureSet` (AVX2).
+  The octave rotations are integer quaternions, divided once, and the
+  frequencies come from repeated multiplication, so no libm call decides a bit
+  of either. The terrain sources build with `-ffp-contract=off`, since clang
+  would otherwise fuse multiply-adds that GCC in ISO mode leaves apart.
+- **The oracle** is `tests/terrain/perlin_reference`: FastNoise2's Perlin 3D
+  (hash, gradient set, quintic, output scale) in scalar f64 from the absolute
+  position. The SIMD path matches it near the origin and at 6.4e6 m. The test
+  also feeds FastNoise2 plain f32 positions there and requires them to
+  disagree, which proves the tests can see the precision bug.
+
+### The FastNoise2 port
+
+`ports/fastnoise2` is a vcpkg overlay port (`overlay-ports` in
+`vcpkg-configuration.json`), not vendored, because the patches are small:
+
+- `lattice-offset.patch`: `Perlin::SetLatticeOffset`, and a
+  `FASTNOISE2_FEATURE_SETS` cache variable passed through to FastSIMD.
+- `fastsimd-mingw-clang.patch`: FastSIMD adds `-Wa,-muse-unaligned-vector-move`
+  on MinGW, a GNU `as` workaround for GCC's unaligned AVX spills. vcpkg builds
+  ports with whichever compiler the preset's PATH provides, so under
+  clang-sanitize that is clang64, whose integrated assembler rejects the flag.
+  The patch keeps it GCC-only.
+
+FastNoise2 fetches FastSIMD through CPM. A port must not download during its
+build, so the portfile fetches the pinned FastSIMD commit itself and hands it
+to CPM as `CPM_FastSIMD_SOURCE`. The version is the v1.1.1 release, so that a
+released Node Editor encodes graphs as this library decodes them. Upgrading
+means re-pinning both commits and re-applying the patches.
+
+FastNoise2 allocates node pools with `std::malloc`/`std::free` in pairs, and
+everything else through `new`, which is mimalloc's in this binary. The
+allocator tests build, use and free node trees across threads, freeing some on
+threads other than the one that allocated them. They passed under
+`MI_DEBUG=FULL`.
+
+Known gaps:
+
+- No Node Editor live link. The port builds without the editor tools, and
+  its `NodeEditorIpc` library is not packaged. With nothing in the app drawing
+  terrain there is nothing to tune against yet.
+- `example_planet` stands in for authored graphs; its channel graphs are built
+  in code through `encode_fbm_graph`.
+- Seam checks are within a tolerance, not bit-exact, for the reason above.
+
 ## Camera control
 
 `render/fly_camera` flies the camera entity's local `Transform`, so a
@@ -1282,7 +1374,8 @@ backend, so it has no equivalent failure mode.
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
 `sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`,
-`entt`, `catch2`.
+`entt`, `catch2`, and `fastnoise2` from the overlay port in `ports/` (see
+*Terrain noise*).
 Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
 ImPlot.
 

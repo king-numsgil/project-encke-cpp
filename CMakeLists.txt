@@ -35,6 +35,9 @@ find_package(fastgltf CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(cpuinfo CONFIG REQUIRED)
 find_package(EnTT CONFIG REQUIRED)
+# The overlay port in ports/fastnoise2: patched for a lattice offset, AVX2
+# only, strict floating point.
+find_package(FastNoise2 CONFIG REQUIRED)
 
 # Header-only, and the port installs no CMake package: just the header.
 find_path(BS_THREAD_POOL_INCLUDE_DIR BS_thread_pool.hpp REQUIRED)
@@ -173,6 +176,11 @@ add_library(encke_core OBJECT
     src/render/scene.cpp
     src/render/shadows.cpp
 
+    src/terrain/benchmark.cpp
+    src/terrain/detail_noise.cpp
+    src/terrain/macro_field.cpp
+    src/terrain/terrain_field.cpp
+
     src/ui/image_window.cpp
     src/ui/imgui_layer.cpp
     src/ui/imgui_vulkan.cpp
@@ -195,6 +203,18 @@ add_library(encke_core OBJECT
 
 add_executable(encke src/main.cpp)
 target_link_libraries(encke PRIVATE encke_core)
+
+# Terrain must come out bit-identical on every machine for multiplayer. GCC
+# in ISO mode already leaves a * b + c as two roundings, but clang fuses it
+# into an FMA wherever -mfma allows, so the lattice split and the field would
+# differ between the two compilers. FastNoise2 itself is built strict by its
+# port.
+set_source_files_properties(
+    src/terrain/detail_noise.cpp
+    src/terrain/macro_field.cpp
+    src/terrain/terrain_field.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>"
+)
 
 target_include_directories(encke_core PUBLIC src)
 target_include_directories(encke_core SYSTEM PRIVATE ${BS_THREAD_POOL_INCLUDE_DIR})
@@ -292,6 +312,7 @@ target_link_libraries(encke_core PUBLIC
     glm::glm
     cpuinfo::cpuinfo
     EnTT::EnTT
+    FastNoise2::FastNoise
     encke_imgui
 )
 
@@ -420,6 +441,10 @@ include(Catch)
 
 add_executable(encke_tests
     tests/render/camera_test.cpp
+    tests/terrain/detail_noise_test.cpp
+    tests/terrain/fastnoise_allocator_test.cpp
+    tests/terrain/perlin_reference.cpp
+    tests/terrain/terrain_field_test.cpp
     tests/world/transform_test.cpp
 )
 

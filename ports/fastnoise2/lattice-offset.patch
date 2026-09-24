@@ -1,0 +1,66 @@
+diff --git a/include/FastNoise/Generators/Perlin.h b/include/FastNoise/Generators/Perlin.h
+index d6a3526..09a1bca 100644
+--- a/include/FastNoise/Generators/Perlin.h
++++ b/include/FastNoise/Generators/Perlin.h
+@@ -7,6 +7,25 @@ namespace FastNoise
+     {
+     public:
+         const Metadata& GetMetadata() const override;
++
++        /** @brief Shift the integer lattice the 3D hash sees, in cells at this node's frequency.
++         *
++         *  Added to each floored coordinate before it is multiplied by its prime, with
++         *  wrapping int32 arithmetic, so noise at position p with offset o equals noise at
++         *  p + o exactly while the float interpolation only ever sees p. Lets a caller
++         *  split a large f64 position into an integer part and a small float part.
++         *  Not serialised, and not part of the node graph: set it per evaluation, and
++         *  give each thread its own node.
++         */
++        void SetLatticeOffset( int x, int y, int z )
++        {
++            mLatticeOffset[0] = x;
++            mLatticeOffset[1] = y;
++            mLatticeOffset[2] = z;
++        }
++
++    protected:
++        int mLatticeOffset[3] = { 0, 0, 0 };
+     };
+ 
+ #ifdef FASTNOISE_METADATA
+diff --git a/include/FastNoise/Generators/Perlin.inl b/include/FastNoise/Generators/Perlin.inl
+index 64917e2..00c36e9 100644
+--- a/include/FastNoise/Generators/Perlin.inl
++++ b/include/FastNoise/Generators/Perlin.inl
+@@ -43,9 +43,9 @@ class FastSIMD::DispatchClass<Perlin, SIMD> final : public virtual Perlin, publi
+         float32v ys = FS::Floor( y );
+         float32v zs = FS::Floor( z );
+ 
+-        int32v x0 = FS::Convert<int32_t>( xs ) * int32v( Primes::X );
+-        int32v y0 = FS::Convert<int32_t>( ys ) * int32v( Primes::Y );
+-        int32v z0 = FS::Convert<int32_t>( zs ) * int32v( Primes::Z );
++        int32v x0 = ( FS::Convert<int32_t>( xs ) + int32v( mLatticeOffset[0] ) ) * int32v( Primes::X );
++        int32v y0 = ( FS::Convert<int32_t>( ys ) + int32v( mLatticeOffset[1] ) ) * int32v( Primes::Y );
++        int32v z0 = ( FS::Convert<int32_t>( zs ) + int32v( mLatticeOffset[2] ) ) * int32v( Primes::Z );
+         int32v x1 = x0 + int32v( Primes::X );
+         int32v y1 = y0 + int32v( Primes::Y );
+         int32v z1 = z0 + int32v( Primes::Z );
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 9a5938d..09b6c1d 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -66,7 +66,13 @@ if(NOT FASTNOISE2_STRICT_FP)
+     set(FASTSIMD_RELAXED RELAXED)
+ endif()
+ 
+-fastsimd_create_dispatch_library(FastSIMD_FastNoise ${FASTSIMD_RELAXED} SOURCES "FastNoise/FastSIMD_Build.inl")
++set(FASTNOISE2_FEATURE_SETS "" CACHE STRING "SIMD feature sets to compile (e.g. AVX2); empty for FastSIMD's default list")
++
++if(FASTNOISE2_FEATURE_SETS)
++    fastsimd_create_dispatch_library(FastSIMD_FastNoise ${FASTSIMD_RELAXED} SOURCES "FastNoise/FastSIMD_Build.inl" FEATURE_SETS ${FASTNOISE2_FEATURE_SETS})
++else()
++    fastsimd_create_dispatch_library(FastSIMD_FastNoise ${FASTSIMD_RELAXED} SOURCES "FastNoise/FastSIMD_Build.inl")
++endif()
+ 
+ target_include_directories(FastSIMD_FastNoise PRIVATE "../include/")
+ 

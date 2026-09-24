@@ -1,0 +1,15 @@
+diff --git a/dispatch/cmake/ClassSIMD.cmake b/dispatch/cmake/ClassSIMD.cmake
+index 7646021..6072e76 100644
+--- a/dispatch/cmake/ClassSIMD.cmake
++++ b/dispatch/cmake/ClassSIMD.cmake
+@@ -107,7 +107,9 @@ function(fastsimd_create_dispatch_library simd_library_name)
+         set_target_properties(${simd_library_name} PROPERTIES COMPILE_FLAGS "-Wno-ignored-attributes")
+     endif()
+ 
+-    if(MINGW)
++    # GNU as only: GCC does not realign the stack for AVX spills on Windows,
++    # clang does, and clang's integrated assembler rejects the flag.
++    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+         target_compile_options(${simd_library_name} PRIVATE -Wa,-muse-unaligned-vector-move)
+     endif()
+ 
