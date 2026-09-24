@@ -122,7 +122,7 @@ src/
     detail_noise.{hpp,cpp} lattice-split Perlin fBm octaves, f64 origin + f32 offsets
     macro_field.{hpp,cpp}  FastNoise2 graphs per channel on a body-fixed lattice, trilinear
     terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
-    benchmark.{hpp,cpp}  `encke --headless`: samples/s per layer, LOD 0 and 4
+    benchmark.{hpp,cpp}  `encke --headless`: octaves per LOD; samples/s per layer, apron, gradients, LOD 0 and 4
 shaders/
   shadow_depth.slang     depth only: one shadow map, cascade or spot
   gbuffer.slang          geometry -> G-buffer + emissive into HDR
@@ -862,20 +862,46 @@ and floor(o * f * L) is not L * floor(o * f).
   Perlin 3D is patched. Simplex would need the offset in skewed space.
 - **One `TerrainSampler` per thread.** It owns FastNoise2 nodes, and the
   lattice offset is a member the sampler changes per octave.
-- **Chunk and point paths are one code path** over different point sets: a
-  chunk's (N+2)^3 grid, or a point and its six neighbours one voxel away
-  for a central-difference gradient. They agree to f32 rounding of the output.
-  Macro values are exactly equal. The detail layer differs in the last bits,
-  because each path splits about a different origin.
+- **Chunk samples are bit-exact per grid point.** Chunks are addressed in
+  integer grid coordinates, base voxels from the body's centre, and every LOD's
+  samples are grid points. Each octave cuts the grid into blocks
+  (`anchor_block`: a power of two of base voxels, 8 to 16 wavelengths wide)
+  and every sample splits about its block's corner. So a sample's anchor, and
+  the exact f32 offset FastNoise2 is handed, depend on its grid coordinate
+  alone. A chunk evaluates each octave once per block it overlaps, which is a
+  handful of calls, since a block spans at least sixteen samples at any LOD
+  that keeps the octave. The seam tests compare bits. Anchoring to the
+  chunk's origin instead, as the first version did, left seams one or two
+  f32 ulps apart.
+- **Point queries split about the point**, since it need not be a grid point.
+  They share the macro, accumulation and composition code with chunks and
+  agree to f32 rounding of the output.
 - **The macro lattice is fixed to the body**, `lattice_spacing` apart, or one
   voxel apart where voxels are larger. Chunks and point queries interpolate the
-  same nodes, so seams match. **Voxel sizes and the spacing must be powers of
-  two**: then a coarse LOD's samples are nodes of the finer lattice too, and
-  chunk positions are exact in both f32 and f64.
+  same nodes. **Voxel sizes and the spacing must be powers of two**: then a
+  coarse LOD's samples are nodes of the finer lattice too, interpolated with
+  weights of exactly zero, and grid positions are exact in both f32 and f64.
 - **Octaves under two voxels are skipped.** Adjacent LODs therefore carry
-  different detail. At a shared face the finer chunk passes the coarser one's
-  `detail_octaves` in its `ChunkRequest`; geomorphing the rest is the mesher's
-  job.
+  different detail. At a shared face the finer chunk may pass the coarser
+  one's `detail_octaves` in its `ChunkRequest`, and then matches it bit for
+  bit.
+- **The coarse output is for geomorphing.** `sample_chunk` with a
+  `CoarseSamples` also writes, at the chunk's even samples (the parent LOD's
+  grid points), the field with the detail cut at the parent's octave count,
+  and its gradient across the parent's voxel. The value is a snapshot of the
+  running sum taken after that octave; the gradient needs one parent voxel
+  beyond the chunk, a ring evaluated at the parent's stride. Both equal what
+  the parent chunk samples and differentiates, bit for bit, given consumers
+  take differences through `central_difference`.
+- **Floating point in the accumulation is order-sensitive.** Bit-exactness
+  across chunks holds because every chunk runs the same operations in the same
+  order per sample. Reordering the octave loop, vectorising the sum
+  differently for some chunks, or letting a compiler contract it (hence
+  `-ffp-contract=off`) would break the seam tests, which is what they are
+  for.
+- **The (N+2)^3 layout has central differences at sample offsets 0..N-1.**
+  Offset N, the corner shared with the next chunk, has no neighbour past it
+  in this chunk.
 - **Determinism.** The port builds FastNoise2 with `FASTNOISE2_STRICT_FP` and
   AVX2 as its only feature set, and nodes are created at `kFeatureSet` (AVX2).
   The octave rotations are integer quaternions, divided once, and the
@@ -920,7 +946,8 @@ Known gaps:
   terrain there is nothing to tune against yet.
 - `example_planet` stands in for authored graphs; its channel graphs are built
   in code through `encode_fbm_graph`.
-- Seam checks are within a tolerance, not bit-exact, for the reason above.
+- Bit-exactness holds within one build. GCC and clang builds of FastNoise2
+  are not known to agree with each other.
 
 ## Camera control
 

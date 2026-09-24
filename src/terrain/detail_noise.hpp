@@ -46,6 +46,17 @@ namespace encke::terrain
     };
     LatticeSplit split_lattice(Octave const& octave, f64vec3 const& origin);
 
+    // For sampling on the body's voxel grid, the grid is cut per octave into
+    // cubic blocks this many base voxels on an edge, and every sample splits
+    // about the corner of its block. A sample's anchor and its offset from
+    // it then depend on its grid coordinate alone, so every chunk that
+    // samples it hands FastNoise2 the same bits. The edge is the largest
+    // power of two no wider than sixteen of the octave's wavelengths: offsets
+    // stay within sixteen lattice cells, where f32 is good to about 1e-6 of a
+    // cell, and each block holds at least sixteen samples a side at any LOD
+    // that keeps the octave.
+    i64 anchor_block(Octave const& octave, f64 base_voxel_size);
+
     // Evaluates octaves over a set of points given as small f32 offsets, in
     // metres, from one f64 origin. One instance per thread: it owns a
     // FastNoise2 node whose lattice offset it changes per octave, plus scratch.

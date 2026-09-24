@@ -109,6 +109,18 @@ namespace encke::terrain
         };
     }
 
+    i64 anchor_block(Octave const& octave, f64 base_voxel_size)
+    {
+        // Doubling rather than log2, so no libm call decides it.
+        f64 const widest = 16.0 / octave.frequency;
+        i64       edge   = 1;
+        while (static_cast<f64>(edge * 2) * base_voxel_size <= widest)
+        {
+            edge *= 2;
+        }
+        return edge;
+    }
+
     struct DetailNoise::Nodes
     {
         FastNoise::SmartNode<FastNoise::Perlin> perlin;

@@ -16,41 +16,72 @@ namespace encke::terrain
     {
         constexpr i32 kSeed = 1337;
 
-        // Metres. The field is detail noise scaled by up to about 100 m, and
-        // two samplers of one point differ by f32 rounding in the noise, on
-        // the order of 1e-6 of that.
+        // Metres, for comparisons that are not bit-exact: the oracle, and
+        // point queries, which split about the point rather than the grid.
+        // The field is detail noise scaled by up to about 100 m; they differ
+        // by f32 rounding in the noise and the last bit of the output.
         constexpr f64 kMetres = 1e-3;
 
-        size_t index(u32 axis, u32 i, u32 j, u32 k)
+        // A chunk origin on this LOD's chunk grid, near the surface in a
+        // direction off every axis.
+        i64vec3 surface_chunk(BodyTerrain const& terrain, u32 lod, f64vec3 const& direction)
         {
-            return (static_cast<size_t>(k) * axis + j) * axis + i;
+            f64 const     extent = static_cast<f64>(i64{32} << lod);
+            f64vec3 const cell   = glm::normalize(direction) * (terrain.radius / terrain.base_voxel_size);
+            return i64vec3{glm::floor(cell / extent) * extent};
         }
 
-        // A chunk origin on the chunk grid of this LOD, near the surface
-        // somewhere off every axis.
-        f64vec3 surface_chunk(BodyTerrain const& terrain, u32 lod, f64vec3 const& direction)
+        f64vec3 position(BodyTerrain const& terrain, i64vec3 const& grid)
         {
-            f64 const     extent = 32.0 * terrain.voxel_size(lod);
-            f64vec3 const point  = glm::normalize(direction) * terrain.radius;
-            return glm::floor(point / extent) * extent;
+            return f64vec3{grid} * terrain.base_voxel_size;
         }
 
         struct Chunk
         {
-            ChunkRequest request;
-            vector<f32>  samples;
+            ChunkRequest    request;
+            vector<f32>     samples;
+            vector<f32>     coarse_values;
+            vector<f32vec3> coarse_gradients;
 
             f32 at(u32 i, u32 j, u32 k) const
             {
-                return samples[index(request.samples_per_axis(), i, j, k)];
+                u32 const axis = request.samples_per_axis();
+                return samples[(static_cast<size_t>(k) * axis + j) * axis + i];
+            }
+
+            size_t coarse_index(u32 i, u32 j, u32 k) const
+            {
+                u32 const axis = request.coarse_per_axis();
+                return (static_cast<size_t>(k) * axis + j) * axis + i;
+            }
+
+            // The grid point of sample (i, j, k).
+            i64vec3 grid(u32 i, u32 j, u32 k) const
+            {
+                return request.origin + (i64vec3{i, j, k} - i64vec3{1}) * (i64{1} << request.lod);
             }
         };
 
-        Chunk sample(TerrainSampler& sampler, ChunkRequest const& request)
+        Chunk sample(TerrainSampler& sampler, ChunkRequest const& request, bool coarse = false)
         {
-            Chunk chunk{request, vector<f32>(request.sample_count())};
-            sampler.sample_chunk(request, chunk.samples);
+            Chunk chunk{request, vector<f32>(request.sample_count()), {}, {}};
+            if (coarse)
+            {
+                chunk.coarse_values.resize(request.coarse_count());
+                chunk.coarse_gradients.resize(request.coarse_count());
+                CoarseSamples const output{chunk.coarse_values, chunk.coarse_gradients};
+                sampler.sample_chunk(request, chunk.samples, &output);
+            }
+            else
+            {
+                sampler.sample_chunk(request, chunk.samples);
+            }
             return chunk;
+        }
+
+        bool same_bits(f32 a, f32 b)
+        {
+            return bit_cast<u32>(a) == bit_cast<u32>(b);
         }
     }
 
@@ -63,8 +94,7 @@ namespace encke::terrain
         terrain.macro.channels[static_cast<size_t>(MacroChannel::Persistence)].bias     = 0.5f;
 
         TerrainSampler sampler{terrain};
-        f64vec3 const  origin = surface_chunk(terrain, 0, f64vec3{0.53, 0.71, -0.46});
-        Chunk const    chunk  = sample(sampler, sampler.chunk(origin, 0));
+        Chunk const    chunk = sample(sampler, sampler.chunk(surface_chunk(terrain, 0, f64vec3{0.53, 0.71, -0.46}), 0));
 
         u32 const axis  = chunk.request.samples_per_axis();
         f64       worst = 0.0;
@@ -74,7 +104,7 @@ namespace encke::terrain
             {
                 for (u32 i = 0; i < axis; i += 3)
                 {
-                    f64vec3 const p = origin + (f64vec3{i, j, k} - 1.0) * chunk.request.voxel_size;
+                    f64vec3 const p = position(terrain, chunk.grid(i, j, k));
 
                     f64 fbm    = 0.0;
                     f64 weight = 1.0;
@@ -92,26 +122,26 @@ namespace encke::terrain
         CHECK(worst < kMetres);
     }
 
-    TEST_CASE("neighbouring chunks agree on their shared face", "[terrain]")
+    TEST_CASE("neighbouring chunks agree bit for bit on their shared face", "[terrain]")
     {
         TerrainSampler sampler{example_planet(kSeed)};
 
         for (u32 const lod : {0u, 4u, 9u})
         {
-            f64vec3 const origin = surface_chunk(sampler.terrain(), lod, f64vec3{0.2, 1.0, 0.3});
-            f64 const     extent = 32.0 * sampler.terrain().voxel_size(lod);
+            i64vec3 const origin = surface_chunk(sampler.terrain(), lod, f64vec3{0.2, 1.0, 0.3});
+            i64 const     extent = i64{32} << lod;
 
             for (glm::length_t axis_index = 0; axis_index < 3; ++axis_index)
             {
-                f64vec3 step{0.0};
+                i64vec3 step{0};
                 step[axis_index] = extent;
 
                 Chunk const a = sample(sampler, sampler.chunk(origin, lod));
                 Chunk const b = sample(sampler, sampler.chunk(origin + step, lod));
 
                 // a's samples 32 and 33 along the axis are b's 0 and 1.
-                u32 const axis  = a.request.samples_per_axis();
-                f64       worst = 0.0;
+                u32 const axis       = a.request.samples_per_axis();
+                u32       mismatches = 0;
                 for (u32 u = 0; u < axis; ++u)
                 {
                     for (u32 v = 0; v < axis; ++v)
@@ -129,19 +159,21 @@ namespace encke::terrain
                             u32vec3 const in_a = at(32 + layer);
                             u32vec3 const in_b = at(layer);
 
-                            f64 const diff = std::abs(static_cast<f64>(a.at(in_a.x, in_a.y, in_a.z)) -
-                                                      static_cast<f64>(b.at(in_b.x, in_b.y, in_b.z)));
-                            worst = std::max(worst, diff);
+                            REQUIRE(a.grid(in_a.x, in_a.y, in_a.z) == b.grid(in_b.x, in_b.y, in_b.z));
+                            if (!same_bits(a.at(in_a.x, in_a.y, in_a.z), b.at(in_b.x, in_b.y, in_b.z)))
+                            {
+                                ++mismatches;
+                            }
                         }
                     }
                 }
-                CAPTURE(lod, axis_index, worst);
-                CHECK(worst < kMetres);
+                CAPTURE(lod, axis_index);
+                CHECK(mismatches == 0);
             }
         }
     }
 
-    TEST_CASE("chunks at adjacent LODs agree at shared lattice points", "[terrain]")
+    TEST_CASE("chunks at adjacent LODs agree bit for bit at shared lattice points", "[terrain]")
     {
         TerrainSampler sampler{example_planet(kSeed)};
 
@@ -154,7 +186,7 @@ namespace encke::terrain
 
             // The fine chunk against the coarse one's +x face, sampling the
             // coarse chunk's octaves as a geomorphed boundary would.
-            ChunkRequest fine = sampler.chunk(coarse.origin + f64vec3{32.0 * coarse.voxel_size, 0.0, 0.0}, fine_lod);
+            ChunkRequest fine = sampler.chunk(coarse.origin + i64vec3{i64{32} << coarse_lod, 0, 0}, fine_lod);
             fine.detail_octaves = coarse.detail_octaves;
 
             Chunk const a = sample(sampler, coarse);
@@ -162,24 +194,105 @@ namespace encke::terrain
 
             // Coarse (33, j, k) and fine (1, 2j - 1, 2k - 1) are one point,
             // wherever the fine chunk reaches.
-            f64 worst = 0.0;
+            u32 mismatches = 0;
             for (u32 j = 1; j <= 17; ++j)
             {
                 for (u32 k = 1; k <= 17; ++k)
                 {
-                    f64 const diff = std::abs(static_cast<f64>(a.at(33, j, k)) -
-                                              static_cast<f64>(b.at(1, 2 * j - 1, 2 * k - 1)));
-                    worst = std::max(worst, diff);
+                    REQUIRE(a.grid(33, j, k) == b.grid(1, 2 * j - 1, 2 * k - 1));
+                    if (!same_bits(a.at(33, j, k), b.at(1, 2 * j - 1, 2 * k - 1)))
+                    {
+                        ++mismatches;
+                    }
                 }
             }
-            CAPTURE(fine_lod, worst);
-            CHECK(worst < kMetres);
+            CAPTURE(fine_lod);
+            CHECK(mismatches == 0);
 
             // Left to its own octave count the fine chunk would carry more
             // detail than the coarse one there, which is the geomorph's to
             // hide, so the override above is doing something.
-            ChunkRequest own = sampler.chunk(fine.origin, fine_lod);
-            REQUIRE(own.detail_octaves > coarse.detail_octaves);
+            REQUIRE(sampler.chunk(fine.origin, fine_lod).detail_octaves > coarse.detail_octaves);
+        }
+    }
+
+    TEST_CASE("coarse partial sums equal the parent chunk's own samples bit for bit", "[terrain]")
+    {
+        TerrainSampler sampler{example_planet(kSeed)};
+
+        for (u32 const fine_lod : {0u, 4u, 8u})
+        {
+            u32 const    coarse_lod = fine_lod + 1;
+            ChunkRequest parent     = sampler.chunk(surface_chunk(sampler.terrain(), coarse_lod, f64vec3{-0.4, 1.0, 0.7}), coarse_lod);
+            Chunk const  p          = sample(sampler, parent);
+            f64 const    voxel      = sampler.terrain().voxel_size(coarse_lod);
+
+            // A child in the parent's lowest corner: every coarse point and
+            // both its neighbours on each axis are parent samples.
+            Chunk const child = sample(sampler, sampler.chunk(parent.origin, fine_lod), true);
+            REQUIRE(child.request.coarse_octaves == parent.detail_octaves);
+
+            u32 const n                   = child.request.coarse_per_axis();
+            u32       value_mismatches    = 0;
+            u32       gradient_mismatches = 0;
+            for (u32 c = 0; c < n; ++c)
+            {
+                for (u32 b = 0; b < n; ++b)
+                {
+                    for (u32 a = 0; a < n; ++a)
+                    {
+                        // Coarse point a is the parent's sample a + 1.
+                        REQUIRE(child.grid(2 * a + 1, 2 * b + 1, 2 * c + 1) == p.grid(a + 1, b + 1, c + 1));
+
+                        size_t const  index    = child.coarse_index(a, b, c);
+                        f32vec3 const gradient = child.coarse_gradients[index];
+                        f32vec3 const expected{
+                            central_difference(p.at(a, b + 1, c + 1), p.at(a + 2, b + 1, c + 1), voxel),
+                            central_difference(p.at(a + 1, b, c + 1), p.at(a + 1, b + 2, c + 1), voxel),
+                            central_difference(p.at(a + 1, b + 1, c), p.at(a + 1, b + 1, c + 2), voxel),
+                        };
+
+                        if (!same_bits(child.coarse_values[index], p.at(a + 1, b + 1, c + 1)))
+                        {
+                            ++value_mismatches;
+                        }
+                        if (!same_bits(gradient.x, expected.x) || !same_bits(gradient.y, expected.y) ||
+                            !same_bits(gradient.z, expected.z))
+                        {
+                            ++gradient_mismatches;
+                        }
+                    }
+                }
+            }
+            CAPTURE(fine_lod);
+            CHECK(value_mismatches == 0);
+            CHECK(gradient_mismatches == 0);
+
+            // A child across the parent's +x face, as at an LOD transition:
+            // its coarse points on the face are the parent's apron samples.
+            Chunk const neighbour = sample(sampler, sampler.chunk(parent.origin + i64vec3{i64{32} << coarse_lod, 0, 0}, fine_lod), true);
+            u32         face_mismatches = 0;
+            for (u32 c = 0; c < n; ++c)
+            {
+                for (u32 b = 0; b < n; ++b)
+                {
+                    REQUIRE(neighbour.grid(1, 2 * b + 1, 2 * c + 1) == p.grid(33, b + 1, c + 1));
+                    if (!same_bits(neighbour.coarse_values[neighbour.coarse_index(0, b, c)], p.at(33, b + 1, c + 1)))
+                    {
+                        ++face_mismatches;
+                    }
+                }
+            }
+            CHECK(face_mismatches == 0);
+
+            // The coarse output is the truncated sum, not the chunk's own
+            // field: somewhere they must differ.
+            bool differs = false;
+            for (u32 a = 0; a < n && !differs; ++a)
+            {
+                differs = !same_bits(child.coarse_values[child.coarse_index(a, a, a)], child.at(2 * a + 1, 2 * a + 1, 2 * a + 1));
+            }
+            CHECK(differs);
         }
     }
 
@@ -187,7 +300,7 @@ namespace encke::terrain
     {
         TerrainSampler sampler{example_planet(kSeed)};
 
-        std::mt19937_64                    random{7};
+        std::mt19937_64                     random{7};
         std::uniform_real_distribution<f64> direction{-1.0, 1.0};
         std::uniform_int_distribution<u32>  interior{1, 32};
 
@@ -199,7 +312,7 @@ namespace encke::terrain
             {
                 f64vec3 const facing{direction(random), direction(random), direction(random)};
                 Chunk const   chunk = sample(sampler, sampler.chunk(surface_chunk(sampler.terrain(), lod, facing), lod));
-                f64 const     voxel = chunk.request.voxel_size;
+                f64 const     voxel = sampler.terrain().voxel_size(lod);
 
                 for (int point = 0; point < 16; ++point)
                 {
@@ -207,14 +320,14 @@ namespace encke::terrain
                     u32 const j = interior(random);
                     u32 const k = interior(random);
 
-                    f64vec3 const     p      = chunk.request.origin + (f64vec3{i, j, k} - 1.0) * voxel;
+                    f64vec3 const     p      = position(sampler.terrain(), chunk.grid(i, j, k));
                     PointSample const sample = sampler.sample_point(p, voxel, chunk.request.detail_octaves);
 
-                    f64vec3 const gradient = f64vec3{
-                        chunk.at(i + 1, j, k) - chunk.at(i - 1, j, k),
-                        chunk.at(i, j + 1, k) - chunk.at(i, j - 1, k),
-                        chunk.at(i, j, k + 1) - chunk.at(i, j, k - 1),
-                    } / (2.0 * voxel);
+                    f64vec3 const gradient{
+                        central_difference(chunk.at(i - 1, j, k), chunk.at(i + 1, j, k), voxel),
+                        central_difference(chunk.at(i, j - 1, k), chunk.at(i, j + 1, k), voxel),
+                        central_difference(chunk.at(i, j, k - 1), chunk.at(i, j, k + 1), voxel),
+                    };
 
                     worst_value    = std::max(worst_value, std::abs(static_cast<f64>(sample.value - chunk.at(i, j, k))));
                     // A difference of values over two voxels.

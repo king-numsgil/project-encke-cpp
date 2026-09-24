@@ -136,6 +136,13 @@ namespace encke::terrain
                 }
             }
             CHECK(glm::determinant(octave.rotation) > 0.0);
+
+            // A power of two of base voxels, at most sixteen wavelengths
+            // wide, and more than eight.
+            i64 const block = anchor_block(octave, 0.25);
+            CHECK(std::has_single_bit(static_cast<u64>(block)));
+            CHECK(static_cast<f64>(block) * 0.25 <= 16.0 / octave.frequency);
+            CHECK(static_cast<f64>(block) * 0.25 > 8.0 / octave.frequency);
         }
 
         // Two builds of the same spec are the same bits.
