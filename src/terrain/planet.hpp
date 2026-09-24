@@ -27,10 +27,26 @@ namespace encke::terrain
     // weight of at most one. Graphs are taken to stay within [-1, 1].
     f64 height_bound(BodyTerrain const& terrain);
 
-    // Moves the height channel's bias so the macro height at `point` is zero,
-    // as a chunk at `lod` samples it: puts a scene laid out on flat ground at
-    // `point` on the surface.
-    void zero_height_at(BodyTerrain& terrain, f64vec3 const& point, u32 lod);
+    // The surface around one point as surface_nets meshes it at `lod`, for
+    // standing things on the ground the builder will draw: the chunk holding
+    // the point and the next two toward the body's centre, meshed on the
+    // calling thread. Chunk samples are bit-exact, so these are the builder's
+    // very triangles. Body-relative, like everything in BodyTerrain.
+    class GroundProbe
+    {
+    public:
+        GroundProbe(BodyTerrain const& terrain, f64vec3 const& around, u32 lod);
+
+        // The nearest point where the ray from `from` along `direction`
+        // (unit) meets the meshed triangles; nullopt if it misses them.
+        optional<f64vec3> hit(f64vec3 const& from, f64vec3 const& direction) const;
+
+        // hit() toward the body's centre.
+        optional<f64vec3> below(f64vec3 const& from) const;
+
+    private:
+        vector<f64vec3> triangles_;   // three corners each
+    };
 
     // The chunks of the body's bounding cube at one LOD, split by a cull test
     // at the chunk's centre: kept where |SDF| <= cull_factor * half-diagonal.
@@ -84,10 +100,6 @@ namespace encke::terrain
     private:
         struct Body;
 
-        MaterialHandle material(AssetManager& assets);
-
         vector<std::shared_ptr<Body>> bodies_;
-        MaterialHandle                material_;
-        bool                          have_material_ = false;
     };
 }

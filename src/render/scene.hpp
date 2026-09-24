@@ -18,6 +18,11 @@ namespace encke
 
     class AssetManager;
 
+    namespace terrain
+    {
+        class GroundProbe;
+    }
+
     // Turns an entity about `axis`, in its parent's frame, at `rate` rad/s.
     // It replaces the Transform's rotation outright: the angle is rate times
     // the scene clock, from no rotation at zero.
@@ -79,8 +84,9 @@ namespace encke
         // WorldTransform. Read world transforms after this.
         void update(f64 seconds, AssetManager const& assets);
 
-        // World position of the test planet's pole, which the scene is laid
-        // out around.
+        // World position the scene is laid out around: the terrain below the
+        // test planet's pole. Objects are also stood on the ground under
+        // their own positions, so y = 0 here is the ground only at the origin.
         f64vec3 origin() const { return origin_; }
 
         // Every object, light, camera, star and body is an entity: a
@@ -112,11 +118,33 @@ namespace encke
         // The nodes of `model` under `root`, as `spawn` asks.
         void instantiate(entt::entity root, Model const& model, ModelSpawn const& spawn);
 
+        // `position`, from the pole, raised or lowered so what was on the
+        // level ground at y = 0 stands on the terrain mesh under its x and z,
+        // or by assembly_lift_ while one is being built. Unchanged where
+        // there is no mesh to stand on.
+        f64vec3 grounded(f64vec3 const& position) const;
+
+        // How far the ground under (x, z) is above the origin's; 0 with no
+        // mesh there.
+        f64 ground_lift(f64 x, f64 z) const;
+
+        // The lowest ground_lift under an assembly's supports. Every part of
+        // it takes this one offset, so it stays in one piece; on sloping
+        // ground its high side sinks a little rather than anything floating.
+        f64 lowest_lift(std::initializer_list<f64vec2> supports) const;
+
         // A light at `position` relative to `parent`'s frame, facing
         // `direction` in that frame.
         entt::entity add_light(entt::entity parent, f64vec3 position, f64vec3 direction,
                                Light const& light);
 
         f64vec3 origin_{0.0};
+
+        // The Earth's meshed surface around the pole, and the point on it
+        // below the pole, in the Earth's frame: what grounded() stands things
+        // on.
+        std::shared_ptr<terrain::GroundProbe const> ground_;
+        f64vec3                                     ground_pole_{0.0};
+        optional<f64>                               assembly_lift_;
     };
 }

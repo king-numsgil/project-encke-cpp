@@ -79,8 +79,15 @@ namespace encke
                             f32 roughness, f32 metallic, f32vec3 emissive)
     {
         entt::entity const entity = registry.create();
+        // On its own, by the lowest ground under its footprint's corners, so
+        // no edge of it floats on a slope.
+        f64vec2 const half{scale.x * 0.5, scale.z * 0.5};
+        f64 const     lift = assembly_lift_.value_or(lowest_lift({
+            f64vec2{position.x - half.x, position.z - half.y}, f64vec2{position.x + half.x, position.z - half.y},
+            f64vec2{position.x - half.x, position.z + half.y}, f64vec2{position.x + half.x, position.z + half.y},
+        }));
         registry.emplace<Transform>(entity, Transform{
-                                                .position = origin_ + position,
+                                                .position = origin_ + position + f64vec3{0.0, lift, 0.0},
                                                 .scale    = f32vec3{scale},
                                             });
         registry.emplace<Renderable>(entity, Renderable{
@@ -100,6 +107,35 @@ namespace encke
         entt::entity const entity = add(mesh, position, scale, f32vec3{1.0f}, 1.0f, 1.0f);
         registry.get<Renderable>(entity).material = material;
         return entity;
+    }
+
+    f64 Scene::ground_lift(f64 x, f64 z) const
+    {
+        if (!ground_)
+        {
+            return 0.0;
+        }
+
+        // Straight down the scene's -Y from well above, onto the mesh.
+        f64vec3 const           from = ground_pole_ + f64vec3{x, 1'000.0, z};
+        optional<f64vec3> const hit  = ground_->hit(from, f64vec3{0.0, -1.0, 0.0});
+        return hit.has_value() ? hit->y - ground_pole_.y : 0.0;
+    }
+
+    f64 Scene::lowest_lift(std::initializer_list<f64vec2> supports) const
+    {
+        f64 lowest = std::numeric_limits<f64>::infinity();
+        for (f64vec2 const& support : supports)
+        {
+            lowest = std::min(lowest, ground_lift(support.x, support.y));
+        }
+        return supports.size() > 0 ? lowest : 0.0;
+    }
+
+    f64vec3 Scene::grounded(f64vec3 const& position) const
+    {
+        f64 const lift = assembly_lift_.value_or(ground_lift(position.x, position.z));
+        return position + f64vec3{0.0, lift, 0.0};
     }
 
     entt::entity Scene::add_light(entt::entity parent, f64vec3 position, f64vec3 direction,
@@ -187,6 +223,7 @@ namespace encke
     {
         registry.clear();
         origin_ = kWorldOrigin;
+        ground_.reset();
 
         MeshHandle cube;
         MeshHandle sphere;
@@ -206,20 +243,39 @@ namespace encke
 
         // Local frame at the pole: +Y is up, the ground is y = 0. The Earth
         // is terrain, meshed by terrain::TerrainBuilder about its entity's
-        // origin, so the entity sits at the centre, a radius below the pole.
-        // Its height is zeroed at the pole, where the object field stands;
-        // at a coarse LOD the mesh still misses the pole by the voxels' sag.
-        // Ground albedo is a guess at the terrain's average colour.
+        // origin, so the entity sits at the centre, a radius below the pole
+        // of the sphere. The terrain's surface there is wherever its height
+        // and the LOD's facets put it, so the object field moves to stand on
+        // the mesh directly below the pole. Ground albedo is a guess at the
+        // terrain's average colour.
         {
             auto terrain = std::make_shared<terrain::BodyTerrain>(terrain::example_planet(kTerrainSeed));
-            terrain::zero_height_at(*terrain, f64vec3{0.0, kEarthRadius, 0.0}, terrain_lod);
+
+            // Everything placed from here on is also stood on the mesh under
+            // its own x and z (grounded), since the facet under the field is
+            // neither level nor flat: it tilts, and creases along the
+            // diagonal of its quad.
+            f64vec3 const pole{0.0, kEarthRadius, 0.0};
+            auto          probe = std::make_shared<terrain::GroundProbe const>(*terrain, pole, terrain_lod);
+            if (optional<f64vec3> const ground = probe->below(pole))
+            {
+                origin_      = kWorldOrigin + (*ground - pole);
+                ground_      = std::move(probe);
+                ground_pole_ = *ground;
+                log::info("scene: ground at the pole is %.1f m from the sphere; the object field moves to it",
+                          ground->y - pole.y);
+            }
+            else
+            {
+                log::warn("scene: no terrain found below the pole; the object field stays on the sphere");
+            }
 
             entt::entity const earth = registry.create();
-            registry.emplace<Transform>(earth, Transform{.position = origin_ + f64vec3{0.0, -kEarthRadius, 0.0}});
+            registry.emplace<Transform>(earth, Transform{.position = kWorldOrigin + f64vec3{0.0, -kEarthRadius, 0.0}});
             registry.emplace<Body>(earth, Body{
                                               .radius        = kEarthRadius,
                                               .centre        = f64vec3{0.0},
-                                              .ground_albedo = f32vec3{0.12f},
+                                              .ground_albedo = f32vec3{0.25f},
                                               .sky_fill      = 0.1f,
                                           });
             registry.emplace<terrain::PlanetTerrain>(earth, terrain::PlanetTerrain{.terrain = std::move(terrain)});
@@ -230,8 +286,9 @@ namespace encke
         // regolith, for anyone who flies there.
         {
             f32vec3 const regolith{0.36f, 0.35f, 0.33f};
+            // Placed from the sphere's pole, not the moved object field.
             entt::entity const moon =
-                add(sphere, f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
+                add(sphere, kWorldOrigin - origin_ + f64vec3{0.0, kEarthMoonDistance - kEarthRadius, 0.0},
                     f64vec3{2.0 * kMoonRadius}, regolith, 0.95f, 0.0f);
             registry.emplace<Body>(moon, Body{
                                              .radius        = kMoonRadius,
@@ -265,6 +322,7 @@ namespace encke
         add(cube, {-9.0, 6.0, -7.0}, {1.6, 12.0, 1.6}, materials.concrete);
 
         // A colonnade: striped shadows, and fine detail for the near cascade.
+        assembly_lift_ = lowest_lift({f64vec2{-6.0, 6.0}, f64vec2{5.2, 6.0}});
         for (i32 index = 0; index < 8; ++index)
         {
             f64 const x = -6.0 + 1.6 * static_cast<f64>(index);
@@ -273,13 +331,17 @@ namespace encke
         add(cube, {-0.4, 3.15, 6.0}, {12.0, 0.3, 0.8}, white, 0.6f, 0.0f);
 
         // A gateway.
+        assembly_lift_ = lowest_lift({f64vec2{7.0, -3.0}, f64vec2{7.0, 1.0}});
         add(cube, {7.0, 2.0, -3.0}, {0.8, 4.0, 0.8}, materials.metal_plates);
         add(cube, {7.0, 2.0, 1.0}, {0.8, 4.0, 0.8}, materials.metal_plates);
         add(cube, {7.0, 4.3, -1.0}, {1.0, 0.6, 5.0}, materials.metal_plates);
+        assembly_lift_.reset();
 
         // A table: a slab on legs, whose underside only a spot can light.
         f64vec3 const table{-3.0, 1.0, -2.0};
         f64 const     table_thickness = 0.12;
+        assembly_lift_ = lowest_lift({f64vec2{-4.3, -2.75}, f64vec2{-4.3, -1.25},
+                                      f64vec2{-1.7, -2.75}, f64vec2{-1.7, -1.25}});
         add(cube, table, {3.0, table_thickness, 1.8}, materials.planks);
         for (f64 const x : {-4.3, -1.7})
         {
@@ -301,7 +363,7 @@ namespace encke
             constexpr f32 kVisorLuminance = 2.0e4f;
 
             f64vec3 const top{table.x, table.y + table_thickness * 0.5, table.z};
-            spawn(origin_ + top, glm::angleAxis(kHelmetYaw, f64vec3{0.0, 1.0, 0.0}),
+            spawn(origin_ + grounded(top), glm::angleAxis(kHelmetYaw, f64vec3{0.0, 1.0, 0.0}),
                   ModelSpawn{
                       .model = assets.load_model(asset_path("models/DamagedHelmet/DamagedHelmet.glb")),
                       .fit          = kHelmetWidth,
@@ -310,10 +372,12 @@ namespace encke
                   });
         }
 
-        // Crates.
+        // Crates, the small one stacked across the other two.
+        assembly_lift_ = lowest_lift({f64vec2{2.0, -6.0}, f64vec2{3.1, -6.4}});
         add(cube, {2.0, 0.5, -6.0}, {1.0, 1.0, 1.0}, materials.rusted_metal);
         add(cube, {3.1, 0.4, -6.4}, {0.8, 0.8, 0.8}, materials.painted_metal);
         add(cube, {2.5, 1.3, -6.1}, {0.6, 0.6, 0.6}, materials.painted_metal);
+        assembly_lift_.reset();
         add(cube, {-6.0, 0.75, 1.5}, {1.5, 1.5, 1.5}, materials.concrete);
         add(cube, {11.0, 1.0, 5.0}, {2.0, 2.0, 3.0}, materials.metal_plates);
 
@@ -373,7 +437,7 @@ namespace encke
             f64vec3 toward = mast.target - head;
             toward.y       = 0.0;
             f64vec3 const hang = glm::normalize(toward) * 0.2 + f64vec3{0.0, -0.25, 0.0};
-            add_light(lamp, hang, mast.target - (head + hang),
+            add_light(lamp, hang, grounded(mast.target) - (grounded(head) + hang),
                       Light{
                           .colour       = tint,
                           .intensity    = 2.0e6f,
@@ -416,8 +480,8 @@ namespace encke
         camera           = registry.create();
         registry.emplace<Transform>(
             camera, Transform{
-                        .position = origin_ + f64vec3{16.0 * std::sin(facing), 1.7,
-                                                      16.0 * std::cos(facing)},
+                        .position = origin_ + grounded(f64vec3{16.0 * std::sin(facing), 1.7,
+                                                               16.0 * std::cos(facing)}),
                         .rotation = glm::angleAxis(facing, f64vec3{0.0, 1.0, 0.0}) *
                                     glm::angleAxis(-0.08, f64vec3{1.0, 0.0, 0.0}),
                     });

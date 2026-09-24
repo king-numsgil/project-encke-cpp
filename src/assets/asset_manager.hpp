@@ -135,12 +135,6 @@ namespace encke
         // A mesh built in code; Ready at once.
         MeshHandle add_mesh(string name, MeshData data);
 
-        // A texture built in code; Ready at once.
-        TextureHandle add_texture(string name, TextureEncoding encoding, Pixels pixels);
-
-        // A material over textures already known here.
-        MaterialHandle add_material(MaterialAsset material);
-
         // An ambientCG set from assets/textures, tiling every `tile` metres:
         // its colour, normal and packed ORM textures decode on the worker.
         // Asking for a set twice returns the first handle, whatever tile the
@@ -175,6 +169,8 @@ namespace encke
         // worker, so it must capture only what it owns or shares.
         TextureHandle load_texture(string const& key, string name, TextureEncoding encoding,
                                    function<bool(Pixels& pixels)> decode);
+
+        MaterialHandle add_material(MaterialAsset material);
 
         // On the main thread, once the worker has parsed the file: registers
         // its meshes, textures and materials and builds the node tree over

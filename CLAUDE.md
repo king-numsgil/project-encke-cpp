@@ -695,13 +695,25 @@ Known gaps:
 
 ## The test planet
 
-`Scene::build_test_planet`: the ground is the north pole of an Earth-radius
-terrain body, with `kWorldOrigin` at the pole and the body's entity a radius
-below it, at its centre. Its terrain is `terrain::example_planet`, with the
-height channel's bias moved so the macro height at the pole is zero; see
-*First light* for the meshing. At the default LOD a voxel is 33 km, so the
-mesh under the object field is a facet that misses the true pole surface by
-up to tens of metres, and the objects can float over it or sink into it.
+`Scene::build_test_planet`: the Earth is a terrain body
+(`terrain::example_planet`) whose entity is a radius below `kWorldOrigin`,
+at its centre, so `kWorldOrigin` is the pole of the sphere; see *First light*
+for the meshing. The object field does not stand there. The terrain's height
+and the LOD's facets put the ground under the pole somewhere else -- 1,169 m
+below the sphere at LOD 17 with seed 1337 -- so `origin()` is moved onto it:
+`terrain::surface_below` meshes the chunks down the ray from the pole on the
+main thread and intersects it, and since chunk samples are bit-exact that is
+the facet the builder draws. The facet is not level: at 33 km voxels it tilts
+a couple of degrees and creases along its quad's diagonal, which runs through
+the pole. So every object is also stood on the mesh under it
+(`Scene::grounded`, through a `terrain::GroundProbe` kept from the build):
+alone, by the lowest ground under its footprint's corners, so no edge floats;
+in an assembly (colonnade, gateway, table and helmet, stacked crates), by the
+lowest ground under its supports, one offset for every part, so it stays in
+one piece and its high side sinks a few centimetres. Objects stay upright
+rather than tilting with the ground. `ENCKE_CAMERA` is
+relative to the moved origin; the Moon and the Earth's entity are placed from
+`kWorldOrigin`.
 
 The Moon is a sphere of its real radius at its real distance straight up. It
 is a few pixels across, as it should be; look straight up to find it.
@@ -709,8 +721,7 @@ is a few pixels across, as it should be; look straight up to find it.
 ## Textures
 
 Six CC0 sets from ambientCG live in `assets/textures/`, 1K JPGs, with their
-source and licence in `CREDITS.md`. Ground110 covered the old planet mesh and
-is unused since the Earth became terrain. They are read from the source tree through
+source and licence in `CREDITS.md`. Ground110 covers every terrain body. They are read from the source tree through
 `ENCKE_ASSET_DIR`, which CMake bakes in, rather than copied beside the
 executable like SPIR-V: tens of megabytes that rarely change. A shipped build
 would need that revisited.
@@ -794,9 +805,15 @@ non-uniformly scaled sphere would smear.
 - **Sphere**: u westward round the equator, v from the north pole, both arc
   length. The seam column is duplicated and each pole is a vertex per slice,
   so neither wraps nor pinches.
-- **Terrain**: not metres. u is slope and v is height, addressing a 64x64
-  lookup table built in code (`terrain/planet.cpp`), through a non-tiling
-  material.
+- **Terrain**: a cube projection from the body's centre. Each vertex takes
+  the face its position points through, and u and v are its other two
+  body-relative coordinates in metres, so they are continuous across chunks
+  and small, keeping f32 precision, near each face's centre: the pole among
+  them. Far from a face centre they reach thousands of kilometres, and are
+  only ever seen from far enough away that the smallest mips are read.
+  Triangles along the cube's edges, whose corners pick different faces, are
+  smeared, and show from orbit as faint lines. The tangent is +u laid into
+  the surface, with w chosen so the bitangent points to -v.
 
 A glTF material is **non-tiling**: its UVs are 0..1 over an atlas, and the
 renderer sends `texture_scale = (1, 1, 1, 1)`, which makes the stretch
@@ -1002,11 +1019,13 @@ streaming yet: it runs once at startup.
   the seams. `surface_nets_test` merges chunks of an analytic sphere by global
   cell and requires every directed edge exactly once each way, outward
   winding, and normals within 1.5 degrees of the analytic.
-- **Material**: a 64x64 slope-by-height lookup table, albedo and ORM, built in
-  code; see *Textures*.
+- **Material**: the Ground110 ambientCG set, tiling every 2.1 m, one for
+  every body; UVs are described under *Textures*. One material per object and
+  no vertex colour means there is no variation by height or slope: that
+  wants a vertex colour or a splat map.
 - **Captures** wait for `TerrainBuilder::idle()` as well as asset streaming.
-- The Earth's height is zeroed at the pole so the object field stands on it
-  (`zero_height_at`), within what the LOD's facets allow.
+- The test scene's object field moves onto the mesh below the pole
+  (`surface_below`); see *The test planet*.
 
 Known gaps:
 

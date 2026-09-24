@@ -34,115 +34,51 @@ namespace encke::terrain
             return terrain.macro.channels[static_cast<size_t>(which)];
         }
 
-        // The material's lookup tables: slope across, height down.
-        constexpr u32 kLutSize = 64;
+        // The terrain's ambientCG set and the metres one repeat covers.
+        constexpr char kGroundSet[] = "Ground110";
+        constexpr f32  kGroundTile  = 2.1f;
 
-        f32 srgb_to_linear(f32 c)
+        // Surface nets output as render vertices, UVs in metres for a tiling
+        // material. Each vertex is projected onto the face of the body's cube
+        // its position points through, from the body's centre: the two other
+        // body-relative coordinates are u and v. They are small near each
+        // face's centre, the pole among them, where f32 UVs keep their
+        // precision; far from it they are large, and seen from far enough
+        // away that only the smallest mips are read. Triangles whose corners
+        // pick different faces, along the cube's edges, are smeared.
+        void to_vertices(SurfaceMesh const& mesh, f64vec3 const& corner, MeshData& data)
         {
-            return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-        }
-
-        f32 linear_to_srgb(f32 c)
-        {
-            return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-        }
-
-        // Lowland green through dry grass and bare rock to snow with height,
-        // and toward rock with slope. Blended in linear space, stored sRGB.
-        void build_luts(Pixels& albedo, Pixels& orm)
-        {
-            struct Band
-            {
-                f32     height;      // 0 lowest, 1 highest
-                f32vec3 colour;      // sRGB
-                f32     roughness;
-            };
-            array<Band, 5> const bands{{
-                {0.00f, {0.20f, 0.27f, 0.14f}, 0.90f},
-                {0.45f, {0.33f, 0.36f, 0.19f}, 0.90f},
-                {0.60f, {0.45f, 0.40f, 0.30f}, 0.85f},
-                {0.75f, {0.47f, 0.45f, 0.43f}, 0.80f},
-                {0.90f, {0.90f, 0.91f, 0.93f}, 0.60f},
-            }};
-            f32vec3 const rock{0.40f, 0.37f, 0.34f};
-
-            auto const linear = [](f32vec3 const& srgb) {
-                return f32vec3{srgb_to_linear(srgb.r), srgb_to_linear(srgb.g), srgb_to_linear(srgb.b)};
-            };
-
-            albedo = Pixels{.width = kLutSize, .height = kLutSize, .rgba = vector<u8>(kLutSize * kLutSize * 4)};
-            orm    = Pixels{.width = kLutSize, .height = kLutSize, .rgba = vector<u8>(kLutSize * kLutSize * 4)};
-
-            for (u32 row = 0; row < kLutSize; ++row)
-            {
-                f32 const height = (static_cast<f32>(row) + 0.5f) / kLutSize;
-
-                size_t band = 0;
-                while (band + 2 < bands.size() && height > bands[band + 1].height)
-                {
-                    ++band;
-                }
-                Band const& low  = bands[band];
-                Band const& high = bands[band + 1];
-                f32 const   t    = std::clamp((height - low.height) / (high.height - low.height), 0.0f, 1.0f);
-
-                f32vec3 const ground    = glm::mix(linear(low.colour), linear(high.colour), t);
-                f32 const     roughness = glm::mix(low.roughness, high.roughness, t);
-
-                for (u32 column = 0; column < kLutSize; ++column)
-                {
-                    f32 const slope = (static_cast<f32>(column) + 0.5f) / kLutSize;
-                    f32 const bare  = glm::smoothstep(0.35f, 0.75f, slope);
-
-                    f32vec3 const colour = glm::mix(ground, linear(rock), bare);
-                    f32 const     rough  = glm::mix(roughness, 0.85f, bare);
-
-                    size_t const texel = (static_cast<size_t>(row) * kLutSize + column) * 4;
-                    for (glm::length_t c = 0; c < 3; ++c)
-                    {
-                        albedo.rgba[texel + static_cast<size_t>(c)] =
-                            static_cast<u8>(std::lround(linear_to_srgb(colour[c]) * 255.0f));
-                    }
-                    albedo.rgba[texel + 3] = 255;
-
-                    orm.rgba[texel + 0] = 255;
-                    orm.rgba[texel + 1] = static_cast<u8>(std::lround(rough * 255.0f));
-                    orm.rgba[texel + 2] = 0;
-                    orm.rgba[texel + 3] = 255;
-                }
-            }
-        }
-
-        // Surface nets output as render vertices. UV addresses the lookup
-        // tables: u the slope, 1 - cos of the angle from the body's up, v the
-        // height against the height channel's range. Both stay half a texel
-        // inside, since the material sampler repeats.
-        void to_vertices(SurfaceMesh const& mesh, f64vec3 const& corner, BodyTerrain const& terrain,
-                         f64 height_range, MeshData& data)
-        {
-            f32 const margin = 0.5f / kLutSize;
+            // Per face axis: the directions u and v run along.
+            array<f64vec3, 3> const u_axes{{{0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}}};
+            array<f64vec3, 3> const v_axes{{{0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {0.0, 1.0, 0.0}}};
 
             data.vertices.resize(mesh.positions.size());
             for (size_t i = 0; i < mesh.positions.size(); ++i)
             {
-                f32vec3 const normal = mesh.normals[i];
-                f64vec3 const point  = corner + f64vec3{mesh.positions[i]};
-                f64 const     radius = glm::length(point);
-                f32vec3 const up{point / radius};
+                f64vec3 const point = corner + f64vec3{mesh.positions[i]};
+                f64vec3 const size  = glm::abs(point);
+                size_t const  face  = size.x >= size.y && size.x >= size.z ? 0 : (size.y >= size.z ? 1 : 2);
 
-                f32 const slope  = std::clamp(1.0f - glm::dot(normal, up), 0.0f, 1.0f);
-                f32 const height = static_cast<f32>(0.5 + 0.5 * (radius - terrain.radius) / height_range);
+                f64vec3 const& u_axis = u_axes[face];
+                f64vec3 const& v_axis = v_axes[face];
+                f64vec3 const  normal{mesh.normals[i]};
 
-                // No normal map samples it, but keep the frame orthonormal.
-                f32vec3 const across  = std::abs(normal.y) < 0.99f ? f32vec3{0.0f, 1.0f, 0.0f} : f32vec3{1.0f, 0.0f, 0.0f};
-                f32vec3 const tangent = glm::normalize(glm::cross(across, normal));
+                // +u laid into the surface, and the sign that makes
+                // cross(normal, tangent) * w point to -v, the top of the image.
+                f64vec3 tangent = u_axis - normal * glm::dot(normal, u_axis);
+                if (glm::length(tangent) < 1e-6)
+                {
+                    tangent = v_axis - normal * glm::dot(normal, v_axis);
+                }
+                tangent     = glm::normalize(tangent);
+                f64 const w = glm::dot(glm::cross(normal, tangent), -v_axis) >= 0.0 ? 1.0 : -1.0;
 
                 data.vertices[i] = Vertex{
                     .position = mesh.positions[i],
-                    .normal   = normal,
-                    .tangent  = f32vec4{tangent, 1.0f},
-                    .uv       = f32vec2{std::clamp(slope * 4.0f, margin, 1.0f - margin),
-                                        std::clamp(height, margin, 1.0f - margin)},
+                    .normal   = mesh.normals[i],
+                    .tangent  = f32vec4{f32vec3{tangent}, static_cast<f32>(w)},
+                    .uv       = f32vec2{static_cast<f32>(glm::dot(point, u_axis)),
+                                        static_cast<f32>(glm::dot(point, v_axis))},
                 };
             }
             data.indices = mesh.indices;
@@ -159,15 +95,74 @@ namespace encke::terrain
         return macro + detail;
     }
 
-    void zero_height_at(BodyTerrain& terrain, f64vec3 const& point, u32 lod)
+    GroundProbe::GroundProbe(BodyTerrain const& terrain, f64vec3 const& around, u32 lod)
     {
-        // With no detail octaves, the field is |p| - R - macro height.
-        TerrainSampler    sampler{terrain};
-        PointSample const sample = sampler.sample_point(point, terrain.voxel_size(lod), 0);
-        f64 const         height = glm::length(point) - terrain.radius - static_cast<f64>(sample.value);
+        TerrainSampler sampler{terrain};
+        i64 const      extent   = i64{32} << lod;
+        f64 const      extent_m = static_cast<f64>(extent) * terrain.base_voxel_size;
+        f64vec3 const  down     = -glm::normalize(around);
 
-        MacroChannelSpec& spec = terrain.macro.channels[static_cast<size_t>(MacroChannel::Height)];
-        spec.bias = static_cast<f32>(static_cast<f64>(spec.bias) - height);
+        SurfaceMesh mesh;
+        vector<f32> samples;
+        for (u32 step = 0; step < 3; ++step)
+        {
+            f64vec3 const probe = around + down * (static_cast<f64>(step) * extent_m);
+            i64vec3 const cell{glm::floor(probe / terrain.base_voxel_size)};
+            i64vec3 const origin{floor_div(cell.x, extent) * extent, floor_div(cell.y, extent) * extent,
+                                 floor_div(cell.z, extent) * extent};
+
+            ChunkRequest const request = sampler.chunk(origin, lod);
+            samples.resize(request.sample_count());
+            sampler.sample_chunk(request, samples);
+            surface_nets(samples, request.cells, terrain.voxel_size(lod), mesh);
+
+            f64vec3 const corner = f64vec3{origin} * terrain.base_voxel_size;
+            for (u32 const index : mesh.indices)
+            {
+                triangles_.push_back(corner + f64vec3{mesh.positions[index]});
+            }
+        }
+    }
+
+    optional<f64vec3> GroundProbe::hit(f64vec3 const& from, f64vec3 const& direction) const
+    {
+        // Moller-Trumbore in f64, nearest hit in front of `from`.
+        optional<f64> nearest;
+        for (size_t t = 0; t < triangles_.size(); t += 3)
+        {
+            f64vec3 const& a = triangles_[t];
+            f64vec3 const  ab = triangles_[t + 1] - a;
+            f64vec3 const  ac = triangles_[t + 2] - a;
+            f64vec3 const  p  = glm::cross(direction, ac);
+            f64 const      det = glm::dot(ab, p);
+            if (std::abs(det) < 1e-12)
+            {
+                continue;
+            }
+            f64vec3 const s        = from - a;
+            f64 const     u        = glm::dot(s, p) / det;
+            f64vec3 const q        = glm::cross(s, ab);
+            f64 const     v        = glm::dot(direction, q) / det;
+            f64 const     distance = glm::dot(ac, q) / det;
+            if (u < 0.0 || v < 0.0 || u + v > 1.0 || distance < 0.0)
+            {
+                continue;
+            }
+            if (!nearest.has_value() || distance < *nearest)
+            {
+                nearest = distance;
+            }
+        }
+        if (!nearest.has_value())
+        {
+            return nullopt;
+        }
+        return from + direction * *nearest;
+    }
+
+    optional<f64vec3> GroundProbe::below(f64vec3 const& from) const
+    {
+        return hit(from, -glm::normalize(from));
     }
 
     ChunkPlan plan_chunks(TerrainSampler& sampler, u32 lod, f64 cull_factor)
@@ -263,7 +258,6 @@ namespace encke::terrain
         entt::entity                       entity = entt::null;
         std::shared_ptr<BodyTerrain const> terrain;
         u32                                lod          = 0;
-        f64                                height_range = 1.0;
 
         // One per worker, made on first use by that worker alone.
         vector<std::unique_ptr<TerrainSampler>> samplers;
@@ -331,29 +325,10 @@ namespace encke::terrain
     TerrainBuilder::TerrainBuilder()  = default;
     TerrainBuilder::~TerrainBuilder() = default;
 
-    MaterialHandle TerrainBuilder::material(AssetManager& assets)
-    {
-        if (!have_material_)
-        {
-            Pixels albedo;
-            Pixels orm;
-            build_luts(albedo, orm);
-            material_ = assets.add_material(MaterialAsset{
-                .name     = "terrain",
-                .albedo   = assets.add_texture("terrain albedo", TextureEncoding::Srgb, std::move(albedo)),
-                .normal   = TextureHandle{},
-                .orm      = assets.add_texture("terrain orm", TextureEncoding::Linear, std::move(orm)),
-                .emission = TextureHandle{},
-                .tiling   = false,
-            });
-            have_material_ = true;
-        }
-        return material_;
-    }
-
     void TerrainBuilder::build(Scene& scene, AssetManager& assets, WorkerPool& pool, TerrainBuildSettings const& settings)
     {
-        MaterialHandle const surface_material = material(assets);
+        // One tiling set for every body until bodies name their own.
+        MaterialHandle const surface_material = assets.load_ambientcg(kGroundSet, f32vec2{kGroundTile});
 
         for (auto const [entity, planet] : scene.registry.view<PlanetTerrain const>().each())
         {
@@ -361,9 +336,6 @@ namespace encke::terrain
             body->entity       = entity;
             body->terrain      = planet.terrain;
             body->lod          = settings.lod;
-            body->height_range = std::max(std::abs(static_cast<f64>(channel(*planet.terrain, MacroChannel::Height).bias)) +
-                                              std::abs(static_cast<f64>(channel(*planet.terrain, MacroChannel::Height).scale)),
-                                          1.0);
             body->samplers.resize(pool.size());
 
             TerrainSampler  planner{*planet.terrain};
@@ -391,7 +363,7 @@ namespace encke::terrain
 
                     f64vec3 const corner = f64vec3{origin} * base_voxel;
                     auto          data   = std::make_shared<MeshData>();
-                    to_vertices(mesh, corner, *body->terrain, body->height_range, *data);
+                    to_vertices(mesh, corner, *data);
                     body->job_done();
 
                     return [body, origin, corner, data, scene_ptr, assets_ptr, surface_material] {
