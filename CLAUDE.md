@@ -939,6 +939,17 @@ and floor(o * f * L) is not L * floor(o * f).
   clang-sanitize that is clang64, whose integrated assembler rejects the flag.
   The patch keeps it GCC-only.
 
+The port builds its debug library at `-O2 -g` (`OPTIONS_DEBUG` in the
+portfile). FastSIMD is intrinsic wrappers that only vanish once inlined; at
+`-O0` every SIMD operation is a call, and clang-sanitize meshed the planet
+about nine times slower than it does now. It is still the debug configuration,
+so its runtime settings match encke's debug builds.
+
+**Editing an overlay port needs a reconfigure** (`-Configure`, which is the
+slow path). CMake re-runs `vcpkg install` only when `vcpkg.json` or
+`vcpkg-configuration.json` changes; a changed portfile or patch is otherwise
+never picked up. Bump `port-version` with it.
+
 FastNoise2 fetches FastSIMD through CPM. A port must not download during its
 build, so the portfile fetches the pinned FastSIMD commit itself and hands it
 to CPM as `CPM_FastSIMD_SOURCE`. The version is the v1.1.1 release, so that a

@@ -1,7 +1,7 @@
 {
   "name": "fastnoise2",
   "version": "1.1.1",
-  "port-version": 0,
+  "port-version": 1,
   "description": "FastNoise2 SIMD noise node graphs, patched for encke: an int32 lattice offset on Perlin 3D, and a pinned SIMD feature set.",
   "homepage": "https://github.com/Auburn/FastNoise2",
   "license": "MIT",

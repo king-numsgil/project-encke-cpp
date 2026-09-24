@@ -48,6 +48,14 @@ vcpkg_cmake_configure(
         "-DCPM_FastSIMD_SOURCE=${FASTSIMD_SOURCE_PATH}"
         -DCPM_DOWNLOAD_ALL=OFF
         -DCPM_USE_LOCAL_PACKAGES=OFF
+    # The debug library is optimised too. FastSIMD is intrinsic wrappers that
+    # only cost nothing once inlined; at -O0 every SIMD operation is a call,
+    # and debug builds meshed the planet about twenty times slower than
+    # release. Only the flags differ: it stays the debug configuration, so
+    # its runtime settings still match encke's debug builds.
+    OPTIONS_DEBUG
+        "-DCMAKE_CXX_FLAGS_DEBUG=-O2 -g"
+        "-DCMAKE_C_FLAGS_DEBUG=-O2 -g"
 )
 
 vcpkg_cmake_install()
