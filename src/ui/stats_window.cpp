@@ -160,6 +160,13 @@ namespace encke
         ImGui::TextUnformatted(info.device);
         ImGui::Text("%ux%u, %s", info.extent.width, info.extent.height, info.present_mode);
 
+        if (info.limit_frames != nullptr)
+        {
+            char label[48];
+            std::snprintf(label, sizeof(label), "limit to %.0f fps", info.limit_hz);
+            ImGui::Checkbox(label, info.limit_frames);
+        }
+
         size_t const n   = unwrap();
         int const    len = static_cast<int>(n);
 

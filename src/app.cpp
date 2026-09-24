@@ -36,6 +36,9 @@ namespace encke
         // Longest frame the camera and exposure will integrate over at once.
         constexpr f64 kMaxFrameSeconds = 0.1;
 
+        // The frame limiter's rate, when it is on.
+        constexpr f64 kFrameLimitHz = 60.0;
+
         // Where each debug window first opens: beside the stats window and
         // clear of one another at the default 1280x720, so opening them all
         // does not stack them.
@@ -432,6 +435,8 @@ namespace encke
                 .device       = device_.properties().deviceName,
                 .present_mode = swapchain_.present_mode_name(),
                 .extent       = swapchain_.extent(),
+                .limit_frames = &limit_frames_,
+                .limit_hz     = kFrameLimitHz,
             });
 
             for (u32 index = 0; index < kDebugWindowCount; ++index)
@@ -505,12 +510,57 @@ namespace encke
         }
     }
 
+    f64 App::limit_frame_rate()
+    {
+        using clock = std::chrono::steady_clock;
+
+        if (!limit_frames_)
+        {
+            next_frame_.reset();
+            return 0.0;
+        }
+
+        auto const period = std::chrono::duration_cast<clock::duration>(
+            std::chrono::duration<f64>(1.0 / kFrameLimitHz));
+        auto const start  = clock::now();
+
+        if (next_frame_.has_value() && start < *next_frame_)
+        {
+            // SDL_DelayNS, not std::this_thread::sleep_for: on Windows SDL
+            // waits on a high-resolution timer, where MinGW's sleep_for goes
+            // through Sleep() and the default 15.6 ms tick.
+            auto const wait = std::chrono::duration_cast<std::chrono::nanoseconds>(*next_frame_ - start);
+            SDL_DelayNS(static_cast<u64>(wait.count()));
+        }
+
+        auto const woke = clock::now();
+
+        // Deadlines advance by whole periods, so oversleeping one frame is
+        // made up by the next and the average holds the rate. A frame that
+        // ran more than a period late restarts the schedule from now rather
+        // than racing to catch up.
+        if (!next_frame_.has_value() || woke - *next_frame_ > period)
+        {
+            next_frame_ = woke + period;
+        }
+        else
+        {
+            *next_frame_ += period;
+        }
+
+        return std::chrono::duration<f64, std::milli>(woke - start).count();
+    }
+
     void App::run()
     {
         bool running = true;
 
         while (running)
         {
+            // First, so input is polled as late as possible before the frame
+            // that uses it.
+            f64 const slept_ms = limit_frame_rate();
+
             FrameEvents const events = window_.poll();
 
             if (events.quit_requested)
@@ -546,6 +596,7 @@ namespace encke
                 SDL_WaitEvent(nullptr);
                 last_frame_.reset();
                 last_tick_.reset();
+                next_frame_.reset();
                 continue;
             }
 
@@ -629,7 +680,9 @@ namespace encke
                         std::chrono::duration<f64, std::milli>(now - *last_frame_).count();
                     f64 const stamp =
                         std::chrono::duration<f64>(now.time_since_epoch()).count();
-                    stats_.record(stamp, frame_ms, renderer_.blocked_ms(),
+                    // The limiter's sleep is idle time, like the renderer's
+                    // blocking, and must not count as CPU busy.
+                    stats_.record(stamp, frame_ms, renderer_.blocked_ms() + slept_ms,
                                   renderer_.gpu_timings());
                 }
                 last_frame_ = now;

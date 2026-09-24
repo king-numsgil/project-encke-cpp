@@ -50,6 +50,10 @@ namespace encke
         // Writes the frame the renderer just captured to capture_path_.
         void save_capture();
 
+        // Sleeps until the next frame's deadline while the limiter is on;
+        // returns the milliseconds slept.
+        f64 limit_frame_rate();
+
         // Declaration order is destruction order reversed: UI, renderer,
         // swapchain, allocator, device, instance, window. The allocator must
         // outlive every buffer and image the renderer owns, and the UI's
@@ -91,5 +95,11 @@ namespace encke
         // Stamped at the top of each simulated frame; the gap between two is
         // the time step the camera and exposure advance by.
         optional<std::chrono::steady_clock::time_point> last_tick_;
+
+        // The CPU frame limiter: present mode stays MAILBOX, and the loop
+        // sleeps to hold kFrameLimitHz. `next_frame_` is the deadline the
+        // next iteration may start at.
+        bool                                            limit_frames_ = true;
+        optional<std::chrono::steady_clock::time_point> next_frame_;
     };
 }

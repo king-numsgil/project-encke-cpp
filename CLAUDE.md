@@ -228,6 +228,13 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   that still has a pending wait is invalid.
 - **MAILBOX present mode where offered**, FIFO (vsync) otherwise. FIFO is the
   only mode guaranteed to exist.
+- **A CPU frame limiter holds 60 fps on top of MAILBOX**, on by default and
+  toggled in the stats window. `App::limit_frame_rate` sleeps at the top of
+  the loop, before input is polled, until a deadline that advances by whole
+  periods, so one oversleep is made up by the next frame. It sleeps with
+  `SDL_DelayNS`, which uses a high-resolution waitable timer on Windows;
+  MinGW's `sleep_for` lands on the default 15.6 ms tick. The sleep is
+  reported to the stats as blocked time, so it does not show as CPU busy.
 - **The UI is colour-correct on either view; the view decides the blend
   space.** `shaders/imgui.slang` decodes ImGui's sRGB vertex colours to linear,
   treats every texture as linear (ImGui's own are created `_SRGB` so the sampler

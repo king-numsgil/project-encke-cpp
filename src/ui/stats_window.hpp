@@ -18,6 +18,11 @@ namespace encke
             char const* device       = "";
             char const* present_mode = "";
             VkExtent2D  extent{};
+
+            // The frame limiter's toggle, owned by the caller; no checkbox
+            // when null.
+            bool* limit_frames = nullptr;
+            f64   limit_hz     = 0.0;
         };
 
         // `now` in seconds on any monotonic clock. `blocked_ms` is the part of
