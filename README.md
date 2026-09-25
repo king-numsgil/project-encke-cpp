@@ -176,9 +176,14 @@ cmake/      CPM.cmake
 
 `CLAUDE.md` holds the design decisions and the reasons for them in detail.
 
-## Credits
+## Licence
 
-Textures are CC0 from [ambientCG](https://ambientcg.com/). The DamagedHelmet
-is from the Khronos glTF sample models. Licences and sources are in
-`assets/textures/CREDITS.md` and `assets/models/CREDITS.md`. The forked ImGui
-Vulkan backend in `src/ui/imgui_vulkan.*` keeps ImGui's MIT notice.
+The code is MIT; see `LICENSE`. The assets are not covered by it: each carries
+its own licence, listed in `assets/textures/CREDITS.md` and
+`assets/models/CREDITS.md`. The textures are CC0 from
+[ambientCG](https://ambientcg.com/). The DamagedHelmet, from the Khronos glTF
+sample models, is **CC-BY-NC-4.0**, so it must not be used commercially.
+
+The forked ImGui Vulkan backend in `src/ui/imgui_vulkan.*` keeps ImGui's MIT
+notice. Dependencies keep their own licences, and since they link statically, a
+binary release must ship their licence texts.
