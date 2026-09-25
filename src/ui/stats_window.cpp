@@ -255,6 +255,11 @@ namespace encke
             std::snprintf(label, sizeof(label), "limit to %.0f fps", info.limit_hz);
             ImGui::Checkbox(label, info.limit_frames);
         }
+        if (info.taa != nullptr)
+        {
+            ImGui::SameLine();
+            ImGui::Checkbox("TAA", info.taa);
+        }
 
         draw_threads(info.threads);
 

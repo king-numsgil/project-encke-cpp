@@ -70,10 +70,13 @@ public float distance_from_depth(float depth, GpuFrame frame)
 
 // View-space point at a given distance along the ray through an NDC position.
 // Specific to the infinite reversed-Z projection: only its two focal terms
-// matter, [0][0] = f / aspect and [1][1] = f.
+// matter, [0][0] = f / aspect and [1][1] = f, and TAA's jitter, the
+// negated NDC offset in [0][2] and [1][2] (GLM's m[2][0] and m[2][1]),
+// which every reconstruction must take back out or it lands a sub-pixel
+// off the rasterised surface.
 public float3 view_at(float2 ndc, float distance, GpuFrame frame)
 {
-    return float3(ndc.x * distance / frame.projection[0][0],
-                  ndc.y * distance / frame.projection[1][1],
+    return float3((ndc.x + frame.projection[0][2]) * distance / frame.projection[0][0],
+                  (ndc.y + frame.projection[1][2]) * distance / frame.projection[1][1],
                   -distance);
 }

@@ -321,6 +321,13 @@ namespace encke
             log::info("exposure pinned to EV100 %.2f", static_cast<f64>(*ev100));
         }
 
+        if (std::getenv("ENCKE_NO_TAA") != nullptr)
+        {
+            taa_ = false;
+            log::info("TAA off");
+        }
+        renderer_.set_taa(taa_);
+
         if (std::getenv("ENCKE_NO_GEOMORPH") != nullptr)
         {
             renderer_.set_geomorph(false);
@@ -457,8 +464,10 @@ namespace encke
                 .extent       = swapchain_.extent(),
                 .limit_frames = &limit_frames_,
                 .limit_hz     = kFrameLimitHz,
+                .taa          = &taa_,
                 .threads      = threads,
             });
+            renderer_.set_taa(taa_);
 
             for (u32 index = 0; index < kDebugWindowCount; ++index)
             {
@@ -676,8 +685,18 @@ namespace encke
             // Not before streaming has settled: until then which materials
             // and terrain chunks have landed depends on timing, and captures
             // would differ.
-            bool const capturing = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
-                                   terrain_.idle() && assets_.idle() && renderer_.streaming_idle();
+            bool const settled = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
+                                 terrain_.idle() && assets_.idle() && renderer_.streaming_idle();
+
+            // TAA's history holds every frame before, however many there
+            // were: once settled, discard it and wait one jitter cycle, so
+            // the capture is the same image on every run.
+            if (settled && !capture_at_.has_value())
+            {
+                renderer_.reset_taa();
+                capture_at_ = frames_drawn_ + (renderer_.taa() ? config::kTaaJitterCount : 0u);
+            }
+            bool const capturing = settled && frames_drawn_ >= *capture_at_;
             if (capturing)
             {
                 renderer_.request_capture();

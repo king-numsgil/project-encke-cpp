@@ -137,6 +137,7 @@ shaders/
   lighting.slang         compute: shade from the cluster's lights, shadowed
   debug_views.slang      compute: cluster heat, normals, motion, cascades, into window images
   atmosphere.slang       compute: atmosphere LUTs, ambient, sky-view LUT; sky and aerial perspective
+  taa.slang              compute: temporal antialiasing resolve into the history
   exposure.slang         compute: luminance histogram, then metered and adapted EV100
   tonemap.slang          HDR -> swapchain, at the adapted exposure
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
@@ -294,6 +295,7 @@ The passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 | clusters | compute | one thread per froxel, tests every light against its view-space AABB |
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
 | atmosphere | compute | with air: the sky where nothing was drawn, aerial perspective over what was |
+| TAA | compute | resolves HDR into the history, which exposure and tonemap then read |
 | exposure | compute | luminance histogram of HDR, then one group meters and adapts EV100 |
 | debug views | compute | one visualisation image per open debug window; skipped when none is open |
 | tonemap | raster | full-screen triangle, exposure + ACES, AgX or PBR Neutral, into the sRGB swapchain |
@@ -428,6 +430,11 @@ in the fence wait, acquire and present.
   compositor and the user's own use of the machine cannot get into it; a
   desktop grab once captured a browser because Windows refused the
   foreground switch. Two runs with the same settings are byte-identical.
+  Once the frame count is reached and streaming has settled, the app
+  discards TAA's history and captures `config::kTaaJitterCount` frames later,
+  one jitter cycle, so the history is the same on every run.
+- **`ENCKE_NO_TAA`** (or the stats window's checkbox) turns temporal
+  antialiasing off.
 - **`ENCKE_CAMERA="px py pz tx ty tz"`** starts the camera at p looking at t,
   metres from the pole. The helmet: `"-2.55 1.33 -1.62 -3 1.17 -2"`.
 - **`ENCKE_TONEMAP` (0 ACES, 1 AgX, 2 PBR Neutral, T cycles) and `ENCKE_EV100`**
@@ -1349,14 +1356,59 @@ Measured: a 1 mm offset 3 m ahead of a camera at 1,000 km survives exactly
 camera-relative, and collapses to 0.000000 if world positions are narrowed to
 f32 first.
 
-### Antialiasing
+### Antialiasing: TAA, built, first draft
 
-Motion vectors exist for **TAA**, which is the intended approach: it handles
-shading aliasing (specular, normal maps) that MSAA cannot, and deferred makes
-MSAA expensive since the G-buffer would need to be sample-rate. TAA is not
-formally locked — the commitment so far is the motion vectors, which every
-candidate wants. The same buffers later feed temporal SSAO/SSR denoising and
-FSR-style upscaling.
+**TAA**, because it handles shading aliasing (specular, normal maps) that
+MSAA cannot, and deferred makes MSAA expensive since the G-buffer would need
+to be sample-rate. The same machinery later feeds temporal SSAO/SSR
+denoising and FSR-style upscaling. `shaders/taa.slang`, after Karis (2014)
+and Playdead's INSIDE talk (2016).
+
+- **The jitter is in the projection's third column** (GLM `m[2][0]`,
+  `m[2][1]`), a Halton (2, 3) point within the pixel, cycling through
+  `config::kTaaJitterCount` and restarting whenever the history is
+  discarded. Only this frame's rasterising projection carries it: the
+  Frame's and every object's mvp. **`view_at` in `lib/cluster.slang` takes
+  it back out**, reading those two terms, so lighting, clusters, the
+  atmosphere and the debug views all reconstruct the surface the
+  rasteriser drew. Anything that reconstructs a view position without
+  `view_at` must do the same.
+- **Motion vectors are unjittered.** Last frame's mvp is built from the
+  unjittered projection, and the G-buffer takes this frame's jitter back out
+  of its current position. The jitter is the camera's, not the scene's.
+- **The sky has no motion vector**, so the resolve reprojects it by the
+  camera's rotation alone, through `Frame::sky_reprojection`.
+- **The resolve** takes motion from the nearest surface in the 3x3
+  neighbourhood, samples the history Catmull-Rom in five bilinear taps,
+  clips it toward the neighbourhood's mean within one standard deviation in
+  YCoCg, and blends in a tenth of the new frame. Clipping and blending
+  happen on colour compressed as c / (1 + luma) after last frame's
+  exposure, so the sun's disk and specular glints do not leave fireflies.
+  The history is stored linear and unexposed. The neighbourhood is cached
+  in group-shared memory, a 10x10 tile per 8x8 group.
+- **Two history images, ping-ponged.** The resolve reads one and writes the
+  other, then patches `push.hdr_storage` and `push.hdr_sampled` to the one
+  written, so exposure and tonemap read it in HDR's place with no copy. The
+  history just written is handed to tonemap in `READ_ONLY_OPTIMAL` with
+  compute in the barrier's destination too, where next frame's resolve
+  samples it. For the same reason the EV100 image's handoff now names
+  compute, and its transition back to storage waits on compute as well.
+- **A frame with no history passes HDR through untouched**, not round-tripped
+  through last frame's exposure. That exposure was metered from the history
+  being discarded, and carried it into the captures that followed.
+- Verified by capture: TAA captures byte-identical across runs; clustered
+  and brute force byte-identical through it; TAA-off captures byte-identical
+  across runs; edges on the hills, masts and lamp heads resolved; no ghosting
+  on the spinning cube.
+
+Known gaps:
+
+- No sharpening. Textures are slightly softer than without it; AMD's CAS
+  folded into tonemap would restore them.
+- Motion vectors ignore the geomorph (see *Geomorph and seams*); the clip
+  absorbs it.
+- No reactive mask: transparent or particle effects, when there are any,
+  will need one.
 
 ### Visibility buffer — considered, set aside
 

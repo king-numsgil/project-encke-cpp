@@ -165,6 +165,20 @@ namespace encke
 
         // 1 / (1.2 * 2^EV100): the saturation-based exposure for a camera set
         // to that EV at ISO 100.
+        // The Halton sequence's `index`th point in `base`, in [0, 1).
+        f64 halton(u32 index, u32 base)
+        {
+            f64 result   = 0.0;
+            f64 fraction = 1.0;
+            while (index > 0)
+            {
+                fraction /= static_cast<f64>(base);
+                result += fraction * static_cast<f64>(index % base);
+                index /= base;
+            }
+            return result;
+        }
+
         f32 exposure_from_ev100(f32 ev100)
         {
             return 1.0f / (1.2f * std::exp2(ev100));
@@ -431,6 +445,12 @@ namespace encke
             !multiscatter_pipeline_.init(device, atmosphere_config("multiscatter_main")) ||
             !sky_ambient_pipeline_.init(device, atmosphere_config("ambient_main")) ||
             !sky_view_pipeline_.init(device, atmosphere_config("sky_view_main")) ||
+            !taa_pipeline_.init(device, ComputePipeline::Config{
+                                            .spirv_name         = "taa.spv",
+                                            .entry              = "compute_main",
+                                            .set_layout         = bindless_.layout(),
+                                            .push_constant_size = sizeof(gpu::Push),
+                                        }) ||
             !atmosphere_pipeline_.init(device, atmosphere_config("apply_main")))
         {
             return false;
@@ -889,6 +909,17 @@ namespace encke
             }
         }
 
+        for (Image& history : history_)
+        {
+            if (!history.init(*allocator_, *device_,
+                              {kHdrFormat, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                               VK_IMAGE_ASPECT_COLOR_BIT, "TAA history"},
+                              extent))
+            {
+                return false;
+            }
+        }
+
         return albedo_.init(*allocator_, *device_,
                             {kAlbedoFormat, attachment_sampled, VK_IMAGE_ASPECT_COLOR_BIT,
                              "gbuffer albedo"},
@@ -939,8 +970,20 @@ namespace encke
                 debug_sampled_handles_[index] = bindless_.add_sampled_image(view, read_only);
                 debug_storage_handles_[index] = bindless_.add_storage_image(view);
             }
+            for (size_t index = 0; index < history_.size(); ++index)
+            {
+                history_sampled_handles_[index] = bindless_.add_sampled_image(history_[index].view(), read_only);
+                history_storage_handles_[index] = bindless_.add_storage_image(history_[index].view());
+            }
             return;
         }
+
+        for (size_t index = 0; index < history_.size(); ++index)
+        {
+            bindless_.update_sampled_image(history_sampled_handles_[index], history_[index].view(), read_only);
+            bindless_.update_storage_image(history_storage_handles_[index], history_[index].view());
+        }
+        history_valid_ = false;
 
         for (u32 index = 0; index < kDebugWindowCount; ++index)
         {
@@ -971,6 +1014,13 @@ namespace encke
         for (Image& image : debug_images_)
         {
             if (!image.resize(extent))
+            {
+                return false;
+            }
+        }
+        for (Image& history : history_)
+        {
+            if (!history.resize(extent))
             {
                 return false;
             }
@@ -1017,6 +1067,35 @@ namespace encke
                                                                        : projection;
         previous_view_       = view;
         previous_projection_ = projection;
+
+        // TAA's jitter: a Halton (2, 3) point within the pixel, restarting
+        // with the history, as an NDC offset. Only this frame's rasterising
+        // projection carries it, in the third column: last frame's, kept for
+        // motion vectors, never does.
+        f64vec2 jitter{0.0};
+        u32vec2 history{0u};
+        if (taa_)
+        {
+            if (!history_valid_)
+            {
+                jitter_index_ = 0;
+            }
+            u32 const point = jitter_index_ % config::kTaaJitterCount + 1;
+            jitter          = (f64vec2{halton(point, 2), halton(point, 3)} - 0.5) * 2.0 /
+                     f64vec2{static_cast<f64>(extent.width), static_cast<f64>(extent.height)};
+            ++jitter_index_;
+
+            history_write_ ^= 1u;
+            history = u32vec2{history_sampled_handles_[history_write_ ^ 1u], history_storage_handles_[history_write_]};
+        }
+        f64mat4 jittered = projection;
+        jittered[2][0]   = -jitter.x;
+        jittered[2][1]   = -jitter.y;
+
+        // The sky's reprojection: a direction through this frame's rotation
+        // back to the world, through last frame's to its clip space.
+        f64mat4 const sky_reprojection =
+            previous_projection * f64mat4{f64mat3{previous_view}} * f64mat4{glm::transpose(f64mat3{view})};
 
         // Log-depth slice mapping: slice = log(d) * scale + bias, which puts
         // kClusterNear at 0 and kClusterFar at kClustersZ.
@@ -1103,7 +1182,7 @@ namespace encke
         }
 
         gpu::Frame const frame{
-            .projection    = f32mat4{projection},
+            .projection    = f32mat4{jittered},
             .screen        = f32vec4{static_cast<f32>(extent.width), static_cast<f32>(extent.height),
                                      1.0f / static_cast<f32>(extent.width),
                                      1.0f / static_cast<f32>(extent.height)},
@@ -1128,6 +1207,17 @@ namespace encke
                                        exposure_jump_ || !exposure_written_ ? 1.0f : 0.0f,
                                        scene.ev100},
             .atmosphere      = atmosphere_handles,
+            // Pre-exposed by what tonemap will apply: last frame's metering,
+            // or the pinned or scene EV before there is any.
+            .taa              = f32vec4{static_cast<f32>(jitter.x), static_cast<f32>(jitter.y),
+                                        history_valid_ ? 0.0f : 1.0f,
+                                        exposure_from_ev100(fixed_ev100_.value_or(scene.ev100))},
+            .taa_images       = u32vec4{history.x, history.y,
+                                        config::kAutoExposure && exposure_written_ && !fixed_ev100_.has_value()
+                                            ? exposure_sampled_handle_
+                                            : BindlessSet::kInvalid,
+                                        lut_sampler_handle_},
+            .sky_reprojection = f32mat4{sky_reprojection},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 
@@ -1233,7 +1323,7 @@ namespace encke
             }
 
             gpu::Object const gpu_object{
-                .mvp               = f32mat4{projection * model_view},
+                .mvp               = f32mat4{jittered * model_view},
                 .prev_mvp          = f32mat4{previous_projection * previous_model_view},
                 .model_view        = f32mat4{model_view},
                 .normal_view       = f32mat4{f64mat4{normal_matrix}},
@@ -1667,6 +1757,48 @@ namespace encke
 
         timestamps_.mark(command, "atmosphere");
 
+        // -- 6c. TAA ---------------------------------------------------------
+        // Resolves HDR and the other history into this frame's history, which
+        // exposure and tonemap then read in HDR's place. The history written
+        // was read two frames ago, by tonemap and exposure, and last frame by
+        // the resolve: all its contents are replaced. The one read was left
+        // READ_ONLY_OPTIMAL by the frame that wrote it; with no history yet it
+        // is never sampled, but it must still be in the layout its descriptor
+        // names.
+        if (taa_)
+        {
+            constexpr VkPipelineStageFlags2 kCompute = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            constexpr VkPipelineStageFlags2 kReaders = kCompute | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+
+            u32 const write = history_write_;
+            u32 const read  = write ^ 1u;
+
+            array<Transition, 2> transitions{};
+            transitions[0] = Transition{history_[write].handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                                        kReaders, 0, kCompute, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+            size_t count = 1;
+            if (!history_valid_)
+            {
+                transitions[count++] = Transition{history_[read].handle(), VK_IMAGE_LAYOUT_UNDEFINED,
+                                                  VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, kReaders, 0, kCompute,
+                                                  VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+            }
+            VkMemoryBarrier2 const lit = compute_to_compute(VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                                            VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            barrier(command, span<Transition const>{transitions.data(), count},
+                    span<VkMemoryBarrier2 const>{&lit, 1});
+
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, taa_pipeline_.handle());
+            vkCmdPushConstants(command, taa_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0, sizeof(push), &push);
+            vkCmdDispatch(command, groups(extent.width, 8), groups(extent.height, 8), 1);
+
+            push.hdr_storage = history_storage_handles_[write];
+            push.hdr_sampled = history_sampled_handles_[write];
+            history_valid_   = true;
+        }
+
+        timestamps_.mark(command, "TAA");
+
         // -- 7. exposure -----------------------------------------------------
         // The histogram reads the HDR target lighting just wrote, and adds
         // into bins last frame's adapt pass zeroed: one compute-to-compute
@@ -1683,7 +1815,8 @@ namespace encke
             Transition const to_storage[]{
                 {exposure_image_.handle(),
                  exposure_written_ ? VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0,
+                 VK_IMAGE_LAYOUT_GENERAL,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0,
                  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                  VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT},
             };
@@ -1764,7 +1897,7 @@ namespace encke
 
             // Filled by assignment: a std::array brace-initialised with only
             // some of its elements draws GCC's -Wmissing-braces.
-            array<Transition, 3 + kDebugWindowCount> handoff{};
+            array<Transition, 4 + kDebugWindowCount> handoff{};
 
             handoff[0] = Transition{hdr_.handle(), VK_IMAGE_LAYOUT_GENERAL,
                                     VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
@@ -1783,12 +1916,26 @@ namespace encke
                                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT};
             size_t count = 2;
 
+            // Tonemap samples the resolved history now, and next frame's
+            // resolve samples it again in compute.
+            if (taa_)
+            {
+                handoff[count++] = Transition{
+                    history_[history_write_].handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+            }
+
+            // Tonemap samples the EV100 in the fragment stage, and next
+            // frame's TAA resolve in compute, before this frame's adapt pass.
             if (config::kAutoExposure)
             {
                 handoff[count++] = Transition{
                     exposure_image_.handle(), VK_IMAGE_LAYOUT_GENERAL,
                     VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
                 exposure_written_ = true;
             }
@@ -2198,6 +2345,7 @@ namespace encke
         sky_ambient_pipeline_.shutdown();
         sky_view_pipeline_.shutdown();
         atmosphere_pipeline_.shutdown();
+        taa_pipeline_.shutdown();
 
         transmittance_lut_.shutdown();
         multiscatter_lut_.shutdown();
@@ -2259,6 +2407,10 @@ namespace encke
         for (Image& image : debug_images_)
         {
             image.shutdown();
+        }
+        for (Image& history : history_)
+        {
+            history.shutdown();
         }
 
         bindless_.shutdown();

@@ -101,6 +101,11 @@ namespace encke
         optional<string> capture_path_;
         u32              capture_frame_ = 0;
         u32              frames_drawn_  = 0;
+        optional<u32>    capture_at_;   // once settled: the frame to capture
+
+        // Temporal antialiasing, toggled in the stats window; ENCKE_NO_TAA
+        // starts with it off.
+        bool taa_ = true;
 
         // Wall-clock stamp of the previous completed frame, for frame time.
         optional<std::chrono::steady_clock::time_point> last_frame_;

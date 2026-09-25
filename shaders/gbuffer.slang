@@ -67,9 +67,15 @@ VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint 
     float2 stretch   = float2(length(scale * input.tangent.xyz),
                               length(scale * bitangent) * object.texture_scale.w);
 
+    // Rasterised through the jittered projection; motion is measured
+    // without the jitter, which is the camera's, not the scene's, so the
+    // current position has it taken back out. Last frame's mvp never had it.
+    float2 jitter = load_frame().taa.xy;
+
     VertexOut output;
-    output.position = mul(object.mvp, local);
-    output.current  = output.position;
+    output.position   = mul(object.mvp, local);
+    output.current    = output.position;
+    output.current.xy -= jitter * output.current.w;
     output.previous = mul(object.prev_mvp, local);
     output.normal   = mul(object.normal_view, float4(morphed.normal, 0.0f)).xyz;
     output.tangent  = float4(mul(object.model_view, float4(input.tangent.xyz, 0.0f)).xyz,

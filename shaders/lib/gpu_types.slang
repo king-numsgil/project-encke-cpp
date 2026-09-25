@@ -28,6 +28,11 @@ public struct GpuFrame
     public float4   exposure_limits; // x min EV100, y max EV100, z 1 = jump to target, w EV100 to start from
     public uint4    atmosphere;      // x GpuAtmosphere buffer or kNoAtmosphere, y transmittance LUT,
                                      // z multiple-scattering LUT (sampled), w their sampler
+    public float4   taa;             // xy jitter in NDC (in projection too), z 1 = reset history,
+                                     // w exposure before anything was metered
+    public uint4    taa_images;      // x history to read (sampled), y to write (storage),
+                                     // z EV100 image (sampled) or ~0, w linear clamped sampler
+    public float4x4 sky_reprojection; // view direction now -> last frame's clip, rotation only
 };
 
 public static const uint kNoAtmosphere = 0xFFFFFFFFu;
@@ -141,7 +146,7 @@ public struct Push
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 288;
+public static const uint kFrameStride      = 384;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
 public static const uint kObjectStride     = 352;

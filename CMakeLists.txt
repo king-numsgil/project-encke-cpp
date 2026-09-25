@@ -286,13 +286,14 @@ encke_add_shader(ENCKE_IMGUI_SPV shaders/imgui.slang)
 encke_add_shader(ENCKE_SHADOW_DEPTH_SPV shaders/shadow_depth.slang)
 encke_add_shader(ENCKE_EXPOSURE_SPV shaders/exposure.slang)
 encke_add_shader(ENCKE_ATMOSPHERE_SPV shaders/atmosphere.slang)
+encke_add_shader(ENCKE_TAA_SPV shaders/taa.slang)
 
 add_custom_target(encke_shaders DEPENDS
     "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
     "${ENCKE_LIGHTING_SPV}" "${ENCKE_TONEMAP_SPV}"
     "${ENCKE_DEBUG_VIEWS_SPV}" "${ENCKE_IMGUI_SPV}"
     "${ENCKE_SHADOW_DEPTH_SPV}" "${ENCKE_EXPOSURE_SPV}"
-    "${ENCKE_ATMOSPHERE_SPV}"
+    "${ENCKE_ATMOSPHERE_SPV}" "${ENCKE_TAA_SPV}"
 )
 add_dependencies(encke encke_shaders)
 

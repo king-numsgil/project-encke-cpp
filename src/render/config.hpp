@@ -110,6 +110,12 @@ namespace encke::config
     // sky: 0.2666 degrees.
     inline constexpr f64 kSunAngularRadius = 0.004653;
 
+    // -- temporal antialiasing ---------------------------------------------------------
+    // The jitter cycles through this many Halton (2, 3) points, and a capture
+    // waits this many frames after discarding the history, one whole cycle,
+    // so it is the same image whatever ran before.
+    inline constexpr u32 kTaaJitterCount = 16;
+
     // -- auto-exposure ----------------------------------------------------------------
     // Off: the scene's fixed Scene::ev100 is used instead.
     inline constexpr bool kAutoExposure = true;

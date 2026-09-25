@@ -33,6 +33,9 @@ namespace encke
             bool* limit_frames = nullptr;
             f64   limit_hz     = 0.0;
 
+            // Temporal antialiasing's toggle, likewise.
+            bool* taa = nullptr;
+
             // The same groups every frame, or their smoothing restarts.
             span<Threads const> threads;
         };

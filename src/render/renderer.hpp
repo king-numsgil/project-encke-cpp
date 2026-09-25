@@ -182,6 +182,18 @@ namespace encke
         // compare against, since off is what terrain looked like before.
         void set_geomorph(bool on) { geomorph_ = on; }
 
+        // Temporal antialiasing. Turning it on starts from an empty history.
+        void set_taa(bool on)
+        {
+            history_valid_ = history_valid_ && on;
+            taa_           = on;
+        }
+        bool taa() const { return taa_; }
+
+        // Discards the history and restarts the jitter sequence, so the next
+        // frames are the same whatever came before: for captures.
+        void reset_taa() { history_valid_ = false; }
+
         // Bindless sampled-image handle of a visualisation, in
         // READ_ONLY_OPTIMAL by the time the overlay runs. Stable across
         // resizes.
@@ -375,6 +387,20 @@ namespace encke
         // What the LUTs were built for; nullopt until they first are.
         // `atmosphere_drawn_` is whether this frame has one; upload() sets
         // both flags and record() reads them.
+        // TAA (shaders/taa.slang). Two screen-sized history images, taken in
+        // turn: each frame resolves into one while reading the other, then
+        // exposure and tonemap read the one just written in HDR's place. The
+        // one read was left READ_ONLY_OPTIMAL by the frame that wrote it.
+        // `jitter_index_` counts frames since the history was last discarded,
+        // so the jitter sequence restarts with it.
+        array<Image, 2> history_;
+        array<u32, 2>   history_storage_handles_{BindlessSet::kInvalid, BindlessSet::kInvalid};
+        array<u32, 2>   history_sampled_handles_{BindlessSet::kInvalid, BindlessSet::kInvalid};
+        u32             history_write_ = 0;
+        bool            history_valid_ = false;
+        u32             jitter_index_  = 0;
+        bool            taa_           = true;
+
         optional<AtmosphereView> lut_atmosphere_;
         bool                     atmosphere_drawn_ = false;
         bool                     rebuild_luts_     = false;
@@ -416,6 +442,7 @@ namespace encke
         ComputePipeline  multiscatter_pipeline_;
         ComputePipeline  sky_ambient_pipeline_;
         ComputePipeline  sky_view_pipeline_;
+        ComputePipeline  taa_pipeline_;
         ComputePipeline  atmosphere_pipeline_;
 
         // GPU state by asset handle index, checked against the handle's

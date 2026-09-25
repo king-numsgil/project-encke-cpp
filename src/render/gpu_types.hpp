@@ -42,6 +42,20 @@ namespace encke::gpu
         // none; y the transmittance LUT, z the multiple-scattering LUT, both
         // sampled; w their sampler, linear and clamped.
         u32vec4 atmosphere;
+
+        // TAA. `projection` above is jittered by taa.xy; view_at takes it
+        // back out. x, y this frame's jitter in NDC; z 1 when the history
+        // is to be discarded; w the exposure to pre-expose by before anything
+        // was metered.
+        f32vec4 taa;
+        // x the history to read, sampled; y the history to write, storage;
+        // z the adapted EV100 image, sampled, or ~0 when there is none yet;
+        // w a linear clamped sampler, for the history.
+        u32vec4 taa_images;
+        // A view-space direction this frame to last frame's clip space, by
+        // the camera's rotation alone: reprojects the sky, where nothing was
+        // drawn and there is no motion vector.
+        f32mat4 sky_reprojection;
     };
 
     inline constexpr u32 kNoAtmosphere = ~0u;
@@ -183,7 +197,7 @@ namespace encke::gpu
         u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 288);
+    static_assert(sizeof(Frame) == 384);
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
