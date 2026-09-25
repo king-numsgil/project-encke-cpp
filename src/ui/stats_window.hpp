@@ -1,5 +1,6 @@
 #pragma once
 
+#include "platform/thread_load.hpp"
 #include "vulkan/timestamps.hpp"
 
 namespace encke
@@ -13,6 +14,14 @@ namespace encke
     class StatsWindow
     {
     public:
+        // A row of load dots: one per thread, green idle to red busy.
+        struct Threads
+        {
+            char const*            name = "";
+            span<ThreadLoad const> loads;
+            size_t                 queued = 0;
+        };
+
         struct Info
         {
             char const* device       = "";
@@ -23,6 +32,9 @@ namespace encke
             // when null.
             bool* limit_frames = nullptr;
             f64   limit_hz     = 0.0;
+
+            // The same groups every frame, or their smoothing restarts.
+            span<Threads const> threads;
         };
 
         // `now` in seconds on any monotonic clock. `blocked_ms` is the part of
@@ -38,6 +50,20 @@ namespace encke
         static constexpr f64    kBucketSeconds = 1.0 / 60.0;
         static constexpr f64    kPlotSeconds   = 10.0;
         static constexpr f64    kTableSeconds  = 1.0;
+
+        // Time constant of the load dots' exponential smoothing.
+        static constexpr f64 kLoadSeconds = 0.25;
+
+        // Per thread across every group, in order: the busy time and clock
+        // at the last draw, and the smoothed busy fraction.
+        struct LoadSample
+        {
+            u64 busy_ns  = 0;
+            u64 at_ns    = 0;
+            f64 fraction = 0.0;
+        };
+
+        void draw_threads(span<Threads const> groups);
 
         struct Accumulator
         {
@@ -84,5 +110,7 @@ namespace encke
         vector<f64> plot_busy_;
         vector<f64> plot_gpu_total_;
         vector<f64> plot_stack_;
+
+        vector<LoadSample> loads_;
     };
 }

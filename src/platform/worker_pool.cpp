@@ -17,6 +17,7 @@ namespace encke
 
     void WorkerPool::start(u32 count, string_view name)
     {
+        loads_ = std::make_unique<ThreadLoad[]>(count);
         threads_.reserve(count);
         for (u32 index = 0; index < count; ++index)
         {
@@ -119,6 +120,9 @@ namespace encke
 
             // A job that throws still counts as done, with nothing to finish:
             // an exception leaving a jthread's function is std::terminate.
+            ThreadLoad& load = loads_[index];
+            load.begin();
+
             Completion completion;
             try
             {
@@ -132,6 +136,8 @@ namespace encke
             {
                 log::error("worker %u: job threw", index);
             }
+
+            load.end();
 
             std::lock_guard const lock{mutex_};
             finished_.push_back(std::move(completion));

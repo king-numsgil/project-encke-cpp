@@ -437,12 +437,21 @@ namespace encke
 
         if (show_ui_)
         {
+            AssetWorker const&               asset_worker = assets_.worker();
+            array<StatsWindow::Threads, 2> const threads{{
+                {.name = "terrain", .loads = pool_.loads(), .queued = pool_.outstanding()},
+                {.name   = "assets",
+                 .loads  = span<ThreadLoad const>{&asset_worker.load(), 1},
+                 .queued = asset_worker.outstanding()},
+            }};
+
             stats_.draw(StatsWindow::Info{
                 .device       = device_.properties().deviceName,
                 .present_mode = swapchain_.present_mode_name(),
                 .extent       = swapchain_.extent(),
                 .limit_frames = &limit_frames_,
                 .limit_hz     = kFrameLimitHz,
+                .threads      = threads,
             });
 
             for (u32 index = 0; index < kDebugWindowCount; ++index)

@@ -7,6 +7,8 @@
 #include <mutex>
 #include <thread>
 
+#include "platform/thread_load.hpp"
+
 namespace encke
 {
     // A pool of std::jthreads at background priority, for heavy CPU work:
@@ -63,6 +65,9 @@ namespace encke
         // Submitted and not yet drained.
         u32 outstanding() const;
 
+        // One per worker, for the stats window.
+        span<ThreadLoad const> loads() const { return {loads_.get(), threads_.size()}; }
+
     private:
         struct Queued
         {
@@ -77,6 +82,10 @@ namespace encke
         std::deque<Queued>          queued_;
         vector<Completion>          finished_;
         u32                         outstanding_ = 0;
+
+        // Before the threads, so it outlives them. An array, since atomics
+        // cannot move and a vector of them cannot be sized after the fact.
+        std::unique_ptr<ThreadLoad[]> loads_;
 
         vector<std::jthread> threads_;
     };

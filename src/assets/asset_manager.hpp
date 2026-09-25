@@ -172,6 +172,9 @@ namespace encke
         // Nothing loading, and nothing Ready that has not been taken.
         bool idle() const;
 
+        // For the stats window.
+        AssetWorker const& worker() const { return worker_; }
+
     private:
         // The texture known by `key`, or a new one decoded on the worker by
         // `decode`, which logs and returns false on failure. It runs on the

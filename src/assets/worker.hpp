@@ -4,6 +4,8 @@
 #include <mutex>
 #include <thread>
 
+#include "platform/thread_load.hpp"
+
 namespace encke
 {
     // The one asset thread. A job's work runs here -- reading files,
@@ -56,6 +58,12 @@ namespace encke
         // Every submitted job has run and been taken.
         bool idle() const;
 
+        // Submitted and not yet taken.
+        size_t outstanding() const;
+
+        // For the stats window.
+        ThreadLoad const& load() const { return load_; }
+
     private:
         void run(std::stop_token const& stop);
 
@@ -65,6 +73,7 @@ namespace encke
         vector<Finish>              finished_;
         size_t                      outstanding_ = 0;   // submitted, not yet taken
 
+        ThreadLoad   load_;
         std::jthread thread_;
     };
 }

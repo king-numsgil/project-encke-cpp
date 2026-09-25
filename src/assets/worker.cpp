@@ -54,6 +54,12 @@ namespace encke
         return outstanding_ == 0;
     }
 
+    size_t AssetWorker::outstanding() const
+    {
+        std::lock_guard const lock{mutex_};
+        return outstanding_;
+    }
+
     void AssetWorker::run(std::stop_token const& stop)
     {
         while (true)
@@ -75,6 +81,8 @@ namespace encke
 
             // A corrupt or huge image can throw bad_alloc on the way through
             // a decoder.
+            load_.begin();
+
             Finish finish;
             try
             {
@@ -90,6 +98,8 @@ namespace encke
                 log::error("asset %s: threw", job.name.c_str());
                 finish = std::move(job.failed);
             }
+
+            load_.end();
 
             std::lock_guard const lock{mutex_};
             finished_.push_back(std::move(finish));

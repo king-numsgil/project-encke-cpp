@@ -80,6 +80,7 @@ src/
     cpu.{hpp,cpp}     physical and logical core counts, via pytorch/cpuinfo
     thread.{hpp,cpp}  calling thread's OS priority and name, via BS::thread_pool
     worker_pool.{hpp,cpp} jthreads at background priority; jobs return main-thread completions
+    thread_load.hpp   a worker's busy time, for the stats window's load dots
   vulkan/
     context.{hpp,cpp}    volk, instance, validation, surface
     device.{hpp,cpp}     device selection, queues, submit_immediate
@@ -95,7 +96,7 @@ src/
     image_window.{hpp,cpp} a window showing one bindless image, aspect kept
     imgui_layer.{hpp,cpp}  ImGui + ImPlot contexts, backends; the renderer's Overlay
     imgui_vulkan.{hpp,cpp} forked ImGui Vulkan backend: VMA, bindless, Slang
-    stats_window.{hpp,cpp} frame timing history and the window graphing it
+    stats_window.{hpp,cpp} frame timing history and the window graphing it; worker load dots
   world/
     transform.{hpp,cpp}  Transform and WorldTransform components, propagation
     bodies.{hpp,cpp}     Star and Body components; the starlight and environment at a point

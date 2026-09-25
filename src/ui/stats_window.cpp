@@ -3,6 +3,7 @@
 #include "ui/stats_window.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include <imgui.h>
 #include <implot.h>
@@ -146,6 +147,94 @@ namespace encke
         return n;
     }
 
+    void StatsWindow::draw_threads(span<Threads const> groups)
+    {
+        if (groups.empty())
+        {
+            return;
+        }
+
+        size_t total = 0;
+        for (Threads const& group : groups)
+        {
+            total += group.loads.size();
+        }
+
+        u64 const now = ThreadLoad::now_ns();
+
+        // A new set of threads starts from its busy time now, so the first
+        // frame does not read a whole lifetime as one sample.
+        if (loads_.size() != total)
+        {
+            loads_.clear();
+            for (Threads const& group : groups)
+            {
+                for (ThreadLoad const& load : group.loads)
+                {
+                    loads_.push_back(LoadSample{.busy_ns = load.busy_ns(now), .at_ns = now});
+                }
+            }
+        }
+
+        f32 const radius  = ImGui::GetTextLineHeight() * 0.35f;
+        f32 const spacing = radius * 2.8f;
+
+        ImGui::Separator();
+
+        // SameLine's offset is from the window's edge, not the text's.
+        f32 dots_x = 0.0f;
+        for (Threads const& group : groups)
+        {
+            dots_x = std::max(dots_x, ImGui::CalcTextSize(group.name).x);
+        }
+        dots_x += ImGui::GetCursorPosX() + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+
+        size_t at = 0;
+        for (Threads const& group : groups)
+        {
+            ImGui::TextUnformatted(group.name);
+            ImGui::SameLine(dots_x);
+
+            ImVec2 const origin = ImGui::GetCursorScreenPos();
+            f32 const    centre_y = origin.y + ImGui::GetTextLineHeight() * 0.5f;
+            ImDrawList*  draw     = ImGui::GetWindowDrawList();
+
+            for (size_t index = 0; index < group.loads.size(); ++index, ++at)
+            {
+                LoadSample& sample = loads_[at];
+                u64 const   busy   = group.loads[index].busy_ns(now);
+
+                if (now > sample.at_ns)
+                {
+                    f64 const elapsed = static_cast<f64>(now - sample.at_ns);
+                    f64 const worked  = busy > sample.busy_ns ? static_cast<f64>(busy - sample.busy_ns) : 0.0;
+                    f64 const fraction = std::clamp(worked / elapsed, 0.0, 1.0);
+
+                    f64 const blend = 1.0 - std::exp(-elapsed * 1e-9 / kLoadSeconds);
+                    sample.fraction += (fraction - sample.fraction) * blend;
+                }
+                sample.busy_ns = busy;
+                sample.at_ns   = now;
+
+                // Green through yellow to red.
+                auto const  hue    = static_cast<f32>((1.0 - sample.fraction) / 3.0);
+                ImVec2 const centre{origin.x + radius + static_cast<f32>(index) * spacing, centre_y};
+                draw->AddCircleFilled(centre, radius, ImColor::HSV(hue, 0.85f, 0.9f));
+
+                if (ImGui::IsMouseHoveringRect(ImVec2{centre.x - radius, centre.y - radius},
+                                               ImVec2{centre.x + radius, centre.y + radius}))
+                {
+                    ImGui::SetTooltip("%s%zu: %.0f%% busy", group.name, index, sample.fraction * 100.0);
+                }
+            }
+
+            f32 const width = static_cast<f32>(group.loads.size()) * spacing;
+            ImGui::Dummy(ImVec2{width, ImGui::GetTextLineHeight()});
+            ImGui::SameLine();
+            ImGui::Text("%zu queued", group.queued);
+        }
+    }
+
     void StatsWindow::draw(Info const& info)
     {
         ImGui::SetNextWindowPos(ImVec2{10.0f, 10.0f}, ImGuiCond_FirstUseEver);
@@ -166,6 +255,8 @@ namespace encke
             std::snprintf(label, sizeof(label), "limit to %.0f fps", info.limit_hz);
             ImGui::Checkbox(label, info.limit_frames);
         }
+
+        draw_threads(info.threads);
 
         size_t const n   = unwrap();
         int const    len = static_cast<int>(n);
