@@ -6,6 +6,7 @@
 // Every curve takes linear Rec.709 and returns linear Rec.709.
 
 import lib.bindless;
+import lib.cas;
 import lib.gpu_types;
 
 struct VertexOut
@@ -91,13 +92,27 @@ float3 pbr_neutral(float3 colour)
     return lerp(colour, float3(new_peak), g);
 }
 
+// One texel through exposure and the curve, the edge clamped.
+float3 display_at(int2 texel, float exposure, int2 size)
+{
+    int3   at      = int3(clamp(texel, int2(0), size - 1), 0);
+    float3 exposed = g_textures[NonUniformResourceIndex(push.hdr_sampled)].Load(at).rgb * exposure;
+    switch (push.tonemap)
+    {
+    case 1:  return agx(exposed);
+    case 2:  return pbr_neutral(exposed);
+    default: return aces(exposed);
+    }
+}
+
 [shader("fragment")]
 float4 fragment_main(VertexOut input) : SV_Target
 {
     // SV_Position.xy is the pixel centre in framebuffer coordinates, which
     // are top-left like the HDR target's -- no conversion.
-    int3   texel = int3(int2(input.position.xy), 0);
-    float3 hdr   = g_textures[NonUniformResourceIndex(push.hdr_sampled)].Load(texel).rgb;
+    int2     texel = int2(input.position.xy);
+    GpuFrame frame = load_frame();
+    int2     size  = int2(frame.screen.xy);
 
     // Auto-exposure leaves an adapted EV100 in a 1x1 image; otherwise the
     // CPU pushed the scene's fixed exposure.
@@ -108,13 +123,21 @@ float4 fragment_main(VertexOut input) : SV_Target
         exposure    = 1.0f / (1.2f * exp2(ev100));
     }
 
-    float3 exposed = hdr * exposure;
-    float3 display;
-    switch (push.tonemap)
+    float3 centre = display_at(texel, exposure, size);
+    if (frame.post.x <= 0.0f)
     {
-    case 1:  display = agx(exposed); break;
-    case 2:  display = pbr_neutral(exposed); break;
-    default: display = aces(exposed); break;
+        return float4(centre, 1.0f);
     }
-    return float4(display, 1.0f);
+
+    // CAS on display values, which it needs in [0, 1]: each neighbour runs
+    // the curve too, nine in all.
+    float3 a = display_at(texel + int2(-1, -1), exposure, size);
+    float3 b = display_at(texel + int2(0, -1), exposure, size);
+    float3 c = display_at(texel + int2(1, -1), exposure, size);
+    float3 d = display_at(texel + int2(-1, 0), exposure, size);
+    float3 f = display_at(texel + int2(1, 0), exposure, size);
+    float3 g = display_at(texel + int2(-1, 1), exposure, size);
+    float3 h = display_at(texel + int2(0, 1), exposure, size);
+    float3 i = display_at(texel + int2(1, 1), exposure, size);
+    return float4(cas(a, b, c, d, centre, f, g, h, i, frame.post.x), 1.0f);
 }

@@ -1218,6 +1218,7 @@ namespace encke
                                             : BindlessSet::kInvalid,
                                         lut_sampler_handle_},
             .sky_reprojection = f32mat4{sky_reprojection},
+            .post             = f32vec4{taa_ ? config::kCasSharpness : 0.0f, 0.0f, 0.0f, 0.0f},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 

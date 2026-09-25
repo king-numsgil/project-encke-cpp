@@ -33,6 +33,7 @@ public struct GpuFrame
     public uint4    taa_images;      // x history to read (sampled), y to write (storage),
                                      // z EV100 image (sampled) or ~0, w linear clamped sampler
     public float4x4 sky_reprojection; // view direction now -> last frame's clip, rotation only
+    public float4   post;            // x CAS sharpness in tonemap, 0 skips it
 };
 
 public static const uint kNoAtmosphere = 0xFFFFFFFFu;
@@ -146,7 +147,7 @@ public struct Push
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 384;
+public static const uint kFrameStride      = 400;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
 public static const uint kObjectStride     = 352;

@@ -139,7 +139,7 @@ shaders/
   atmosphere.slang       compute: atmosphere LUTs, ambient, sky-view LUT; sky and aerial perspective
   taa.slang              compute: temporal antialiasing resolve into the history
   exposure.slang         compute: luminance histogram, then metered and adapted EV100
-  tonemap.slang          HDR -> swapchain, at the adapted exposure
+  tonemap.slang          HDR -> swapchain, at the adapted exposure, CAS-sharpened with TAA on
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
   lib/
     bindless.slang       the descriptor arrays; mirrors vulkan/bindless.hpp
@@ -150,6 +150,7 @@ shaders/
     normal.slang         octahedral encode and decode
     morph.slang          terrain geomorph: target, distance, neighbour masks
     atmosphere.slang     the air: medium, phases, LUT parameterisations, the view-ray march
+    cas.slang            AMD's Contrast Adaptive Sharpening, ported; MIT notice kept
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
 tests/                 Catch2, mirroring src/: camera projection and view, transform propagation,
@@ -1401,10 +1402,18 @@ and Playdead's INSIDE talk (2016).
   across runs; edges on the hills, masts and lamp heads resolved; no ghosting
   on the spinning cube.
 
+- **CAS gives back what the history blend softens.** AMD's Contrast
+  Adaptive Sharpening, ported to Slang in `lib/cas.slang` (its MIT notice
+  kept there, as the licence requires), runs in the tonemap pass on display
+  values, which it needs in [0, 1]: each pixel takes its 3x3 neighbourhood
+  through exposure and the curve, nine evaluations, and sharpens by
+  `config::kCasSharpness` through `Frame::post`. Only with TAA on. Its
+  strength follows local contrast, so the edges against the sky do not ring;
+  on the ground texture TAA with CAS is back to about the crispness of no
+  TAA.
+
 Known gaps:
 
-- No sharpening. Textures are slightly softer than without it; AMD's CAS
-  folded into tonemap would restore them.
 - Motion vectors ignore the geomorph (see *Geomorph and seams*); the clip
   absorbs it.
 - No reactive mask: transparent or particle effects, when there are any,

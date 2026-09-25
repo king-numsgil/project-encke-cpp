@@ -116,6 +116,10 @@ namespace encke::config
     // so it is the same image whatever ran before.
     inline constexpr u32 kTaaJitterCount = 16;
 
+    // Contrast Adaptive Sharpening in tonemap, 0 to 1, to give back what the
+    // history blend softens. Only with TAA on.
+    inline constexpr f32 kCasSharpness = 0.5f;
+
     // -- auto-exposure ----------------------------------------------------------------
     // Off: the scene's fixed Scene::ev100 is used instead.
     inline constexpr bool kAutoExposure = true;

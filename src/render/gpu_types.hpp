@@ -56,6 +56,9 @@ namespace encke::gpu
         // the camera's rotation alone: reprojects the sky, where nothing was
         // drawn and there is no motion vector.
         f32mat4 sky_reprojection;
+
+        // x CAS sharpening in tonemap, 0 to 1; 0 skips it. yzw unused.
+        f32vec4 post;
     };
 
     inline constexpr u32 kNoAtmosphere = ~0u;
@@ -197,7 +200,7 @@ namespace encke::gpu
         u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 384);
+    static_assert(sizeof(Frame) == 400);
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
