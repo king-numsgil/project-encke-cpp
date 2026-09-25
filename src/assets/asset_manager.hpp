@@ -103,8 +103,8 @@ namespace encke
     // the first handle, and decodes nothing.
     //
     // Nothing here touches Vulkan: the renderer takes Ready data with
-    // take_ready_*() and keeps its own GPU state by handle. Nothing is ever
-    // freed yet.
+    // take_ready_*() and keeps its own GPU state by handle. Meshes can be
+    // released; textures, materials and models are never freed yet.
     class AssetManager
     {
     public:
@@ -132,8 +132,13 @@ namespace encke
         void start();
         void stop();
 
-        // A mesh built in code; Ready at once.
+        // A mesh built in code; Ready at once. Reuses released slots.
         MeshHandle add_mesh(string name, MeshData data);
+
+        // Frees a mesh: its handle stops resolving at once, and the renderer
+        // frees its GPU copy once no frame in flight can draw it. Whatever
+        // draws it must stop in the same frame. Stale handles are ignored.
+        void release_mesh(MeshHandle handle);
 
         // An ambientCG set from assets/textures, tiling every `tile` metres:
         // its colour, normal and packed ORM textures decode on the worker.
@@ -159,6 +164,10 @@ namespace encke
         // with its data moved out. What is taken is gone from here.
         vector<ReadyMesh>    take_ready_meshes();
         vector<ReadyTexture> take_ready_textures();
+
+        // The renderer's: meshes released since the last call whose data it
+        // had already taken, so it holds their GPU copies.
+        vector<MeshHandle> take_released_meshes();
 
         // Nothing loading, and nothing Ready that has not been taken.
         bool idle() const;
@@ -188,6 +197,8 @@ namespace encke
 
         vector<ReadyMesh>    ready_meshes_;
         vector<ReadyTexture> ready_textures_;
+        vector<MeshHandle>   released_meshes_;
+        vector<u32>          free_meshes_;
 
         // Last, so it stops before anything its jobs point into goes.
         AssetWorker worker_;

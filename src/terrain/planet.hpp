@@ -10,6 +10,7 @@ namespace encke
     class AssetManager;
     class Scene;
     class WorkerPool;
+    struct MeshData;
 }
 
 namespace encke::terrain
@@ -27,32 +28,44 @@ namespace encke::terrain
     // weight of at most one. Graphs are taken to stay within [-1, 1].
     f64 height_bound(BodyTerrain const& terrain);
 
-    // The surface around one point as surface_nets meshes it at `lod`, for
-    // standing things on the ground the builder will draw: the chunk holding
-    // the point and the next two toward the body's centre, meshed on the
-    // calling thread. Chunk samples are bit-exact, so these are the builder's
-    // very triangles. Body-relative, like everything in BodyTerrain.
+    // The most the detail octaves from `first` on can move the field: the
+    // largest amplitude times the largest weights those octaves can have.
+    f64 detail_bound_from(BodyTerrain const& terrain, u32 first);
+
+    // Whether the surface may cross the chunk at `origin`, `lod`, or any chunk
+    // inside it at a finer LOD: |SDF| at its centre within cull_factor
+    // half-diagonals, plus what the octaves this LOD leaves out could add.
+    // The field is not a true distance -- its gradient is 1 plus the
+    // terrain's slope -- so cull_factor is the Lipschitz bound the test
+    // trusts, and 1 is not safe.
+    bool chunk_may_have_surface(TerrainSampler& sampler, i64vec3 const& origin, u32 lod, f64 cull_factor);
+
+    // The field's own surface below a point, found by marching and bisecting
+    // the point query at one LOD: what a chunk at that LOD meshes there, to
+    // the voxel's few centimetres of Surface Nets error. For standing things
+    // on the ground. Body-relative, like everything in BodyTerrain. One per
+    // thread.
     class GroundProbe
     {
     public:
-        GroundProbe(BodyTerrain const& terrain, f64vec3 const& around, u32 lod);
+        GroundProbe(BodyTerrain const& terrain, u32 lod);
 
-        // The nearest point where the ray from `from` along `direction`
-        // (unit) meets the meshed triangles; nullopt if it misses them.
-        optional<f64vec3> hit(f64vec3 const& from, f64vec3 const& direction) const;
+        // The first crossing along the ray from `from` along `direction`
+        // (unit) within `reach` metres; nullopt if there is none. From
+        // inside, `from` itself.
+        optional<f64vec3> hit(f64vec3 const& from, f64vec3 const& direction, f64 reach = 100'000.0) const;
 
         // hit() toward the body's centre.
         optional<f64vec3> below(f64vec3 const& from) const;
 
     private:
-        vector<f64vec3> triangles_;   // three corners each
+        mutable TerrainSampler sampler_;
+        f64                    voxel_size_ = 0.0;
+        u32                    octaves_    = 0;
     };
 
-    // The chunks of the body's bounding cube at one LOD, split by a cull test
-    // at the chunk's centre: kept where |SDF| <= cull_factor * half-diagonal.
-    // The field is not a true distance -- its gradient is 1 plus the height's
-    // slope -- so a factor of 1 could cull a chunk the surface crosses;
-    // cull_factor is the Lipschitz bound the culling trusts.
+    // The chunks of the body's bounding cube at one LOD, split by
+    // chunk_may_have_surface.
     struct ChunkPlan
     {
         u32             lod = 0;
@@ -69,37 +82,90 @@ namespace encke::terrain
     // emit anything for it. Samples as sample_chunk lays them out.
     bool chunk_has_surface(span<f32 const> samples, u32 cells);
 
-    struct TerrainBuildSettings
+    // An octree node: a chunk at one LOD, named by its corner on the grid.
+    // Implicit: a node's children are the eight chunks of the next LOD down
+    // inside it, found by arithmetic, and nothing stores the tree.
+    struct NodeKey
     {
-        u32  lod         = 17;
-        f64  cull_factor = 1.5;
-        // Also samples every culled frontier chunk on the pool and logs any
-        // that has surface: the check that cull_factor is safe.
-        bool verify_culling = false;
+        u32     lod = 0;
+        i64vec3 origin{0};
+
+        bool operator==(NodeKey const&) const = default;
     };
 
-    // Meshes every PlanetTerrain body in a scene at one uniform LOD on the
-    // worker pool. Each chunk with surface becomes a mesh asset and a child
-    // entity of its body, placed at the chunk's corner; vertices are metres
-    // from there in f32. Main thread only; completions run in the pool's
-    // drain().
-    class TerrainBuilder
+    struct NodeKeyHash
+    {
+        size_t operator()(NodeKey const& key) const;
+    };
+
+    struct OctreeSettings
+    {
+        u32 finest_lod   = 0;
+        // A node splits while the camera is within this many of its edges of
+        // it, so a leaf's voxels cover about the same angle wherever it is.
+        f64 split_factor = 2.0;
+        f64 cull_factor  = 1.5;
+    };
+
+    // The coarsest LOD: the least whose chunk edge reaches from the centre
+    // past the bounding radius, so eight chunks cover the body.
+    u32 root_lod(BodyTerrain const& terrain);
+
+    // The leaves for a camera at `camera`, body-relative: the nodes the
+    // descent stops at, splitting from the eight roots while the camera is
+    // near and the finest LOD is not reached, and skipping every node
+    // `may_have_surface` rejects, with everything inside it. Disjoint, and
+    // between them they hold every chunk of surface.
+    vector<NodeKey> select_leaves(BodyTerrain const& terrain, f64vec3 const& camera, OctreeSettings const& settings,
+                                  function<bool(NodeKey const&)> const& may_have_surface);
+
+    // Every PlanetTerrain body in a scene as an implicit octree of chunks,
+    // chosen each frame from the camera: nodes appear as the camera nears
+    // and merge as it leaves. Chunks are meshed on the worker pool nearest
+    // the camera first, by a distance kept current while they wait; each
+    // with surface becomes a mesh asset and a child entity of
+    // its body at the chunk's corner, its vertices f32 metres from there.
+    //
+    // Swaps leave no holes: a node the camera has moved off stays drawn
+    // until everything that replaces it is ready, then goes in the same
+    // frame the replacements appear, and its mesh is released. No geomorph:
+    // neighbours at different LODs do not meet, and a swap pops.
+    //
+    // Main thread only; completions run in the pool's drain(), and update()
+    // goes after it and before Scene::update.
+    class TerrainOctree
     {
     public:
-        TerrainBuilder();
-        ~TerrainBuilder();
+        explicit TerrainOctree(OctreeSettings const& settings);
+        ~TerrainOctree();
 
-        TerrainBuilder(TerrainBuilder const&)            = delete;
-        TerrainBuilder& operator=(TerrainBuilder const&) = delete;
+        TerrainOctree(TerrainOctree const&)            = delete;
+        TerrainOctree& operator=(TerrainOctree const&) = delete;
 
-        void build(Scene& scene, AssetManager& assets, WorkerPool& pool, TerrainBuildSettings const& settings);
+        void update(Scene& scene, AssetManager& assets, WorkerPool& pool);
 
-        // Every queued chunk meshed and in the scene.
+        // Every body shows exactly the leaves the camera wants, all meshed.
         bool idle() const;
+
+        // What is on screen, over every body, and every mesh the octree holds,
+        // on screen or waiting: for tests.
+        vector<NodeKey>    displayed() const;
+        vector<MeshHandle> meshes() const;
 
     private:
         struct Body;
+        struct Node;
 
+        void submit(std::shared_ptr<Body> const& body, NodeKey const& key);
+        void complete(std::shared_ptr<Body> const& body, NodeKey const& key,
+                      std::shared_ptr<MeshData> const& data, bool skipped);
+
+        OctreeSettings                settings_;
         vector<std::shared_ptr<Body>> bodies_;
+        MaterialHandle                material_;
+
+        // Set by update(), for completions and resubmissions; main thread.
+        AssetManager* assets_ = nullptr;
+        WorkerPool*   pool_   = nullptr;
     };
 }

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -15,6 +17,13 @@ namespace encke
     //
     // Jobs are std::function, so everything they capture must be copyable,
     // as with AssetWorker; bulky results go through a shared_ptr.
+    //
+    // A free worker takes the most urgent queued job, not the oldest: the one
+    // whose priority is lowest when it looks, oldest first among equals. A
+    // priority is shared with the submitter, who may change it while the job
+    // waits -- a chunk's distance to a moving camera -- so the order is
+    // decided at the last moment. The queue is scanned whole each time, which
+    // is nothing next to a job's own work at the sizes it holds.
     class WorkerPool
     {
     public:
@@ -24,6 +33,9 @@ namespace encke
         // Given the index of the worker running it, from 0 to size() - 1, so
         // a job can reach per-worker state without locking.
         using Job = function<Completion(u32 worker)>;
+
+        // Lower is more urgent. Null counts as 0.
+        using Priority = std::shared_ptr<std::atomic<f64> const>;
 
         WorkerPool() = default;
         ~WorkerPool();
@@ -42,7 +54,7 @@ namespace encke
 
         u32 size() const { return static_cast<u32>(threads_.size()); }
 
-        void submit(Job job);
+        void submit(Job job, Priority priority = nullptr);
 
         // Runs every completion that has arrived, on the calling thread, in
         // the order the jobs finished. Returns how many.
@@ -52,11 +64,17 @@ namespace encke
         u32 outstanding() const;
 
     private:
+        struct Queued
+        {
+            Job      job;
+            Priority priority;
+        };
+
         void run(std::stop_token const& stop, u32 index, string const& name);
 
         mutable std::mutex          mutex_;
         std::condition_variable_any wake_;
-        std::deque<Job>             queued_;
+        std::deque<Queued>          queued_;
         vector<Completion>          finished_;
         u32                         outstanding_ = 0;
 

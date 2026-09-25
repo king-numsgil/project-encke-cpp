@@ -129,6 +129,9 @@ namespace encke::terrain
         // At p, with the voxel size and octave count a chunk there would use.
         PointSample sample_point(f64vec3 const& p, f64 voxel_size, u32 detail_octaves);
 
+        // sample_point's value alone, a seventh of the work.
+        f32 sample_value(f64vec3 const& p, f64 voxel_size, u32 detail_octaves);
+
         LayerTiming const& last_timing() const { return timing_; }
 
     private:

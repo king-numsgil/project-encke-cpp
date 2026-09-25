@@ -447,6 +447,7 @@ add_executable(encke_tests
     tests/render/camera_test.cpp
     tests/terrain/detail_noise_test.cpp
     tests/terrain/fastnoise_allocator_test.cpp
+    tests/terrain/octree_test.cpp
     tests/terrain/perlin_reference.cpp
     tests/terrain/planet_test.cpp
     tests/terrain/surface_nets_test.cpp

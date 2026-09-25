@@ -60,7 +60,8 @@ pass. The test scene is the north pole of an Earth-sized planet, strewn with
 boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
 cascades), shadowed spot lights on masts and a ring of point lamps, with the
 Moon overhead at its real distance. The Earth is procedural terrain, meshed
-with Surface Nets on a worker pool at one uniform LOD. The other built-in
+with Surface Nets on a worker pool in an implicit octree that follows the
+camera. The other built-in
 geometry is generated in code (cube, UV sphere); glTF models load through
 fastgltf, and the Khronos DamagedHelmet sits on the table. About half the
 objects carry CC0 PBR textures from ambientCG; the rest keep flat materials. A
@@ -125,7 +126,7 @@ src/
     macro_field.{hpp,cpp}  FastNoise2 graphs per channel on a body-fixed lattice, trilinear
     terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
     surface_nets.{hpp,cpp}  a chunk's samples -> vertices and quads, under the ownership rule
-    planet.{hpp,cpp}     PlanetTerrain component, chunk planning and culling, TerrainBuilder
+    planet.{hpp,cpp}     PlanetTerrain, culling, GroundProbe, TerrainOctree: the chunks the camera wants
     benchmark.{hpp,cpp}  `encke --headless`: octaves per LOD; samples/s per layer, apron, gradients, LOD 0 and 4
 shaders/
   shadow_depth.slang     depth only: one shadow map, cascade or spot
@@ -213,8 +214,8 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   reused after `release`, which frees the ranges only when the releasing
   frame's slot comes round again. Meshes upload through the staging arena
   like textures and draw from the frame they are staged in; until then
-  they are left out of the draw lists. `release` is not yet called by
-  anything, so its deferred free is untested.
+  they are left out of the draw lists. Terrain chunks are released as the
+  octree swaps them; see *The Earth as terrain* for the ordering it needs.
 - **Each raster pass is one indirect draw.** `upload()` writes one
   `VkDrawIndexedIndirectCommand` per object into a per-frame buffer (the
   G-buffer's first, then each shadow view's casters), and `record()` binds
@@ -548,9 +549,9 @@ lookup, before narrowing. The GPU never sees a world position here either.
 Known gaps:
 
 - No blending between cascades; the seam can show as a change in softness.
-- Caster culling is a bounding-sphere test against each map. Terrain chunks
-  are a thousand kilometres across at the default LOD, so the one under the
-  camera always passes and fills every map.
+- Caster culling is a bounding-sphere test against each map. Every terrain
+  chunk near the camera passes it, coarse ones included, since a leaf's
+  sphere reaches well past its surface.
 - When a spot loses its slot to a nearer one, its shadow switches off in one
   frame. Only the range limit fades.
 - Shadowed spots are limited to about 120 degrees of cone; one map cannot
@@ -624,9 +625,11 @@ the spinner alone.
 
 Known gaps:
 
-- Nothing destroys entities yet, so none of the teardown is exercised:
-  children of a destroyed parent become roots, and `previous_models_` keeps
-  destroyed entities' entries.
+- Terrain chunks are the only entities ever destroyed, and they have no
+  children, so a destroyed parent's children becoming roots is untested.
+  `previous_models_` is rebuilt each frame from the objects drawn, so a
+  destroyed entity's entry goes with it and a recycled id never meets a
+  stale one.
 - The render list is rebuilt and fully re-uploaded every frame, material
   data included. Camera-relative transforms change every frame anyway;
   static per-object data could move to persistent slots filled on
@@ -685,8 +688,9 @@ byte-identically to the step before.
 
 Known gaps:
 
-- No eviction or reference counting. Handles are generational so it can
-  come without auditing them.
+- Only meshes can be freed (`release_mesh`: the slot's generation moves on
+  and the slot is reused). Textures, materials and models have no eviction,
+  and nothing is reference counted.
 - `std::function` holds every job, since clang64's libc++ has no
   `std::move_only_function`, so everything a job captures must be copyable;
   bulky data is captured through a `shared_ptr`.
@@ -697,16 +701,15 @@ Known gaps:
 
 `Scene::build_test_planet`: the Earth is a terrain body
 (`terrain::example_planet`) whose entity is a radius below `kWorldOrigin`,
-at its centre, so `kWorldOrigin` is the pole of the sphere; see *First light*
-for the meshing. The object field does not stand there. The terrain's height
-and the LOD's facets put the ground under the pole somewhere else -- 1,169 m
-below the sphere at LOD 17 with seed 1337 -- so `origin()` is moved onto it:
-`terrain::surface_below` meshes the chunks down the ray from the pole on the
-main thread and intersects it, and since chunk samples are bit-exact that is
-the facet the builder draws. The facet is not level: at 33 km voxels it tilts
-a couple of degrees and creases along its quad's diagonal, which runs through
-the pole. So every object is also stood on the mesh under it
-(`Scene::grounded`, through a `terrain::GroundProbe` kept from the build):
+at its centre, so `kWorldOrigin` is the pole of the sphere; see *The Earth as
+terrain* for the meshing. The object field does not stand there. The
+terrain's height puts the ground under the pole somewhere else -- 778 m below
+the sphere with seed 1337 -- so `origin()` is moved onto it. The ground is
+found by `terrain::GroundProbe`, which marches and bisects the point query at
+the octree's finest LOD, the LOD drawn around the camera there; Surface Nets
+at 0.25 m voxels sits within centimetres of it. The ground is not level: the
+detail octaves make it hilly. So every object is also stood on the ground
+under it (`Scene::grounded`, through the probe, kept for it):
 alone, by the lowest ground under its footprint's corners, so no edge floats;
 in an assembly (colonnade, gateway, table and helmet, stacked crates), by the
 lowest ground under its supports, one offset for every part, so it stays in
@@ -807,13 +810,19 @@ non-uniformly scaled sphere would smear.
   so neither wraps nor pinches.
 - **Terrain**: a cube projection from the body's centre. Each vertex takes
   the face its position points through, and u and v are its other two
-  body-relative coordinates in metres, so they are continuous across chunks
-  and small, keeping f32 precision, near each face's centre: the pole among
-  them. Far from a face centre they reach thousands of kilometres, and are
-  only ever seen from far enough away that the smallest mips are read.
-  Triangles along the cube's edges, whose corners pick different faces, are
-  smeared, and show from orbit as faint lines. The tangent is +u laid into
-  the surface, with w chosen so the bitangent points to -v.
+  body-relative coordinates in metres, less a whole number of tiles taken
+  from its chunk's corner on that face, in f64. **The offset is load-bearing.**
+  Without it UVs reach thousands of kilometres, where f32 steps by a hundred
+  texels, and the GPU's per-pixel interpolation rounds differently as the
+  view turns: far from the pole the texture and its normal map swam, which
+  read as the ground popping while the geometry was still to 0.0001 cm. The
+  texture repeats, so the offset changes nothing; neighbours' offsets differ
+  by whole tiles, so it stays continuous across chunks; and a chunk's UVs are
+  no bigger than the chunk. The tile is the material's f32, so the offsets are
+  whole tiles to the shader too. Triangles along the cube's edges, whose
+  corners pick different faces, are smeared, and show from orbit as faint
+  lines. The tangent is +u laid into the surface, with w chosen so the
+  bitangent points to -v.
 
 A glTF material is **non-tiling**: its UVs are 0..1 over an atlas, and the
 renderer sends `texture_scale = (1, 1, 1, 1)`, which makes the stretch
@@ -867,7 +876,7 @@ Known gaps:
 
 `src/terrain` is the procedural field for smooth-voxel terrain (Surface Nets,
 with CDLOD geomorph to come), for planets at 1:1 and for asteroids. The
-Earth is meshed from it (*First light*, below); `encke --headless` benchmarks
+Earth is meshed from it (*The Earth as terrain*, below); `encke --headless` benchmarks
 it. The field is `|p| - radius - height(p)`, body-relative f64 metres, negative
 inside.
 
@@ -988,30 +997,59 @@ Known gaps:
 - Bit-exactness holds within one build. GCC and clang builds of FastNoise2
   are not known to agree with each other.
 
-### First light: the Earth as terrain
+### The Earth as terrain: an implicit octree
 
-`terrain::TerrainBuilder` meshes every entity carrying a `PlanetTerrain`
-(its `BodyTerrain`: radius, seed, graph set) at one uniform LOD,
-`config::kTerrainLod` or `ENCKE_TERRAIN_LOD`. There is no octree, geomorph or
-streaming yet: it runs once at startup.
+`terrain::TerrainOctree` meshes every entity carrying a `PlanetTerrain` (its
+`BodyTerrain`: radius, seed, graph set) as an implicit octree of chunks,
+chosen each frame from the camera. Nothing stores the tree: a node is a LOD
+and a grid corner (`NodeKey`), and its children are found by arithmetic.
 
-- **Planning** (`plan_chunks`) walks the body's bounding cube, radius plus
-  `height_bound`, in chunks, and culls a chunk when |SDF| at its centre is more
-  than `config::kTerrainCullFactor` half-diagonals. The field's gradient is 1
-  plus the terrain's slope, so the factor is the Lipschitz bound the cull
-  trusts, and 1 is not safe. `ENCKE_TERRAIN_VERIFY_CULL` samples every culled
-  chunk next to a kept one on the pool and logs any with surface. Those
-  suffice: the surface is closed and connected and passes through kept
-  chunks, so if it crossed a culled chunk it would cross one of them.
-  `planet_test` checks every culled chunk of a rough asteroid, and that a
-  factor of 0.3 does lose surface, which the frontier check alone finds.
-- **Meshing** runs on `WorkerPool`: `std::jthread`s, like `AssetWorker`, one per physical core less
-  one, at background priority. A job samples its chunk with its worker's own
-  `TerrainSampler`, runs `surface_nets` and converts to `Vertex`; its
-  completion, run by `WorkerPool::drain()` on the main thread before
-  `Scene::update`, adds the mesh asset and an entity parented to the body at
-  the chunk's corner. Vertices are f32 metres from that corner, so the
-  camera-relative extract handles them like any other mesh.
+- **Selection** (`select_leaves`) descends from eight roots at `root_lod`, the
+  least LOD whose chunk reaches past the bounding radius, and splits a node
+  while the camera is within `config::kTerrainSplitFactor` of its edges of
+  it, down to `config::kTerrainFinestLod`. A leaf's voxel therefore covers
+  about the same angle everywhere. Leaves are disjoint.
+- **Culling** (`chunk_may_have_surface`) skips a node, and all inside it, when
+  |SDF| at its centre is more than `config::kTerrainCullFactor` half-diagonals
+  plus `detail_bound_from` the octaves its LOD leaves out, the most those
+  could move the field; so a culled parent never hides surface its children
+  would have. The field's gradient is 1 plus the terrain's slope, so the
+  factor is the Lipschitz bound the cull trusts, and 1 is not safe.
+  `planet_test` checks every culled chunk of a rough asteroid at one LOD, and
+  that a factor of 0.3 does lose surface, which checking only the culled
+  chunks next to kept ones finds too: the surface is closed and connected, so
+  if it crossed a culled chunk it would cross one of those. Results are
+  cached per node for the session.
+- **Meshing** runs on `WorkerPool`: `std::jthread`s, like `AssetWorker`, one
+  per physical core less one, at background priority. A free worker takes the
+  queued job with the lowest priority, which the octree rewrites every frame
+  as the chunk's distance to the camera, so the nearest chunk now is meshed
+  next, however long ago it was queued; the ground under the camera comes
+  first and the horizon last. A node the camera leaves before its job starts
+  is skipped by a flag the job reads, its priority dropped below every
+  distance so the skip clears the queue at once. A job samples its chunk with
+  its worker's own `TerrainSampler`, runs `surface_nets` and converts to
+  `Vertex`; its completion, run by `WorkerPool::drain()` on the main thread,
+  adds the mesh asset. `TerrainOctree::update` runs after the drain and before
+  `Scene::update`.
+- **Swaps leave no holes.** A node on screen that the camera no longer wants
+  stays until what replaces it is ready -- its target ancestor when merging,
+  every leaf inside it when splitting -- and then goes in the same frame they
+  appear. Nodes on screen never overlap. A hidden node's entity is destroyed
+  and its mesh released (`AssetManager::release_mesh`). `octree_test` flies a
+  camera onto an asteroid and off again, checking every frame that nothing on
+  screen overlaps, that the settled set is exactly the leaves, and that
+  released meshes no longer resolve.
+- **Chunks are small near the camera,** so their f32 vertices, metres from
+  the chunk's corner, are small numbers there. That is what fixed the ground
+  popping by millimetres under a yawing camera: under the uniform LOD 17 the
+  triangle under the pole had vertices 78 km from their chunk's corner, where
+  f32 steps 7.8 mm.
+- **Mesh release** frees the pool ranges once no frame in flight can draw
+  them: the renderer takes released handles before this frame's additions
+  (a released slot may be reused in the same frame), and hands the pool ids
+  to `GeometryPool::release` after `stage()`, since released before it they
+  would be freed under the previous frame, which may still draw them.
 - **Surface Nets** (`terrain/surface_nets`) puts one vertex per crossed cell at
   the average of its edge crossings, with the normal from the corners'
   central-difference gradients interpolated trilinearly. Vertices in cell -1
@@ -1023,17 +1061,23 @@ streaming yet: it runs once at startup.
   every body; UVs are described under *Textures*. One material per object and
   no vertex colour means there is no variation by height or slope: that
   wants a vertex colour or a splat map.
-- **Captures** wait for `TerrainBuilder::idle()` as well as asset streaming.
-- The test scene's object field moves onto the mesh below the pole
-  (`surface_below`); see *The test planet*.
+- **Captures** wait for `TerrainOctree::idle()`, every body showing exactly
+  its leaves, as well as asset streaming. The camera must not move.
+- The test scene's object field stands on the ground below the pole; see
+  *The test planet*.
 
 Known gaps:
 
-- Relief is invisible at the default LOD: 2.5 km of height against 33 km
-  voxels.
-- The whole planet is one LOD and is meshed once. Lower LODs need the octree
-  and streaming before they fit in memory.
-- Chunk meshes are never freed; `GeometryPool::release` is still unused.
+- No geomorph and no seam stitching: neighbours at different LODs do not
+  meet, which shows as dotted cracks along LOD boundaries, and a swap pops.
+- Settling at the pole from a cold start meshes a few thousand chunks, most
+  of them at LOD 0 with ten detail octaves; it takes seconds on the pool.
+- The cull cache grows with where the camera has been; nothing prunes it.
+- `GeometryPool::release` and the renderer's side of mesh release run only
+  when the octree swaps, which no test drives: `octree_test` stops at the
+  asset manager.
+- The octree reads the camera's world transform from the previous
+  `Scene::update`, a frame behind.
 
 ## Camera control
 

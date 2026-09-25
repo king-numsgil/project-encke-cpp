@@ -25,14 +25,20 @@ namespace encke::config
     inline constexpr u32 kMaxLights  = 1024;
 
     // -- terrain -------------------------------------------------------------------
-    // One uniform LOD over each body's bounding cube until there is an octree:
-    // LOD n's voxels are 0.25 m * 2^n, so 17 is 32.8 km voxels and 1,049 km
-    // chunks. ENCKE_TERRAIN_LOD overrides it.
-    inline constexpr u32 kTerrainLod = 17;
+    // An implicit octree per body (terrain/planet). LOD n's voxels are
+    // 0.25 m * 2^n and its chunks 32 voxels on an edge; the finest LOD is the
+    // one under the camera.
+    inline constexpr u32 kTerrainFinestLod = 0;
+
+    // A node splits while the camera is within this many of its edges of it,
+    // so a leaf's voxel covers about the same angle wherever it is: about
+    // 1 / (32 * this) radians.
+    inline constexpr f64 kTerrainSplitFactor = 2.0;
 
     // A chunk is culled when |SDF| at its centre exceeds this many
-    // half-diagonals. The field's gradient is 1 plus the terrain's slope, so
-    // 1 is not safe; ENCKE_TERRAIN_VERIFY_CULL checks the chosen value.
+    // half-diagonals, plus what the octaves its LOD leaves out could add. The
+    // field's gradient is 1 plus the terrain's slope, so 1 is not safe;
+    // planet_test checks this value.
     inline constexpr f64 kTerrainCullFactor = 1.5;
 
     // -- material textures ---------------------------------------------------------
@@ -41,10 +47,10 @@ namespace encke::config
 
     // -- geometry pool ----------------------------------------------------------------
     // Every mesh shares one vertex buffer and one index buffer of these many
-    // elements: 96 MiB and 32 MiB of device memory. The test scene uses a
-    // fraction; the room is for streamed chunks.
-    inline constexpr u32 kGeometryVertexCapacity = 2u << 20;
-    inline constexpr u32 kGeometryIndexCapacity  = 8u << 20;
+    // elements: 288 MiB and 96 MiB of device memory. Nearly all of it is
+    // terrain chunks, with room for the old and new chunks of a swap.
+    inline constexpr u32 kGeometryVertexCapacity = 6u << 20;
+    inline constexpr u32 kGeometryIndexCapacity  = 24u << 20;
 
     // -- uploads ----------------------------------------------------------------------
     // Staging memory each frame may copy to the GPU, per frame in flight, so

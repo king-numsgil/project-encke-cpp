@@ -610,6 +610,23 @@ namespace encke
 
     void Renderer::take_assets(AssetManager& assets)
     {
+        // Releases before additions: a released slot may be reused by a mesh
+        // added in the same frame, which would overwrite what it points at.
+        // The pool ids are only handed back after this frame's stage(); see
+        // release_meshes().
+        for (MeshHandle const released : assets.take_released_meshes())
+        {
+            if (released.index < meshes_.size())
+            {
+                MeshSlot& slot = meshes_[released.index];
+                if (slot.taken && slot.generation == released.generation)
+                {
+                    released_pool_ids_.push_back(slot.pool);
+                    slot.taken = false;
+                }
+            }
+        }
+
         // Into the pool at once: add() only reserves and queues, and stage()
         // uploads within the budget from this frame on.
         for (AssetManager::ReadyMesh& ready : assets.take_ready_meshes())
@@ -1034,16 +1051,10 @@ namespace encke
             RenderObject const& object     = render_list_.objects[index];
             Renderable const&   renderable = object.renderable;
 
-            // Swapped for this frame's, which the next frame reads.
-            f64mat4 previous_model = object.model;
-            if (previous_models_.contains(object.entity))
-            {
-                std::swap(previous_model, previous_models_.get(object.entity));
-            }
-            else
-            {
-                previous_models_.emplace(object.entity, object.model);
-            }
+            // Last frame's, and this frame's kept for the next.
+            f64mat4 const previous_model =
+                previous_models_.contains(object.entity) ? previous_models_.get(object.entity) : object.model;
+            current_models_.emplace(object.entity, object.model);
 
             f64mat4 const model_view          = view * object.model;
             f64mat4 const previous_model_view = previous_view * previous_model;
@@ -1094,6 +1105,11 @@ namespace encke
                 draws[gbuffer_draws_++] = draw_command(*range, index);
             }
         }
+
+        // Only this frame's objects carry over, so a destroyed entity's entry
+        // goes with it, and a recycled entity id never meets a stale one.
+        std::swap(previous_models_, current_models_);
+        current_models_.clear();
 
         auto* const lights = static_cast<gpu::Light*>(resources.lights.mapped());
         for (u32 index = 0; index < light_count; ++index)
@@ -1769,6 +1785,18 @@ namespace encke
         staging_.begin(frame_);
         take_assets(assets);
         geometry_.stage(staging_, frame_);
+
+        // After stage(), which frees what this slot retired last time round:
+        // released now, a mesh is retired to this slot and freed when it next
+        // comes round, once this frame and every one before it has finished.
+        // Released before stage() it would be freed at once, under the
+        // previous frame, which may still be drawing it.
+        for (u32 const pool : released_pool_ids_)
+        {
+            geometry_.release(pool, frame_);
+        }
+        released_pool_ids_.clear();
+
         stream_textures(assets);
         upload(scene, assets, swapchain.extent(), frames_[frame_]);
 

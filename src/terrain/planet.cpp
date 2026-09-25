@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cmath>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace encke::terrain
 {
@@ -34,23 +36,75 @@ namespace encke::terrain
             return terrain.macro.channels[static_cast<size_t>(which)];
         }
 
+        f64 channel_bound(BodyTerrain const& terrain, MacroChannel which)
+        {
+            MacroChannelSpec const& spec = channel(terrain, which);
+            return std::abs(static_cast<f64>(spec.bias)) + std::abs(static_cast<f64>(spec.scale));
+        }
+
+        // A chunk's edge in grid points and in metres.
+        i64 extent_of(u32 lod)
+        {
+            return i64{32} << lod;
+        }
+
+        f64 extent_metres(BodyTerrain const& terrain, u32 lod)
+        {
+            return static_cast<f64>(extent_of(lod)) * terrain.base_voxel_size;
+        }
+
+        // How far `point` is from the chunk's box; 0 inside it.
+        f64 distance_to(BodyTerrain const& terrain, NodeKey const& key, f64vec3 const& point)
+        {
+            f64vec3 const low  = f64vec3{key.origin} * terrain.base_voxel_size;
+            f64vec3 const high = low + f64vec3{extent_metres(terrain, key.lod)};
+            f64vec3 const out  = glm::max(glm::max(low - point, point - high), f64vec3{0.0});
+            return glm::length(out);
+        }
+
+        NodeKey parent_of(NodeKey const& key)
+        {
+            i64 const parent_extent = extent_of(key.lod + 1);
+            return NodeKey{
+                .lod    = key.lod + 1,
+                .origin = i64vec3{floor_div(key.origin.x, parent_extent), floor_div(key.origin.y, parent_extent),
+                                  floor_div(key.origin.z, parent_extent)} *
+                          parent_extent,
+            };
+        }
+
         // The terrain's ambientCG set and the metres one repeat covers.
         constexpr char kGroundSet[] = "Ground110";
         constexpr f32  kGroundTile  = 2.1f;
 
         // Surface nets output as render vertices, UVs in metres for a tiling
-        // material. Each vertex is projected onto the face of the body's cube
-        // its position points through, from the body's centre: the two other
-        // body-relative coordinates are u and v. They are small near each
-        // face's centre, the pole among them, where f32 UVs keep their
-        // precision; far from it they are large, and seen from far enough
-        // away that only the smallest mips are read. Triangles whose corners
-        // pick different faces, along the cube's edges, are smeared.
-        void to_vertices(SurfaceMesh const& mesh, f64vec3 const& corner, MeshData& data)
+        // material that repeats every `tile` metres. Each vertex is projected
+        // onto the face of the body's cube its position points through, from
+        // the body's centre: the two other body-relative coordinates are u
+        // and v. Triangles whose corners pick different faces, along the
+        // cube's edges, are smeared.
+        //
+        // Those coordinates reach thousands of kilometres, where f32 steps
+        // by tens of centimetres, a hundred texels, and the GPU's per-pixel
+        // interpolation rounds differently as the view turns: the texture and
+        // its normal map swim. So each chunk subtracts, per face, a whole
+        // number of tiles taken from its corner, in f64. The texture repeats,
+        // so it is unchanged, and neighbouring chunks' offsets differ by whole
+        // tiles, so it stays continuous across them; and a chunk's UVs are no
+        // bigger than the chunk. Near the camera that is metres.
+        void to_vertices(SurfaceMesh const& mesh, f64vec3 const& corner, f64 tile, MeshData& data)
         {
             // Per face axis: the directions u and v run along.
             array<f64vec3, 3> const u_axes{{{0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}}};
             array<f64vec3, 3> const v_axes{{{0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {0.0, 1.0, 0.0}}};
+
+            array<f64vec2, 3> offsets{};
+            for (size_t face = 0; face < 3; ++face)
+            {
+                offsets[face] = f64vec2{std::floor(glm::dot(corner, u_axes[face]) / tile),
+                                        std::floor(glm::dot(corner, v_axes[face]) / tile)} *
+                                tile;
+            }
 
             data.vertices.resize(mesh.positions.size());
             for (size_t i = 0; i < mesh.positions.size(); ++i)
@@ -77,8 +131,8 @@ namespace encke::terrain
                     .position = mesh.positions[i],
                     .normal   = mesh.normals[i],
                     .tangent  = f32vec4{f32vec3{tangent}, static_cast<f32>(w)},
-                    .uv       = f32vec2{static_cast<f32>(glm::dot(point, u_axis)),
-                                        static_cast<f32>(glm::dot(point, v_axis))},
+                    .uv       = f32vec2{static_cast<f32>(glm::dot(point, u_axis) - offsets[face].x),
+                                        static_cast<f32>(glm::dot(point, v_axis) - offsets[face].y)},
                 };
             }
             data.indices = mesh.indices;
@@ -87,77 +141,85 @@ namespace encke::terrain
 
     f64 height_bound(BodyTerrain const& terrain)
     {
-        MacroChannelSpec const& height    = channel(terrain, MacroChannel::Height);
-        MacroChannelSpec const& amplitude = channel(terrain, MacroChannel::DetailAmplitude);
-        f64 const               macro     = std::abs(static_cast<f64>(height.bias)) + std::abs(static_cast<f64>(height.scale));
-        f64 const               detail    = (std::abs(static_cast<f64>(amplitude.bias)) + std::abs(static_cast<f64>(amplitude.scale))) *
-                                            static_cast<f64>(terrain.detail.octave_count);
-        return macro + detail;
+        return channel_bound(terrain, MacroChannel::Height) + detail_bound_from(terrain, 0);
     }
 
-    GroundProbe::GroundProbe(BodyTerrain const& terrain, f64vec3 const& around, u32 lod)
+    f64 detail_bound_from(BodyTerrain const& terrain, u32 first)
     {
-        TerrainSampler sampler{terrain};
-        i64 const      extent   = i64{32} << lod;
-        f64 const      extent_m = static_cast<f64>(extent) * terrain.base_voxel_size;
-        f64vec3 const  down     = -glm::normalize(around);
+        f64 const amplitude   = channel_bound(terrain, MacroChannel::DetailAmplitude);
+        f64 const persistence = std::min(channel_bound(terrain, MacroChannel::Persistence), 1.0);
 
-        SurfaceMesh mesh;
-        vector<f32> samples;
-        for (u32 step = 0; step < 3; ++step)
+        f64 weight = 1.0;
+        f64 sum    = 0.0;
+        for (u32 octave = 0; octave < terrain.detail.octave_count; ++octave)
         {
-            f64vec3 const probe = around + down * (static_cast<f64>(step) * extent_m);
-            i64vec3 const cell{glm::floor(probe / terrain.base_voxel_size)};
-            i64vec3 const origin{floor_div(cell.x, extent) * extent, floor_div(cell.y, extent) * extent,
-                                 floor_div(cell.z, extent) * extent};
-
-            ChunkRequest const request = sampler.chunk(origin, lod);
-            samples.resize(request.sample_count());
-            sampler.sample_chunk(request, samples);
-            surface_nets(samples, request.cells, terrain.voxel_size(lod), mesh);
-
-            f64vec3 const corner = f64vec3{origin} * terrain.base_voxel_size;
-            for (u32 const index : mesh.indices)
+            if (octave >= first)
             {
-                triangles_.push_back(corner + f64vec3{mesh.positions[index]});
+                sum += weight;
             }
+            weight *= persistence;
         }
+        return amplitude * sum;
     }
 
-    optional<f64vec3> GroundProbe::hit(f64vec3 const& from, f64vec3 const& direction) const
+    bool chunk_may_have_surface(TerrainSampler& sampler, i64vec3 const& origin, u32 lod, f64 cull_factor)
     {
-        // Moller-Trumbore in f64, nearest hit in front of `from`.
-        optional<f64> nearest;
-        for (size_t t = 0; t < triangles_.size(); t += 3)
+        BodyTerrain const& terrain = sampler.terrain();
+
+        i64 const     extent  = extent_of(lod);
+        f64vec3 const centre  = f64vec3{origin + i64vec3{extent / 2}} * terrain.base_voxel_size;
+        f64 const     voxel   = terrain.voxel_size(lod);
+        u32 const     octaves = octaves_for_voxel(sampler.octaves(), voxel);
+        f64 const     value   = static_cast<f64>(sampler.sample_value(centre, voxel, octaves));
+
+        f64 const half_diag = 0.5 * std::sqrt(3.0) * extent_metres(terrain, lod);
+        return std::abs(value) <= cull_factor * half_diag + detail_bound_from(terrain, octaves);
+    }
+
+    GroundProbe::GroundProbe(BodyTerrain const& terrain, u32 lod)
+        : sampler_(terrain)
+        , voxel_size_(terrain.voxel_size(lod))
+        , octaves_(octaves_for_voxel(sampler_.octaves(), terrain.voxel_size(lod)))
+    {
+    }
+
+    optional<f64vec3> GroundProbe::hit(f64vec3 const& from, f64vec3 const& direction, f64 reach) const
+    {
+        auto const value = [&](f64 t) {
+            return static_cast<f64>(sampler_.sample_value(from + direction * t, voxel_size_, octaves_));
+        };
+
+        f64 t = 0.0;
+        f64 v = value(t);
+        if (v <= 0.0)
         {
-            f64vec3 const& a = triangles_[t];
-            f64vec3 const  ab = triangles_[t + 1] - a;
-            f64vec3 const  ac = triangles_[t + 2] - a;
-            f64vec3 const  p  = glm::cross(direction, ac);
-            f64 const      det = glm::dot(ab, p);
-            if (std::abs(det) < 1e-12)
-            {
-                continue;
-            }
-            f64vec3 const s        = from - a;
-            f64 const     u        = glm::dot(s, p) / det;
-            f64vec3 const q        = glm::cross(s, ab);
-            f64 const     v        = glm::dot(direction, q) / det;
-            f64 const     distance = glm::dot(ac, q) / det;
-            if (u < 0.0 || v < 0.0 || u + v > 1.0 || distance < 0.0)
-            {
-                continue;
-            }
-            if (!nearest.has_value() || distance < *nearest)
-            {
-                nearest = distance;
-            }
+            return from;
         }
-        if (!nearest.has_value())
+
+        // Steps of half the value are safe while the field's gradient stays
+        // under 2, the cull factor's assumption too; a floor keeps the march
+        // from crawling as it closes in.
+        f64 const least = voxel_size_ * 0.05;
+        while (t < reach)
         {
-            return nullopt;
+            f64 const next = t + std::max(0.5 * v, least);
+            f64 const at   = value(next);
+            if (at <= 0.0)
+            {
+                // Bracketed: bisect to well under a millimetre.
+                f64 low  = t;
+                f64 high = next;
+                for (int step = 0; step < 40; ++step)
+                {
+                    f64 const middle = 0.5 * (low + high);
+                    (value(middle) > 0.0 ? low : high) = middle;
+                }
+                return from + direction * high;
+            }
+            t = next;
+            v = at;
         }
-        return from + direction * *nearest;
+        return nullopt;
     }
 
     optional<f64vec3> GroundProbe::below(f64vec3 const& from) const
@@ -169,15 +231,11 @@ namespace encke::terrain
     {
         BodyTerrain const& terrain = sampler.terrain();
 
-        i64 const extent     = i64{32} << lod;
+        i64 const extent     = extent_of(lod);
         f64 const bound      = terrain.radius + height_bound(terrain);
         i64 const half_cells = static_cast<i64>(std::ceil(bound / terrain.base_voxel_size));
         i64 const low        = floor_div(-half_cells, extent);
         i64 const high       = floor_div(half_cells, extent);
-
-        f64 const voxel     = terrain.voxel_size(lod);
-        u32 const octaves   = octaves_for_voxel(sampler.octaves(), voxel);
-        f64 const half_diag = 0.5 * std::sqrt(3.0) * static_cast<f64>(extent) * terrain.base_voxel_size;
 
         ChunkPlan plan{.lod = lod, .kept = {}, .culled = {}, .culled_frontier = {}};
         std::set<array<i64, 3>> kept;
@@ -188,10 +246,7 @@ namespace encke::terrain
                 for (i64 x = low; x <= high; ++x)
                 {
                     i64vec3 const origin = i64vec3{x, y, z} * extent;
-                    f64vec3 const centre = f64vec3{origin + i64vec3{extent / 2}} * terrain.base_voxel_size;
-                    f64 const     value  = static_cast<f64>(sampler.sample_point(centre, voxel, octaves).value);
-
-                    if (std::abs(value) <= cull_factor * half_diag)
+                    if (chunk_may_have_surface(sampler, origin, lod, cull_factor))
                     {
                         plan.kept.push_back(origin);
                         kept.insert(array<i64, 3>{{x, y, z}});
@@ -253,29 +308,114 @@ namespace encke::terrain
         return false;
     }
 
-    struct TerrainBuilder::Body
+    size_t NodeKeyHash::operator()(NodeKey const& key) const
+    {
+        // FNV-1a over the four fields.
+        u64 hash = 0xcbf29ce484222325ull;
+        for (u64 const part : {static_cast<u64>(key.lod), static_cast<u64>(key.origin.x),
+                               static_cast<u64>(key.origin.y), static_cast<u64>(key.origin.z)})
+        {
+            hash = (hash ^ part) * 0x100000001b3ull;
+        }
+        return static_cast<size_t>(hash);
+    }
+
+    u32 root_lod(BodyTerrain const& terrain)
+    {
+        f64 const bound = terrain.radius + height_bound(terrain);
+        u32       lod   = 0;
+        while (extent_metres(terrain, lod) < bound)
+        {
+            ++lod;
+        }
+        return lod;
+    }
+
+    vector<NodeKey> select_leaves(BodyTerrain const& terrain, f64vec3 const& camera, OctreeSettings const& settings,
+                                  function<bool(NodeKey const&)> const& may_have_surface)
+    {
+        vector<NodeKey> leaves;
+
+        function<void(NodeKey const&)> descend = [&](NodeKey const& key) {
+            if (!may_have_surface(key))
+            {
+                return;
+            }
+            f64 const extent = extent_metres(terrain, key.lod);
+            if (key.lod > settings.finest_lod && distance_to(terrain, key, camera) < settings.split_factor * extent)
+            {
+                i64 const half = extent_of(key.lod - 1);
+                for (i64 z = 0; z < 2; ++z)
+                {
+                    for (i64 y = 0; y < 2; ++y)
+                    {
+                        for (i64 x = 0; x < 2; ++x)
+                        {
+                            descend(NodeKey{.lod = key.lod - 1, .origin = key.origin + i64vec3{x, y, z} * half});
+                        }
+                    }
+                }
+                return;
+            }
+            leaves.push_back(key);
+        };
+
+        // Eight roots about the centre.
+        u32 const root   = root_lod(terrain);
+        i64 const extent = extent_of(root);
+        for (i64 z = -1; z < 1; ++z)
+        {
+            for (i64 y = -1; y < 1; ++y)
+            {
+                for (i64 x = -1; x < 1; ++x)
+                {
+                    descend(NodeKey{.lod = root, .origin = i64vec3{x, y, z} * extent});
+                }
+            }
+        }
+        return leaves;
+    }
+
+    struct TerrainOctree::Node
+    {
+        // Meshed; with no mesh when the chunk turned out to have no surface.
+        bool ready     = false;
+        // In the scene: its entity, if it has a mesh, exists.
+        bool displayed = false;
+
+        MeshHandle   mesh;
+        entt::entity entity   = entt::null;
+        u64          vertices = 0;
+
+        // Read by the node's job before it starts, so one the camera has
+        // moved off is skipped.
+        std::shared_ptr<std::atomic<bool>> wanted;
+
+        // The pool's order among queued jobs: metres from the camera,
+        // rewritten every frame, so the nearest chunk now is meshed next. An
+        // unwanted node's is below every distance, so its skip is quick and
+        // frees its slot in the queue.
+        std::shared_ptr<std::atomic<f64>> priority;
+    };
+
+    struct TerrainOctree::Body
     {
         entt::entity                       entity = entt::null;
         std::shared_ptr<BodyTerrain const> terrain;
-        u32                                lod          = 0;
+
+        // The main thread's, for cull tests.
+        std::unique_ptr<TerrainSampler> planner;
 
         // One per worker, made on first use by that worker alone.
         vector<std::unique_ptr<TerrainSampler>> samplers;
 
-        Clock::time_point start;
-        // Nanoseconds from start to the last job's end on its worker.
-        std::atomic<i64> last_finish{0};
+        // Main thread from here down.
+        std::unordered_map<NodeKey, bool, NodeKeyHash> may_have_surface;
+        std::unordered_map<NodeKey, Node, NodeKeyHash> nodes;
+        u32                                            in_flight = 0;
 
-        // Main thread.
-        u32 planned   = 0;
-        u32 culled    = 0;
-        u32 frontier  = 0;
-        u32 queued    = 0;
-        u32 finished  = 0;
-        u32 surfaced  = 0;
-        u32 violations = 0;
-        u64 vertices  = 0;
-        u64 triangles = 0;
+        bool              settled = false;
+        Clock::time_point busy_since;
 
         TerrainSampler& sampler(u32 worker)
         {
@@ -285,153 +425,359 @@ namespace encke::terrain
             }
             return *samplers[worker];
         }
-
-        void job_done()
-        {
-            i64 const now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
-            i64       seen = last_finish.load();
-            while (now > seen && !last_finish.compare_exchange_weak(seen, now))
-            {
-            }
-        }
-
-        void completed()
-        {
-            ++finished;
-            if (finished != queued)
-            {
-                return;
-            }
-            log::info("terrain: LOD %u, %u chunks in the cube, %u culled, %u meshed, %u with surface; "
-                      "%llu vertices, %llu triangles; %.1f ms on the pool",
-                      lod, planned, culled, planned - culled, surfaced,
-                      static_cast<unsigned long long>(vertices), static_cast<unsigned long long>(triangles),
-                      static_cast<f64>(last_finish.load()) / 1e6);
-            if (frontier > 0)
-            {
-                if (violations == 0)
-                {
-                    log::info("terrain: culling verified: none of %u culled frontier chunks has surface", frontier);
-                }
-                else
-                {
-                    log::error("terrain: %u of %u culled frontier chunks have surface; raise the cull factor",
-                               violations, frontier);
-                }
-            }
-        }
     };
 
-    TerrainBuilder::TerrainBuilder()  = default;
-    TerrainBuilder::~TerrainBuilder() = default;
-
-    void TerrainBuilder::build(Scene& scene, AssetManager& assets, WorkerPool& pool, TerrainBuildSettings const& settings)
+    TerrainOctree::TerrainOctree(OctreeSettings const& settings)
+        : settings_(settings)
     {
-        // One tiling set for every body until bodies name their own.
-        MaterialHandle const surface_material = assets.load_ambientcg(kGroundSet, f32vec2{kGroundTile});
+    }
 
-        for (auto const [entity, planet] : scene.registry.view<PlanetTerrain const>().each())
-        {
-            auto body          = std::make_shared<Body>();
-            body->entity       = entity;
-            body->terrain      = planet.terrain;
-            body->lod          = settings.lod;
-            body->samplers.resize(pool.size());
+    TerrainOctree::~TerrainOctree() = default;
 
-            TerrainSampler  planner{*planet.terrain};
-            ChunkPlan const plan = plan_chunks(planner, settings.lod, settings.cull_factor);
-            body->planned = static_cast<u32>(plan.kept.size() + plan.culled.size());
-            body->culled  = static_cast<u32>(plan.culled.size());
-            body->start   = Clock::now();
+    void TerrainOctree::submit(std::shared_ptr<Body> const& body, NodeKey const& key)
+    {
+        ++body->in_flight;
+        Node const&                              node   = body->nodes.at(key);
+        std::shared_ptr<std::atomic<bool>> const wanted = node.wanted;
 
-            Scene* const        scene_ptr  = &scene;
-            AssetManager* const assets_ptr = &assets;
-            f64 const           base_voxel = planet.terrain->base_voxel_size;
-
-            for (i64vec3 const& origin : plan.kept)
+        pool_->submit([this, body, key, wanted](u32 worker) -> WorkerPool::Completion {
+            if (!wanted->load())
             {
-                ++body->queued;
-                pool.submit([body, origin, scene_ptr, assets_ptr, surface_material, base_voxel](u32 worker) -> WorkerPool::Completion {
-                    TerrainSampler&    sampler = body->sampler(worker);
-                    ChunkRequest const request = sampler.chunk(origin, body->lod);
-
-                    vector<f32> samples(request.sample_count());
-                    sampler.sample_chunk(request, samples);
-
-                    SurfaceMesh mesh;
-                    surface_nets(samples, request.cells, sampler.terrain().voxel_size(body->lod), mesh);
-
-                    f64vec3 const corner = f64vec3{origin} * base_voxel;
-                    auto          data   = std::make_shared<MeshData>();
-                    to_vertices(mesh, corner, *data);
-                    body->job_done();
-
-                    return [body, origin, corner, data, scene_ptr, assets_ptr, surface_material] {
-                        if (!data->indices.empty())
-                        {
-                            ++body->surfaced;
-                            body->vertices  += data->vertices.size();
-                            body->triangles += data->indices.size() / 3;
-
-                            string const name = "terrain chunk " + std::to_string(origin.x) + " " +
-                                                std::to_string(origin.y) + " " + std::to_string(origin.z);
-                            MeshHandle const handle = assets_ptr->add_mesh(name, std::move(*data));
-
-                            entt::registry&    registry = scene_ptr->registry;
-                            entt::entity const chunk    = registry.create();
-                            registry.emplace<Transform>(chunk, Transform{.position = corner, .parent = body->entity});
-                            registry.emplace<Renderable>(chunk, Renderable{
-                                                                    .mesh      = handle,
-                                                                    .material  = surface_material,
-                                                                    .albedo    = f32vec3{1.0f},
-                                                                    .roughness = 1.0f,
-                                                                    .metallic  = 1.0f,
-                                                                });
-                        }
-                        body->completed();
-                    };
-                });
+                return [this, body, key] { complete(body, key, nullptr, true); };
             }
 
-            if (settings.verify_culling)
-            {
-                body->frontier = static_cast<u32>(plan.culled_frontier.size());
-                for (i64vec3 const& origin : plan.culled_frontier)
-                {
-                    ++body->queued;
-                    pool.submit([body, origin](u32 worker) -> WorkerPool::Completion {
-                        TerrainSampler&    sampler = body->sampler(worker);
-                        ChunkRequest const request = sampler.chunk(origin, body->lod);
-                        vector<f32>        samples(request.sample_count());
-                        sampler.sample_chunk(request, samples);
-                        bool const surface = chunk_has_surface(samples, request.cells);
-                        body->job_done();
+            TerrainSampler&    sampler = body->sampler(worker);
+            ChunkRequest const request = sampler.chunk(key.origin, key.lod);
 
-                        return [body, origin, surface] {
-                            if (surface)
-                            {
-                                ++body->violations;
-                                log::error("terrain: culled chunk %lld %lld %lld has surface",
-                                           static_cast<long long>(origin.x), static_cast<long long>(origin.y),
-                                           static_cast<long long>(origin.z));
-                            }
-                            body->completed();
-                        };
-                    });
+            vector<f32> samples(request.sample_count());
+            sampler.sample_chunk(request, samples);
+
+            SurfaceMesh mesh;
+            surface_nets(samples, request.cells, body->terrain->voxel_size(key.lod), mesh);
+
+            f64vec3 const corner = f64vec3{key.origin} * body->terrain->base_voxel_size;
+            auto          data   = std::make_shared<MeshData>();
+            // The tile exactly as the material has it, an f32, so the offsets
+            // are whole tiles to the shader too.
+            to_vertices(mesh, corner, static_cast<f64>(kGroundTile), *data);
+
+            return [this, body, key, data] { complete(body, key, data, false); };
+        }, node.priority);
+    }
+
+    void TerrainOctree::complete(std::shared_ptr<Body> const& body, NodeKey const& key,
+                                 std::shared_ptr<MeshData> const& data, bool skipped)
+    {
+        --body->in_flight;
+
+        auto const found = body->nodes.find(key);
+        if (found == body->nodes.end())
+        {
+            return;
+        }
+        Node&      node   = found->second;
+        bool const wanted = node.wanted->load();
+
+        if (skipped)
+        {
+            // Wanted again since it was skipped: back in the queue.
+            if (wanted)
+            {
+                submit(body, key);
+            }
+            else
+            {
+                body->nodes.erase(found);
+            }
+            return;
+        }
+        if (!wanted)
+        {
+            body->nodes.erase(found);
+            return;
+        }
+
+        if (!data->indices.empty())
+        {
+            node.vertices = data->vertices.size();
+            node.mesh     = assets_->add_mesh("terrain L" + std::to_string(key.lod) + " " + std::to_string(key.origin.x) +
+                                                  " " + std::to_string(key.origin.y) + " " + std::to_string(key.origin.z),
+                                              std::move(*data));
+        }
+        node.ready = true;
+    }
+
+    void TerrainOctree::update(Scene& scene, AssetManager& assets, WorkerPool& pool)
+    {
+        assets_ = &assets;
+        pool_   = &pool;
+        entt::registry& registry = scene.registry;
+
+        // One tiling set for every body until bodies name their own.
+        if (!material_)
+        {
+            material_ = assets.load_ambientcg(kGroundSet, f32vec2{kGroundTile});
+        }
+
+        for (auto const [entity, planet] : registry.view<PlanetTerrain const>().each())
+        {
+            if (std::ranges::none_of(bodies_, [entity](std::shared_ptr<Body> const& body) { return body->entity == entity; }))
+            {
+                auto body     = std::make_shared<Body>();
+                body->entity  = entity;
+                body->terrain = planet.terrain;
+                body->planner = std::make_unique<TerrainSampler>(*planet.terrain);
+                body->samplers.resize(pool.size());
+                body->busy_since = Clock::now();
+                bodies_.push_back(std::move(body));
+            }
+        }
+
+        WorldTransform const* const camera = registry.try_get<WorldTransform>(scene.camera);
+        if (camera == nullptr)
+        {
+            return;
+        }
+
+        for (std::shared_ptr<Body> const& body : bodies_)
+        {
+            WorldTransform const* const frame = registry.try_get<WorldTransform>(body->entity);
+            if (frame == nullptr)
+            {
+                continue;
+            }
+            BodyTerrain const& terrain = *body->terrain;
+            f64vec3 const      eye     = glm::inverse(frame->rotation) * (camera->position - frame->position);
+
+            vector<NodeKey> const leaves = select_leaves(terrain, eye, settings_, [&](NodeKey const& key) {
+                auto const [known, added] = body->may_have_surface.try_emplace(key, false);
+                if (added)
+                {
+                    known->second = chunk_may_have_surface(*body->planner, key.origin, key.lod, settings_.cull_factor);
+                }
+                return known->second;
+            });
+            std::unordered_set<NodeKey, NodeKeyHash> const target(leaves.begin(), leaves.end());
+
+            for (auto& [key, node] : body->nodes)
+            {
+                bool const wanted = target.contains(key);
+                node.wanted->store(wanted);
+                node.priority->store(wanted ? distance_to(terrain, key, eye) : -1.0, std::memory_order_relaxed);
+            }
+
+            // New leaves. The pool orders them, and everything already
+            // queued, by distance from the camera as it stands when a worker
+            // frees up.
+            for (NodeKey const& leaf : leaves)
+            {
+                if (body->nodes.contains(leaf))
+                {
+                    continue;
+                }
+                body->nodes.emplace(leaf, Node{
+                                              .ready     = false,
+                                              .displayed = false,
+                                              .mesh      = MeshHandle{},
+                                              .entity    = entt::null,
+                                              .vertices  = 0,
+                                              .wanted    = std::make_shared<std::atomic<bool>>(true),
+                                              .priority  = std::make_shared<std::atomic<f64>>(distance_to(terrain, leaf, eye)),
+                                          });
+                submit(body, leaf);
+                if (body->settled)
+                {
+                    body->settled    = false;
+                    body->busy_since = Clock::now();
                 }
             }
 
-            log::info("terrain: planned %zu chunks at LOD %u (%.0f m voxels), %zu culled at factor %.2f%s",
-                      plan.kept.size() + plan.culled.size(), settings.lod, planet.terrain->voxel_size(settings.lod),
-                      plan.culled.size(), settings.cull_factor,
-                      settings.verify_culling ? ", verifying the frontier" : "");
+            auto const displayed_ancestor = [&](NodeKey key) -> optional<NodeKey> {
+                u32 const root = root_lod(terrain);
+                while (key.lod < root)
+                {
+                    key = parent_of(key);
+                    auto const found = body->nodes.find(key);
+                    if (found != body->nodes.end() && found->second.displayed)
+                    {
+                        return key;
+                    }
+                }
+                return nullopt;
+            };
 
-            bodies_.push_back(std::move(body));
+            // For each node on screen, how many of the leaves inside it are
+            // still being meshed. Nodes on screen never overlap, so a leaf has
+            // at most one displayed ancestor.
+            std::unordered_map<NodeKey, u32, NodeKeyHash> pending_under;
+            for (NodeKey const& leaf : leaves)
+            {
+                if (!body->nodes.at(leaf).ready)
+                {
+                    if (optional<NodeKey> const above = displayed_ancestor(leaf))
+                    {
+                        ++pending_under[*above];
+                    }
+                }
+            }
+
+            // Off a node the camera no longer wants once what replaces it is
+            // ready: its target ancestor when merging, every leaf inside it
+            // when splitting.
+            auto const hide = [&](Node& node) {
+                if (node.entity != entt::null)
+                {
+                    registry.destroy(node.entity);
+                    node.entity = entt::null;
+                }
+                if (node.mesh)
+                {
+                    assets.release_mesh(node.mesh);
+                    node.mesh = MeshHandle{};
+                }
+                node.displayed = false;
+            };
+
+            vector<NodeKey> retire;
+            for (auto& [key, node] : body->nodes)
+            {
+                if (!node.displayed || target.contains(key))
+                {
+                    continue;
+                }
+                optional<NodeKey> target_above;
+                for (NodeKey above = key; above.lod < root_lod(terrain);)
+                {
+                    above = parent_of(above);
+                    if (target.contains(above))
+                    {
+                        target_above = above;
+                        break;
+                    }
+                }
+                bool const covered = target_above.has_value()
+                                         ? body->nodes.at(*target_above).ready
+                                         : !pending_under.contains(key);
+                if (covered)
+                {
+                    retire.push_back(key);
+                }
+            }
+            for (NodeKey const& key : retire)
+            {
+                hide(body->nodes.at(key));
+                body->nodes.erase(key);
+            }
+
+            // On with every ready leaf nothing coarser still covers.
+            for (NodeKey const& leaf : leaves)
+            {
+                Node& node = body->nodes.at(leaf);
+                if (!node.ready || node.displayed || displayed_ancestor(leaf).has_value())
+                {
+                    continue;
+                }
+                if (node.mesh)
+                {
+                    node.entity = registry.create();
+                    registry.emplace<Transform>(node.entity, Transform{
+                                                                 .position = f64vec3{leaf.origin} * terrain.base_voxel_size,
+                                                                 .parent   = body->entity,
+                                                             });
+                    registry.emplace<Renderable>(node.entity, Renderable{
+                                                                  .mesh      = node.mesh,
+                                                                  .material  = material_,
+                                                                  .albedo    = f32vec3{1.0f},
+                                                                  .roughness = 1.0f,
+                                                                  .metallic  = 1.0f,
+                                                              });
+                }
+                node.displayed = true;
+            }
+
+            // Meshed but never shown, and no longer wanted.
+            std::erase_if(body->nodes, [&](auto& entry) {
+                auto& [key, node] = entry;
+                if (target.contains(key) || !node.ready || node.displayed)
+                {
+                    return false;
+                }
+                hide(node);
+                return true;
+            });
+
+            // Settled: exactly the leaves on screen, nothing in flight.
+            bool const settled =
+                body->in_flight == 0 &&
+                std::ranges::all_of(leaves, [&](NodeKey const& leaf) { return body->nodes.at(leaf).displayed; }) &&
+                std::ranges::all_of(body->nodes, [&](auto const& entry) { return target.contains(entry.first); });
+
+            if (settled && !body->settled)
+            {
+                array<u32, 32> per_lod{};
+                u64            vertices = 0;
+                u32            drawn    = 0;
+                for (auto const& [key, node] : body->nodes)
+                {
+                    if (node.mesh)
+                    {
+                        ++per_lod[std::min<size_t>(key.lod, per_lod.size() - 1)];
+                        vertices += node.vertices;
+                        ++drawn;
+                    }
+                }
+                string lods;
+                for (size_t lod = 0; lod < per_lod.size(); ++lod)
+                {
+                    if (per_lod[lod] > 0)
+                    {
+                        lods += " L" + std::to_string(lod) + ":" + std::to_string(per_lod[lod]);
+                    }
+                }
+                log::info("terrain: settled, %zu leaves, %u with surface drawn (%s ), %llu vertices, %.1f ms since the "
+                          "last change",
+                          leaves.size(), drawn, lods.c_str(), static_cast<unsigned long long>(vertices),
+                          std::chrono::duration<f64, std::milli>(Clock::now() - body->busy_since).count());
+            }
+            body->settled = settled;
         }
     }
 
-    bool TerrainBuilder::idle() const
+    vector<NodeKey> TerrainOctree::displayed() const
     {
-        return std::ranges::all_of(bodies_, [](std::shared_ptr<Body> const& body) { return body->finished == body->queued; });
+        vector<NodeKey> keys;
+        for (std::shared_ptr<Body> const& body : bodies_)
+        {
+            for (auto const& [key, node] : body->nodes)
+            {
+                if (node.displayed)
+                {
+                    keys.push_back(key);
+                }
+            }
+        }
+        return keys;
+    }
+
+    vector<MeshHandle> TerrainOctree::meshes() const
+    {
+        vector<MeshHandle> handles;
+        for (std::shared_ptr<Body> const& body : bodies_)
+        {
+            for (auto const& [key, node] : body->nodes)
+            {
+                if (node.mesh)
+                {
+                    handles.push_back(node.mesh);
+                }
+            }
+        }
+        return handles;
+    }
+
+    bool TerrainOctree::idle() const
+    {
+        return !bodies_.empty() &&
+               std::ranges::all_of(bodies_, [](std::shared_ptr<Body> const& body) { return body->settled; });
     }
 }

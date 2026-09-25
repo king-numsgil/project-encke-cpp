@@ -66,8 +66,8 @@ namespace encke
         //
         // Asks `assets` for the meshes and materials it uses; they stream in
         // while it draws. The Earth is a terrain::PlanetTerrain body for
-        // terrain::TerrainBuilder to mesh, at `terrain_lod`, which also sets
-        // where its height is zeroed at the pole.
+        // terrain::TerrainOctree to mesh. The objects are stood on its ground
+        // as `terrain_lod`, the finest the octree meshes, has it.
         void build_test_planet(AssetManager& assets, u32 terrain_lod);
 
         // A root entity for `spawn.model`, at `position` (world) with
@@ -140,9 +140,8 @@ namespace encke
 
         f64vec3 origin_{0.0};
 
-        // The Earth's meshed surface around the pole, and the point on it
-        // below the pole, in the Earth's frame: what grounded() stands things
-        // on.
+        // The Earth's ground at the finest LOD, and the point on it below the
+        // pole, in the Earth's frame: what grounded() stands things on.
         std::shared_ptr<terrain::GroundProbe const> ground_;
         f64vec3                                     ground_pole_{0.0};
         optional<f64>                               assembly_lift_;

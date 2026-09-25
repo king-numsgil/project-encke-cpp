@@ -313,9 +313,11 @@ namespace encke
 
         // Last drawn frame's world transforms, for motion vectors: each
         // object's by entity, and the camera's view and projection. A new
-        // entity has none and moves nowhere on its first frame. Entries for
-        // destroyed entities are never removed yet; nothing destroys any.
+        // entity has none and moves nowhere on its first frame. Rebuilt each
+        // frame from the objects drawn (current_models_ is the one being
+        // filled), so destroyed entities drop out: terrain chunks come and go.
         entt::storage<f64mat4> previous_models_;
+        entt::storage<f64mat4> current_models_;
         optional<f64mat4>      previous_view_;
         f64mat4                previous_projection_{1.0};
 
@@ -386,6 +388,7 @@ namespace encke
 
         GeometryPool                        geometry_;
         vector<MeshSlot>                    meshes_;
+        vector<u32>                         released_pool_ids_;   // handed back after stage()
         vector<std::unique_ptr<GpuTexture>> textures_;
         VkSampler                            material_sampler_        = VK_NULL_HANDLE;
         u32                                  material_sampler_handle_ = BindlessSet::kInvalid;

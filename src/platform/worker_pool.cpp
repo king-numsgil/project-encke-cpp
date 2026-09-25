@@ -47,11 +47,11 @@ namespace encke
         outstanding_ = 0;
     }
 
-    void WorkerPool::submit(Job job)
+    void WorkerPool::submit(Job job, Priority priority)
     {
         {
             std::lock_guard const lock{mutex_};
-            queued_.push_back(std::move(job));
+            queued_.push_back(Queued{.job = std::move(job), .priority = std::move(priority)});
             ++outstanding_;
         }
         wake_.notify_one();
@@ -98,8 +98,23 @@ namespace encke
                 {
                     return;
                 }
-                job = std::move(queued_.front());
-                queued_.pop_front();
+
+                // The most urgent now, oldest first among equals.
+                auto const urgency = [](Queued const& queued) {
+                    return queued.priority ? queued.priority->load(std::memory_order_relaxed) : 0.0;
+                };
+                auto chosen = queued_.begin();
+                f64  best   = urgency(*chosen);
+                for (auto it = std::next(queued_.begin()); it != queued_.end(); ++it)
+                {
+                    if (f64 const at = urgency(*it); at < best)
+                    {
+                        best   = at;
+                        chosen = it;
+                    }
+                }
+                job = std::move(chosen->job);
+                queued_.erase(chosen);
             }
 
             // A job that throws still counts as done, with nothing to finish:

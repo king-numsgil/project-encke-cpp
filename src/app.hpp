@@ -5,6 +5,7 @@
 #include "assets/asset_manager.hpp"
 #include "platform/window.hpp"
 #include "platform/worker_pool.hpp"
+#include "render/config.hpp"
 #include "render/fly_camera.hpp"
 #include "render/renderer.hpp"
 #include "render/scene.hpp"
@@ -82,7 +83,11 @@ namespace encke
         FlyCamera fly_;
         bool      looking_ = false;
 
-        terrain::TerrainBuilder terrain_;
+        terrain::TerrainOctree terrain_{terrain::OctreeSettings{
+            .finest_lod   = config::kTerrainFinestLod,
+            .split_factor = config::kTerrainSplitFactor,
+            .cull_factor  = config::kTerrainCullFactor,
+        }};
 
         // Last, so its threads stop before anything above goes: completions
         // reach the scene and the assets, and jobs the builder's state.

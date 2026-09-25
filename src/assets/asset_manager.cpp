@@ -55,10 +55,54 @@ namespace encke
             }
         }
 
-        MeshHandle const handle{.index = static_cast<u32>(meshes_.size()), .generation = 0};
-        meshes_.push_back(std::move(asset));
+        // A released slot first, one generation on, so old handles to it stop
+        // resolving.
+        MeshHandle handle;
+        if (!free_meshes_.empty())
+        {
+            u32 const index = free_meshes_.back();
+            free_meshes_.pop_back();
+            asset.generation = meshes_[index].generation + 1;
+            handle           = MeshHandle{.index = index, .generation = asset.generation};
+            meshes_[index]   = std::move(asset);
+        }
+        else
+        {
+            handle = MeshHandle{.index = static_cast<u32>(meshes_.size()), .generation = 0};
+            meshes_.push_back(std::move(asset));
+        }
         ready_meshes_.push_back(ReadyMesh{.handle = handle, .data = std::move(data)});
         return handle;
+    }
+
+    void AssetManager::release_mesh(MeshHandle handle)
+    {
+        if (resolve(meshes_, handle) == nullptr)
+        {
+            return;
+        }
+
+        // Not taken yet: nothing on the GPU to free, only the queued data.
+        auto const queued = std::ranges::find(ready_meshes_, handle, &ReadyMesh::handle);
+        if (queued != ready_meshes_.end())
+        {
+            ready_meshes_.erase(queued);
+        }
+        else
+        {
+            released_meshes_.push_back(handle);
+        }
+
+        // The slot keeps its generation until reused; bumping it here as
+        // well makes the released handle stop resolving at once.
+        MeshAsset& asset = meshes_[handle.index];
+        asset            = MeshAsset{.name = {}, .generation = asset.generation + 1, .state = AssetState::Failed};
+        free_meshes_.push_back(handle.index);
+    }
+
+    vector<MeshHandle> AssetManager::take_released_meshes()
+    {
+        return std::exchange(released_meshes_, {});
     }
 
     MaterialHandle AssetManager::add_material(MaterialAsset material)

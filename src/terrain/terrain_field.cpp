@@ -206,6 +206,18 @@ namespace encke::terrain
         };
     }
 
+    f32 TerrainSampler::sample_value(f64vec3 const& p, f64 voxel_size, u32 detail_octaves)
+    {
+        array<f32, 1> const zero{{0.0f}};
+        array<f32, 1>       value{};
+
+        auto const fill_octave = [&](u32 octave) {
+            detail_.octave(octave, p, zero, zero, zero, octave_values_);
+        };
+        timing_ = combine(p, voxel_size, zero, zero, zero, detail_octaves, fill_octave, 0, {}, value);
+        return value[0];
+    }
+
     LayerTiming TerrainSampler::evaluate_box(GridBox const& box, u32 detail_octaves,
                                              u32 snapshot_octaves, span<f32> snapshot,
                                              span<f32> out)

@@ -116,7 +116,7 @@ namespace encke
             return 0.0;
         }
 
-        // Straight down the scene's -Y from well above, onto the mesh.
+        // Straight down the scene's -Y from well above, onto the ground.
         f64vec3 const           from = ground_pole_ + f64vec3{x, 1'000.0, z};
         optional<f64vec3> const hit  = ground_->hit(from, f64vec3{0.0, -1.0, 0.0});
         return hit.has_value() ? hit->y - ground_pole_.y : 0.0;
@@ -242,22 +242,21 @@ namespace encke
         ev100 = 14.0f;
 
         // Local frame at the pole: +Y is up, the ground is y = 0. The Earth
-        // is terrain, meshed by terrain::TerrainBuilder about its entity's
+        // is terrain, meshed by terrain::TerrainOctree about its entity's
         // origin, so the entity sits at the centre, a radius below the pole
         // of the sphere. The terrain's surface there is wherever its height
-        // and the LOD's facets put it, so the object field moves to stand on
-        // the mesh directly below the pole. Ground albedo is a guess at the
-        // terrain's average colour.
+        // puts it, so the object field moves to stand on the ground directly
+        // below the pole, as the finest LOD meshes it. Ground albedo is a
+        // guess at the terrain's average colour.
         {
             auto terrain = std::make_shared<terrain::BodyTerrain>(terrain::example_planet(kTerrainSeed));
 
-            // Everything placed from here on is also stood on the mesh under
-            // its own x and z (grounded), since the facet under the field is
-            // neither level nor flat: it tilts, and creases along the
-            // diagonal of its quad.
+            // Everything placed from here on is also stood on the ground under
+            // its own x and z (grounded), since the ground is not level.
             f64vec3 const pole{0.0, kEarthRadius, 0.0};
-            auto          probe = std::make_shared<terrain::GroundProbe const>(*terrain, pole, terrain_lod);
-            if (optional<f64vec3> const ground = probe->below(pole))
+            f64vec3 const above{0.0, kEarthRadius + terrain::height_bound(*terrain) + 100.0, 0.0};
+            auto          probe = std::make_shared<terrain::GroundProbe const>(*terrain, terrain_lod);
+            if (optional<f64vec3> const ground = probe->below(above))
             {
                 origin_      = kWorldOrigin + (*ground - pole);
                 ground_      = std::move(probe);
