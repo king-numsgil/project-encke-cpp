@@ -295,6 +295,13 @@ namespace encke
                 resources.shadow_views.handle(), resources.shadow_views.size());
             resources.shadow_matrices_handle = bindless_.add_storage_buffer(
                 resources.shadow_matrices.handle(), resources.shadow_matrices.size());
+
+            if (!resources.atmosphere.init_mapped(allocator, sizeof(gpu::Atmosphere), storage))
+            {
+                return false;
+            }
+            resources.atmosphere_handle =
+                bindless_.add_storage_buffer(resources.atmosphere.handle(), resources.atmosphere.size());
         }
 
         if (!create_shadow_maps())
@@ -327,8 +334,10 @@ namespace encke
         {
             return false;
         }
+        morph_handle_ =
+            bindless_.add_storage_buffer(geometry_.morph_buffer().handle(), geometry_.morph_buffer().size());
 
-        if (!create_material_resources())
+        if (!create_material_resources() || !create_atmosphere_resources())
         {
             return false;
         }
@@ -408,6 +417,24 @@ namespace encke
             .set_layout         = bindless_.layout(),
             .push_constant_size = sizeof(gpu::Push),
         };
+
+        auto const atmosphere_config = [&](char const* entry) {
+            return ComputePipeline::Config{
+                .spirv_name         = "atmosphere.spv",
+                .entry              = entry,
+                .set_layout         = bindless_.layout(),
+                .push_constant_size = sizeof(gpu::Push),
+            };
+        };
+
+        if (!transmittance_pipeline_.init(device, atmosphere_config("transmittance_main")) ||
+            !multiscatter_pipeline_.init(device, atmosphere_config("multiscatter_main")) ||
+            !sky_ambient_pipeline_.init(device, atmosphere_config("ambient_main")) ||
+            !sky_view_pipeline_.init(device, atmosphere_config("sky_view_main")) ||
+            !atmosphere_pipeline_.init(device, atmosphere_config("apply_main")))
+        {
+            return false;
+        }
 
         if (!gbuffer_pipeline_.init(device, gbuffer_config) ||
             !shadow_pipeline_.init(device, shadow_config) ||
@@ -608,6 +635,68 @@ namespace encke
         return staging_.init(*allocator_, config::kStagingBytesPerFrame, kFramesInFlight);
     }
 
+    bool Renderer::create_atmosphere_resources()
+    {
+        // Linear and clamped: LUT coordinates run 0 to 1 and must not wrap.
+        VkSamplerCreateInfo const info{
+            .sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .pNext                   = nullptr,
+            .flags                   = 0,
+            .magFilter               = VK_FILTER_LINEAR,
+            .minFilter               = VK_FILTER_LINEAR,
+            .mipmapMode              = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU            = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV            = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW            = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .mipLodBias              = 0.0f,
+            .anisotropyEnable        = VK_FALSE,
+            .maxAnisotropy           = 1.0f,
+            .compareEnable           = VK_FALSE,
+            .compareOp               = VK_COMPARE_OP_ALWAYS,
+            .minLod                  = 0.0f,
+            .maxLod                  = 0.0f,
+            .borderColor             = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            .unnormalizedCoordinates = VK_FALSE,
+        };
+
+        VkResult const result = vkCreateSampler(device_->handle(), &info, memory::vulkan_callbacks(), &lut_sampler_);
+        if (result != VK_SUCCESS)
+        {
+            log::vk_error("vkCreateSampler (atmosphere LUTs)", result);
+            return false;
+        }
+        lut_sampler_handle_ = bindless_.add_sampler(lut_sampler_);
+
+        VkImageUsageFlags const usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (!transmittance_lut_.init(*allocator_, *device_,
+                                     {VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT,
+                                      "transmittance LUT"},
+                                     VkExtent2D{config::kTransmittanceLutWidth, config::kTransmittanceLutHeight}) ||
+            !multiscatter_lut_.init(*allocator_, *device_,
+                                    {VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT,
+                                     "multiple scattering LUT"},
+                                    VkExtent2D{config::kMultiscatterLutSize, config::kMultiscatterLutSize}) ||
+            !sky_view_lut_.init(*allocator_, *device_,
+                                {VK_FORMAT_R16G16B16A16_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT, "sky-view LUT"},
+                                VkExtent2D{config::kSkyViewLutWidth, config::kSkyViewLutHeight}) ||
+            !atmosphere_ambient_.init_device(*allocator_, *device_, 2 * sizeof(f32vec4),
+                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT))
+        {
+            return false;
+        }
+
+        VkImageLayout const read_only = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+        transmittance_storage_handle_ = bindless_.add_storage_image(transmittance_lut_.view());
+        transmittance_sampled_handle_ = bindless_.add_sampled_image(transmittance_lut_.view(), read_only);
+        multiscatter_storage_handle_  = bindless_.add_storage_image(multiscatter_lut_.view());
+        multiscatter_sampled_handle_  = bindless_.add_sampled_image(multiscatter_lut_.view(), read_only);
+        sky_view_storage_handle_      = bindless_.add_storage_image(sky_view_lut_.view());
+        sky_view_sampled_handle_      = bindless_.add_sampled_image(sky_view_lut_.view(), read_only);
+        atmosphere_ambient_handle_ =
+            bindless_.add_writable_buffer(atmosphere_ambient_.handle(), atmosphere_ambient_.size());
+        return true;
+    }
+
     void Renderer::take_assets(AssetManager& assets)
     {
         // Releases before additions: a released slot may be reused by a mesh
@@ -631,7 +720,7 @@ namespace encke
         // uploads within the budget from this frame on.
         for (AssetManager::ReadyMesh& ready : assets.take_ready_meshes())
         {
-            optional<u32> const pool = geometry_.add(ready.data.vertices, ready.data.indices);
+            optional<u32> const pool = geometry_.add(ready.data.vertices, ready.data.indices, ready.data.morphs);
             if (!pool.has_value())
             {
                 continue;   // logged; the mesh never draws
@@ -965,6 +1054,54 @@ namespace encke
 
         f32 const shadow_far = config::kShadowDistance;
 
+        // The atmosphere the camera sees, in kilometres, its centre through
+        // the view in f64 and the camera's altitude over it differenced in
+        // f64, where f32 would lose metres.
+        u32vec4 atmosphere_handles{gpu::kNoAtmosphere, transmittance_sampled_handle_,
+                                   multiscatter_sampled_handle_, lut_sampler_handle_};
+        atmosphere_drawn_ = render_list_.atmosphere.has_value();
+        sky_view_drawn_   = false;
+        if (atmosphere_drawn_)
+        {
+            AtmosphereView const& air  = *render_list_.atmosphere;
+            Atmosphere const&     gas  = air.atmosphere;
+            constexpr f64         kKm  = 1e-3;
+            constexpr f32         kPer = 1e3f;   // per metre -> per kilometre
+
+            f64vec3 const centre   = f64vec3{view * f64vec4{air.centre, 1.0}} * kKm;
+            f64 const     altitude = (glm::length(camera.position - air.centre) - air.radius) * kKm;
+            f64 const     sun_cos  = std::cos(config::kSunAngularRadius);
+
+            gpu::Atmosphere const gpu_air{
+                .planet         = f32vec4{f32vec3{centre}, static_cast<f32>(air.radius * kKm)},
+                .shell          = f32vec4{static_cast<f32>((air.radius + gas.height) * kKm),
+                                          static_cast<f32>(altitude), static_cast<f32>(sun_cos),
+                                          static_cast<f32>(2.0 * kPi * (1.0 - sun_cos))},
+                .rayleigh       = f32vec4{gas.rayleigh_scattering * kPer, gas.rayleigh_scale_height / kPer},
+                .mie            = f32vec4{gas.mie_scattering * kPer, gas.mie_scale_height / kPer},
+                .mie_absorption = f32vec4{gas.mie_absorption * kPer, gas.mie_g},
+                .ozone          = f32vec4{gas.ozone_absorption * kPer, gas.ozone_peak / kPer},
+                .ground         = f32vec4{air.ground_albedo, 0.5f * gas.ozone_width / kPer},
+                .surroundings   = f32vec4{surroundings.ground_albedo, surroundings.sky_fill},
+                .handles        = u32vec4{transmittance_storage_handle_, multiscatter_storage_handle_,
+                                          atmosphere_ambient_handle_, sky_view_storage_handle_},
+                .sky_view       = u32vec4{sky_view_sampled_handle_, altitude < gas.height * kKm ? 1u : 0u, 0u, 0u},
+            };
+            sky_view_drawn_ = gpu_air.sky_view.y != 0u;
+            std::memcpy(resources.atmosphere.mapped(), &gpu_air, sizeof(gpu_air));
+            atmosphere_handles.x = resources.atmosphere_handle;
+
+            // The LUTs hold the air alone, not where it is.
+            bool const same = lut_atmosphere_.has_value() && lut_atmosphere_->radius == air.radius &&
+                              lut_atmosphere_->ground_albedo == air.ground_albedo &&
+                              lut_atmosphere_->atmosphere == gas;
+            if (!same)
+            {
+                lut_atmosphere_ = air;
+                rebuild_luts_   = true;
+            }
+        }
+
         gpu::Frame const frame{
             .projection    = f32mat4{projection},
             .screen        = f32vec4{static_cast<f32>(extent.width), static_cast<f32>(extent.height),
@@ -977,7 +1114,7 @@ namespace encke
             .env_up        = f32vec4{f32vec3{up_view}, 0.0f},
             .env_sky       = f32vec4{sky, 0.0f},
             .env_ground    = f32vec4{ground, 0.0f},
-            .counts        = u32vec4{light_count, shadow_plan_.cascade_count, 0u, 0u},
+            .counts        = u32vec4{light_count, shadow_plan_.cascade_count, kMaxObjects, 0u},
             .shadow        = f32vec4{shadow_far, shadow_far * (1.0f - config::kShadowFadeFraction),
                                      config::kShadowNormalOffset, 0.0f},
             .exposure_range  = f32vec4{config::kExposureLogMin, config::kExposureLogRange,
@@ -990,6 +1127,7 @@ namespace encke
             .exposure_limits = f32vec4{config::kExposureMinEv, config::kExposureMaxEv,
                                        exposure_jump_ || !exposure_written_ ? 1.0f : 0.0f,
                                        scene.ev100},
+            .atmosphere      = atmosphere_handles,
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 
@@ -1084,6 +1222,16 @@ namespace encke
                                     : f32vec4{1.0f};
             }
 
+            f32vec4 morph{0.0f};
+            u32vec4 morph_masks{0u};
+            if (object.geomorph.has_value() && geomorph_)
+            {
+                Geomorph const& geomorph = *object.geomorph;
+                morph       = f32vec4{geomorph.start, 1.0f / std::max(geomorph.end - geomorph.start, 1e-3f),
+                                      geomorph.extent, geomorph.voxel};
+                morph_masks = u32vec4{geomorph.coarser, geomorph.finer, 1u, morph_handle_};
+            }
+
             gpu::Object const gpu_object{
                 .mvp               = f32mat4{projection * model_view},
                 .prev_mvp          = f32mat4{previous_projection * previous_model_view},
@@ -1094,6 +1242,8 @@ namespace encke
                                              renderable.metallic},
                 .textures          = textures,
                 .texture_scale     = texture_scale,
+                .morph             = morph,
+                .morph_masks       = morph_masks,
             };
             std::memcpy(&objects[index], &gpu_object, sizeof(gpu_object));
 
@@ -1400,6 +1550,84 @@ namespace encke
                     span<VkMemoryBarrier2 const>{&war, 1});
         }
 
+        // -- 4b. atmosphere: LUTs when the air changed, then the ambient ------
+        // The LUTs were sampled by earlier frames' lighting and apply passes,
+        // all compute, and are read-only between rebuilds. Multiple
+        // scattering reads transmittance, so the two are built in turn. The
+        // ambient buffer was read by last frame's lighting: write after read.
+        // Lighting's own reads of it are ordered by the barrier after the
+        // cluster pass, which covers every compute write before it.
+        if (atmosphere_drawn_)
+        {
+            constexpr VkPipelineStageFlags2 kCompute = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            constexpr VkAccessFlags2        kWrite   = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            constexpr VkAccessFlags2        kSampled = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+
+            if (rebuild_luts_)
+            {
+                VkImageLayout const from = luts_built_ ? VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+                Transition const to_storage[]{
+                    {transmittance_lut_.handle(), from, VK_IMAGE_LAYOUT_GENERAL, kCompute, 0, kCompute, kWrite},
+                    {multiscatter_lut_.handle(), from, VK_IMAGE_LAYOUT_GENERAL, kCompute, 0, kCompute, kWrite},
+                };
+                barrier(command, to_storage);
+
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, transmittance_pipeline_.handle());
+                vkCmdPushConstants(command, transmittance_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0, sizeof(push),
+                                   &push);
+                vkCmdDispatch(command, groups(config::kTransmittanceLutWidth, 8),
+                              groups(config::kTransmittanceLutHeight, 8), 1);
+
+                Transition const transmittance_ready[]{
+                    {transmittance_lut_.handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, kCompute,
+                     kWrite, kCompute, kSampled},
+                };
+                barrier(command, transmittance_ready);
+
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, multiscatter_pipeline_.handle());
+                vkCmdDispatch(command, groups(config::kMultiscatterLutSize, 8), groups(config::kMultiscatterLutSize, 8),
+                              1);
+
+                Transition const multiscatter_ready[]{
+                    {multiscatter_lut_.handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, kCompute,
+                     kWrite, kCompute, kSampled},
+                };
+                barrier(command, multiscatter_ready);
+
+                rebuild_luts_ = false;
+                luts_built_   = true;
+            }
+
+            VkMemoryBarrier2 const war = compute_to_compute(VK_ACCESS_2_SHADER_STORAGE_READ_BIT, kWrite);
+            barrier(command, {}, span<VkMemoryBarrier2 const>{&war, 1});
+
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, sky_ambient_pipeline_.handle());
+            vkCmdPushConstants(command, sky_ambient_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0, sizeof(push), &push);
+            vkCmdDispatch(command, 1, 1, 1);
+
+            // Rewritten whole each frame, after last frame's apply pass
+            // sampled it.
+            if (sky_view_drawn_)
+            {
+                Transition const to_storage[]{
+                    {sky_view_lut_.handle(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kCompute, 0, kCompute,
+                     kWrite},
+                };
+                barrier(command, to_storage);
+
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, sky_view_pipeline_.handle());
+                vkCmdDispatch(command, groups(config::kSkyViewLutWidth, 8), groups(config::kSkyViewLutHeight, 8), 1);
+
+                Transition const ready[]{
+                    {sky_view_lut_.handle(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, kCompute,
+                     kWrite, kCompute, kSampled},
+                };
+                barrier(command, ready);
+            }
+        }
+
+        timestamps_.mark(command, "sky ambient");
+
         // -- 5. clusters -----------------------------------------------------
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, cluster_pipeline_.handle());
         vkCmdPushConstants(command, cluster_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0,
@@ -1421,6 +1649,23 @@ namespace encke
         vkCmdDispatch(command, groups(extent.width, 8), groups(extent.height, 8), 1);
 
         timestamps_.mark(command, "lighting");
+
+        // -- 6b. atmosphere --------------------------------------------------
+        // Sky and aerial perspective over the lit HDR target, in place. The
+        // exposure pass's barrier below orders what follows against it.
+        if (atmosphere_drawn_)
+        {
+            VkMemoryBarrier2 const lit = compute_to_compute(
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            barrier(command, {}, span<VkMemoryBarrier2 const>{&lit, 1});
+
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, atmosphere_pipeline_.handle());
+            vkCmdPushConstants(command, atmosphere_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0, sizeof(push), &push);
+            vkCmdDispatch(command, groups(extent.width, 8), groups(extent.height, 8), 1);
+        }
+
+        timestamps_.mark(command, "atmosphere");
 
         // -- 7. exposure -----------------------------------------------------
         // The histogram reads the HDR target lighting just wrote, and adds
@@ -1948,6 +2193,21 @@ namespace encke
         debug_pipeline_.shutdown();
         histogram_pipeline_.shutdown();
         adapt_pipeline_.shutdown();
+        transmittance_pipeline_.shutdown();
+        multiscatter_pipeline_.shutdown();
+        sky_ambient_pipeline_.shutdown();
+        sky_view_pipeline_.shutdown();
+        atmosphere_pipeline_.shutdown();
+
+        transmittance_lut_.shutdown();
+        multiscatter_lut_.shutdown();
+        sky_view_lut_.shutdown();
+        atmosphere_ambient_.shutdown();
+        if (lut_sampler_ != VK_NULL_HANDLE)
+        {
+            vkDestroySampler(device, lut_sampler_, memory::vulkan_callbacks());
+            lut_sampler_ = VK_NULL_HANDLE;
+        }
 
         exposure_histogram_.shutdown();
         exposure_image_.shutdown();
@@ -1972,6 +2232,7 @@ namespace encke
             resources.lights.shutdown();
             resources.shadow_views.shutdown();
             resources.shadow_matrices.shutdown();
+            resources.atmosphere.shutdown();
         }
 
         for (Image& map : shadow_maps_)

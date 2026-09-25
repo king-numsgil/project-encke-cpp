@@ -29,6 +29,22 @@ namespace encke
     static_assert(offsetof(Vertex, tangent) == 24);
     static_assert(offsetof(Vertex, uv) == 40);
 
+    // Where a vertex goes when its mesh is fully geomorphed toward the next
+    // coarser LOD, in a stream parallel to the vertices: the geometry pool
+    // keeps one beside its vertex buffer, element for element, and a vertex
+    // shader reads it by vertex index. Only terrain chunks carry them.
+    struct MorphTarget
+    {
+        f32vec3 position;
+        u32     normal;   // pack_normal
+    };
+
+    static_assert(sizeof(MorphTarget) == 16);
+
+    // A unit normal, octahedral, 16 bits a component in [0, 1], x low:
+    // shaders/lib/normal.slang's encode_normal, quantised.
+    u32 pack_normal(f32vec3 const& normal);
+
     // A unit cube centred on the origin, wound counter-clockwise. Vertices are
     // not shared between faces because the normals differ. Each face maps the
     // whole unit square, upright on the sides and seen from outside.

@@ -26,6 +26,9 @@ namespace encke
     {
         vector<Vertex> vertices;
         vector<u32>    indices;
+
+        // Empty, or one per vertex: a geomorphing mesh's targets.
+        vector<MorphTarget> morphs;
     };
 
     // What stays known of a mesh after its data has gone to the GPU.

@@ -61,7 +61,8 @@ boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
 cascades), shadowed spot lights on masts and a ring of point lamps, with the
 Moon overhead at its real distance. The Earth is procedural terrain, meshed
 with Surface Nets on a worker pool in an implicit octree that follows the
-camera. The other built-in
+camera, geomorphed between LODs so they meet, under a physically based
+atmosphere that holds from the ground to orbit. The other built-in
 geometry is generated in code (cube, UV sphere); glTF models load through
 fastgltf, and the Khronos DamagedHelmet sits on the table. About half the
 objects carry CC0 PBR textures from ambientCG; the rest keep flat materials. A
@@ -99,7 +100,7 @@ src/
     stats_window.{hpp,cpp} frame timing history and the window graphing it; worker load dots
   world/
     transform.{hpp,cpp}  Transform and WorldTransform components, propagation
-    bodies.{hpp,cpp}     Star and Body components; the starlight and environment at a point
+    bodies.{hpp,cpp}     Star, Body and Atmosphere components; the starlight, environment and air at a point
   assets/
     handle.hpp           typed generational handles: mesh, texture, material, model
     asset_manager.{hpp,cpp} every asset's handle and CPU state; ready queues for the renderer
@@ -114,7 +115,7 @@ src/
     material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
     gltf.{hpp,cpp}       glTF -> CPU meshes, nodes, materials; image decoding, via fastgltf
     pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
-    mesh.{hpp,cpp}       Vertex, procedural cube and sphere
+    mesh.{hpp,cpp}       Vertex, MorphTarget, procedural cube and sphere
     geometry_pool.{hpp,cpp} every mesh in one vertex and one index buffer, VMA virtual blocks
     config.hpp           every renderer capacity and tuning constant
     shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
@@ -135,6 +136,7 @@ shaders/
   cluster_build.slang    compute: lights -> froxels
   lighting.slang         compute: shade from the cluster's lights, shadowed
   debug_views.slang      compute: cluster heat, normals, motion, cascades, into window images
+  atmosphere.slang       compute: atmosphere LUTs, ambient, sky-view LUT; sky and aerial perspective
   exposure.slang         compute: luminance histogram, then metered and adapted EV100
   tonemap.slang          HDR -> swapchain, at the adapted exposure
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
@@ -145,10 +147,14 @@ shaders/
     shadow.slang         cascade choice, PCF lookups, sun and spot visibility
     pbr.slang            GGX / Smith / Schlick, spot cone
     normal.slang         octahedral encode and decode
+    morph.slang          terrain geomorph: target, distance, neighbour masks
+    atmosphere.slang     the air: medium, phases, LUT parameterisations, the view-ray march
     screen.slang         fragment/NDC/UV conversions and the Y conventions
     colour.slang         sRGB <-> linear, luminance
 tests/                 Catch2, mirroring src/: camera projection and view, transform propagation,
-                       terrain noise against an f64 oracle (terrain/perlin_reference), FastNoise2 under mimalloc
+                       which atmosphere a point sees, terrain noise against an f64 oracle
+                       (terrain/perlin_reference), meshing and morph targets, octree balance,
+                       FastNoise2 under mimalloc
 ports/fastnoise2/      vcpkg overlay port: FastNoise2 v1.1.1 plus two patches
 assets/
   textures/            one directory per ambientCG set; CREDITS.md says where each came from
@@ -217,6 +223,8 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   like textures and draw from the frame they are staged in; until then
   they are left out of the draw lists. Terrain chunks are released as the
   octree swaps them; see *The Earth as terrain* for the ordering it needs.
+  Beside the vertex buffer is a storage buffer of `MorphTarget`s, indexed
+  like it, which only geomorphing meshes fill; see *Geomorph and seams*.
 - **Each raster pass is one indirect draw.** `upload()` writes one
   `VkDrawIndexedIndirectCommand` per object into a per-frame buffer (the
   G-buffer's first, then each shadow view's casters), and `record()` binds
@@ -282,8 +290,10 @@ The passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 | --- | --- | --- |
 | shadows | raster | depth only: the sun's cascades, then each chosen spot's map |
 | G-buffer | raster | albedo/ao, octahedral normal, roughness/metallic, motion, depth; emissive seeds the HDR target |
+| sky ambient | compute | with air: its LUTs when it changed, the environment around the camera, the sky-view LUT |
 | clusters | compute | one thread per froxel, tests every light against its view-space AABB |
 | lighting | compute | rebuilds view position from depth, shades against that froxel's lights, adds onto HDR |
+| atmosphere | compute | with air: the sky where nothing was drawn, aerial perspective over what was |
 | exposure | compute | luminance histogram of HDR, then one group meters and adapts EV100 |
 | debug views | compute | one visualisation image per open debug window; skipped when none is open |
 | tonemap | raster | full-screen triangle, exposure + ACES, AgX or PBR Neutral, into the sRGB swapchain |
@@ -451,10 +461,14 @@ those are exterior lights and want different treatment anyway.
 
 ## Auto-exposure
 
-`shaders/exposure.slang` runs after lighting. `histogram_main` bins every
+`shaders/exposure.slang` runs after the atmosphere. `histogram_main` bins every
 pixel's log2 luminance into `config::kExposureBins` bins; bin 0 takes
-everything below the range and is ignored, which keeps empty sky from
-dragging the exposure to its limit. `adapt_main` is one group: it averages
+everything below the range, and every pixel where nothing was drawn, and is
+ignored: exposure follows what is drawn and the sky is backdrop. Metering the
+sky too, the dim but not empty sky seen from 80 km took half the frame and
+burned the planet below to white; the atmosphere pinned at EV100 14 looked
+right, which is how the fault was placed in metering. A frame with nothing
+drawn counts nothing and holds its exposure. `adapt_main` is one group: it averages
 log luminance between two percentiles, meters EV100 as `log2(L) + 3` (the
 ISO 100, K = 12.5 convention), clamps it, moves the stored EV100 toward it
 over wall-clock time, faster when the scene brightens, and zeroes the
@@ -496,7 +510,9 @@ Known gaps, seen 2026-09-22 and not yet worked on:
 - **Ambient is a two-colour environment, first draft.** `shade_environment`
   in `lib/pbr.slang` replaces the old flat ambient: sunlit ground below the
   horizon (its radiance worked out per frame from the star and the nearest
-  body's `Body::ground_albedo`), sky above it at `Body::sky_fill` of that. Diffuse
+  body's `Body::ground_albedo`), sky above it at `Body::sky_fill` of that.
+  With an atmosphere drawn, both come from the GPU instead (see *Atmosphere*):
+  the sky is the air's own radiance and the ground is lit through it. Diffuse
   is exact for it; specular reads it along the reflected ray with the horizon
   softened by roughness, scaled by Karis's analytic environment BRDF. It
   gives metal its shape (dark above, lit below). It knows nothing of nearby
@@ -505,6 +521,79 @@ Known gaps, seen 2026-09-22 and not yet worked on:
   (the planks show it).
 
 The push constants are at 124 of the guaranteed 128 bytes.
+
+## Atmosphere — built, first draft
+
+Hillaire's "A Scalable and Production Ready Sky and Atmosphere Rendering
+Technique" (EGSR 2020): Rayleigh and Mie scattering, Mie and ozone
+absorption, single scattering marched and every higher order read from a
+LUT. `shaders/lib/atmosphere.slang` is the model, `shaders/atmosphere.slang`
+the passes. It works from the ground, from altitude and from space without
+switching models: the same march runs over whatever part of a view ray is
+inside the shell.
+
+- **An `Atmosphere` component sits beside a `Body`** (`world/bodies.hpp`),
+  SI units, the Earth's values from the paper by default; the Earth has
+  one. The extract takes `atmosphere_at` the camera: the one whose top is
+  nearest, which is the one it is inside if any. One per frame: from the
+  Moon the Earth's air is drawn, and a second atmosphere in view is not.
+- **Kilometres on the GPU**, in `gpu::Atmosphere`, a per-frame buffer the
+  Frame points at (`Frame::atmosphere`). The body's centre goes through the
+  view in f64 like everything else. **The camera's altitude comes from f64
+  too**, and the shaders work out altitudes near the camera from it
+  (`altitude_at`), and the view ray's intersections with the ground and the
+  top from `squared_excess`: `|o|^2 - r^2` from a centre millions of metres
+  away, differenced in f32, is off by kilometres squared, enough to put the
+  horizon in the wrong place from the ground.
+- **The ground that shadows the air is 10 km inside the radius**
+  (`kGroundDepth`). The radius is a reference sphere the terrain rises and
+  falls about; the pole's ground is 778 m below it, and against the sphere
+  itself the whole scene sat in the planet's shadow. The air between is at
+  sea-level density, which leaves a grazing ray dark anyway.
+- **Transmittance and multiple scattering are LUTs built once**, when the
+  atmosphere the camera sees changes (`lut_atmosphere_`), and kept in
+  `READ_ONLY_OPTIMAL` between. Transmittance is Bruneton's parameterisation,
+  multiple scattering Hillaire's section 5.5 (64 directions, ground bounce,
+  1 / (1 - f_ms)).
+- **Every frame, in the "sky ambient" section before clustering:** the
+  ambient pass marches 64 cosine-weighted directions around the nearest
+  body's up and writes the environment's sky and ground radiance to a
+  small writable buffer, which lighting reads instead of the Frame's CPU
+  values. Then, while the camera is in the air, the sky-view LUT
+  (Hillaire's, 192x108): the sky's luminance by azimuth from the sun and
+  zenith angle, the rows squeezed toward the ground sphere's horizon.
+- **Lighting takes the sun through the air per pixel**: the transmittance
+  LUT at the pixel's own altitude and sun angle, zero where the body is in
+  the way. Low sun is warm and dim, and from space the terminator reddens,
+  with no CPU-side sunlight change.
+- **The atmosphere pass runs after lighting, in place on HDR.** Where
+  nothing was drawn, the sky: from the sky-view LUT inside the air, marched
+  per pixel from outside, plus the sun's disk through it. The disk's
+  luminance, illuminance over its solid angle, is past RGBA16F's range and
+  is scaled down whole to 60000 so it keeps its colour. Where something was
+  drawn, aerial perspective: its colour times the transmittance of the air
+  between, plus the air's in-scattering, marched in 4 to 32 steps by the
+  segment's length. Each step integrates its segment analytically, as
+  Hillaire does, so few steps keep their energy.
+- **Without an atmosphere nothing changes**: the passes are skipped, the
+  sky keeps the clear colour, and the environment is the CPU's.
+
+Verified by capture: the ground view (blue sky, warm horizon band, blue in
+the shadows), toward the sun, 10 km, 80 km, and from three Earth radii,
+where the planet shows its limb and a reddened terminator. Captures at
+99.5 and 100.5 km, either side of the switch from the sky-view LUT to the
+per-pixel march, match. Per-sky-pixel marching was most of the pass's cost
+before the sky-view LUT.
+
+Known gaps:
+
+- No aerial-perspective volume: geometry is marched per pixel, which is
+  cheap for the metres to nearby things and costs up to 32 steps for
+  distant terrain.
+- The sun's disk has no limb darkening, and the Star has no radius: the
+  Sun's angular size is `config::kSunAngularRadius`.
+- No clouds, no stars, no night-sky light, no moonlight.
+- The ambient is one environment for the whole frame, at the camera.
 
 ## Shadows — built, first draft
 
@@ -921,11 +1010,13 @@ and floor(o * f * L) is not L * floor(o * f).
   one's `detail_octaves` in its `ChunkRequest`, and then matches it bit for
   bit.
 - **The coarse output is for geomorphing.** `sample_chunk` with a
-  `CoarseSamples` also writes, at the chunk's even samples (the parent LOD's
-  grid points), the field with the detail cut at the parent's octave count,
-  and its gradient across the parent's voxel. The value is a snapshot of the
-  running sum taken after that octave; the gradient needs one parent voxel
-  beyond the chunk, a ring evaluated at the parent's stride. Both equal what
+  `CoarseSamples` also writes, at the parent LOD's grid points from corner -1
+  to cells / 2 (the corners of every parent cell holding a cell the mesher
+  places vertices in, apron included), the field with the detail cut at the
+  parent's octave count, and its gradient across the parent's voxel. The
+  value is a snapshot of the running sum taken after that octave; the
+  gradient needs one parent voxel beyond those on every side, an outer layer
+  evaluated at the parent's stride. Both equal what
   the parent chunk samples and differentiates, bit for bit, given consumers
   take differences through `central_difference`.
 - **Floating point in the accumulation is order-sensitive.** Bit-exactness
@@ -1067,10 +1158,83 @@ and a grid corner (`NodeKey`), and its children are found by arithmetic.
 - The test scene's object field stands on the ground below the pole; see
   *The test planet*.
 
+### Geomorph and seams
+
+Every chunk morphs toward its parent LOD in the vertex shader, and the same
+morph closes the seams between LODs. No chunk is ever remeshed because a
+neighbour changed.
+
+- **A vertex's target is its parent cell's vertex.** `surface_nets`, given
+  the chunk's `CoarseSamples`, computes for each vertex the vertex the parent
+  LOD's mesher places in the parent cell holding it, and its normal, through
+  the same `cell_vertex` the fine cells use. The coarse values and gradients
+  are bit-exact with the parent chunk's own samples, so the target is the
+  parent's own vertex to f32 rounding of the chunk offset
+  (`surface_nets_test` checks under 1e-5 m against real parent chunks). A
+  fully morphed chunk collapses onto its parent's surface: quads whose cells
+  fall in one parent cell go degenerate, and the rest become the parent's
+  quads, wherever fine and coarse agree on which parent cells the surface
+  crosses. Where the parent cell has no vertex, the target is the vertex
+  itself.
+- **The targets are a second vertex stream.** `MorphTarget` (position, packed
+  octahedral normal, 16 bytes) lives in `GeometryPool`'s morph buffer, element
+  for element beside the vertex buffer, uploaded with the mesh when it has
+  targets. `shaders/lib/morph.slang` reads it at `SV_VulkanVertexID`, which is
+  `gl_VertexIndex` and includes the draw's `vertexOffset`. **Not
+  `SV_VertexID`**: Slang lowers that to `gl_VertexIndex - gl_BaseVertex`, as
+  it does `SV_InstanceID`, and every chunk read the first mesh's targets,
+  which drew the terrain as a fan of slivers.
+- **The amount is by distance from the camera**, the vertex's view-space
+  length, from `Geomorph::start` to `end` (`geomorph_for`). The octree merges
+  a node's children once the camera is 2kE from the node, k the split factor
+  and E the child's edge, and every child vertex is then at least that far
+  less a voxel, so the morph ends a further voxel short of 2kE and a merge or
+  a split swaps identical surfaces. It starts at (k + 1)E, or kE at the finest
+  LOD, which has no finer neighbours. The root never morphs.
+- **Seams are closed by masks, not by distance.** Each chunk's `Geomorph`
+  carries which of its 26 neighbours on screen are one LOD coarser and which
+  finer (`TerrainOctree::update_neighbours`, rerun for the neighbourhood of
+  every node that comes on or goes off). Near a coarser neighbour a vertex is
+  pulled fully onto its target, which is that neighbour's own vertex; near a
+  finer one it is held at its own position, which is the finer neighbour's
+  target. The weight is 1 within 1.25 voxels of the face, which covers every
+  vertex two chunks share, and fades over 4 more; for an edge or corner
+  neighbour it is the product over the faces between. Two chunks sharing a
+  vertex therefore agree on where it goes. Where a coarser and a finer
+  neighbour meet at a corner, coarser wins.
+- **Touching leaves differ by at most one LOD**, which the masks assume.
+  Split factors over sqrt(3) guarantee it; `octree_test` checks.
+- **Shadows morph too.** `shadow_depth.slang` finds the object from its
+  instance (`instance % counts.z`, the max object count in the Frame) and
+  morphs by distance from the camera, not the light, so the terrain casts the
+  surface it draws.
+- **`ENCKE_NO_GEOMORPH`** draws every chunk at its own vertices, which is
+  what the terrain looked like before: the comparison. Captured from 300 m
+  looking straight down, off shows the old crack lines outlining each finer
+  square and on shows none.
+- **Detail follows the split factor now.** A chunk's box can reach much
+  closer to the camera than the surface inside it, most of all from above,
+  and before geomorph that slack showed as extra detail. Now a vertex past
+  its LOD's `end` draws at the parent's detail whatever the octree chose, so
+  from altitude the ground is softer than it was; `kTerrainSplitFactor` is
+  the knob. `select_leaves` also counts a node as no nearer than
+  `surface_clearance`, the camera's field value over the cull's Lipschitz
+  bound, so those chunks are not meshed only to be morphed away; the bound
+  is loose (1.5) and helps little below a few hundred metres.
+
 Known gaps:
 
-- No geomorph and no seam stitching: neighbours at different LODs do not
-  meet, which shows as dotted cracks along LOD boundaries, and a swap pops.
+- Where fine and coarse disagree on which parent cells the surface crosses,
+  collapse is not exact: a feature smaller than a coarse voxel folds onto
+  the parent's vertices, and at a seam there a hairline can remain.
+- Motion vectors ignore the morph: the previous frame's position is this
+  frame's morphed vertex through last frame's matrices.
+- UVs are the fine vertex's, so a morphing vertex drags its texture slightly.
+- The objects stood on the ground were placed on the finest LOD's surface;
+  morphed ground more than 16 m away can sit a little above or below them.
+- While meshing lags the camera, a node kept on screen past its time is
+  morphed for the distance it is drawn at, not the one the octree meant, and
+  can pop when it finally goes.
 - Settling at the pole from a cold start meshes a few thousand chunks, most
   of them at LOD 0 with ten detail octaves; it takes seconds on the pool.
 - The cull cache grows with where the camera has been; nothing prunes it.

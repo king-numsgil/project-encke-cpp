@@ -12,6 +12,7 @@
 // The visualisations (cluster heat, normals, motion) are not modes of this
 // pass; they are drawn into their own images by debug_views.slang.
 
+import lib.atmosphere;
 import lib.bindless;
 import lib.cluster;
 import lib.gpu_types;
@@ -89,14 +90,26 @@ void compute_main(uint3 id : SV_DispatchThreadID)
 
     uint cluster = cluster_of(pixel, distance, frame);
 
-    float3 lit = shade_environment(surface, frame.env_up.xyz, frame.env_sky.rgb,
-                                   frame.env_ground.rgb);
+    // With air, sunlight reaches this point through it, and the environment
+    // is what ambient_main in atmosphere.slang made of the sky this frame.
+    float3 sun_light  = frame.sun_radiance.rgb;
+    float3 env_sky    = frame.env_sky.rgb;
+    float3 env_ground = frame.env_ground.rgb;
+    if (atmosphere_present(frame))
+    {
+        GpuAtmosphere       a       = load_atmosphere(frame);
+        RWByteAddressBuffer ambient = g_rw_buffers[NonUniformResourceIndex(a.handles.z)];
+        env_sky    = asfloat(ambient.Load3(0u));
+        env_ground = asfloat(ambient.Load3(16u));
+        sun_light *= sun_transmittance(frame, a, position * 0.001f);
+    }
+
+    float3 lit = shade_environment(surface, frame.env_up.xyz, env_sky, env_ground);
 
     float3 sun = frame.sun_direction.xyz;
-    if (any(frame.sun_radiance.rgb > 0.0f) && dot(surface.normal, sun) > 0.0f)
+    if (any(sun_light > 0.0f) && dot(surface.normal, sun) > 0.0f)
     {
-        lit += shade(surface, sun, frame.sun_radiance.rgb) *
-               sun_visibility(position, surface.normal, frame);
+        lit += shade(surface, sun, sun_light) * sun_visibility(position, surface.normal, frame);
     }
 
     if (push.debug_view == 1u)

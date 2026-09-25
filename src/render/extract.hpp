@@ -27,7 +27,8 @@ namespace encke
         f64vec3 bounds_centre{0.0};
         f64     bounds_radius = 0.0;
 
-        Renderable renderable;
+        Renderable         renderable;
+        optional<Geomorph> geomorph;
     };
 
     struct RenderLight
@@ -51,6 +52,9 @@ namespace encke
         // lights the frame from outside it.
         optional<Starlight>    star;
         optional<Surroundings> surroundings;
+
+        // The atmosphere the camera sees, if any.
+        optional<AtmosphereView> atmosphere;
     };
 
     // Replaces `list` with the scene's active camera, what lights it from

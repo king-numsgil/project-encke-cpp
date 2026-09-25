@@ -10,8 +10,14 @@
 // SV_VulkanInstanceID, not SV_InstanceID: Slang lowers SV_InstanceID to
 // InstanceIndex - BaseInstance to match D3D, which would drop firstInstance.
 
+//
+// Geomorphing objects morph here exactly as in the G-buffer pass, by their
+// distance from the camera, not the light, so they cast the surface they
+// draw.
+
 import lib.bindless;
 import lib.gpu_types;
+import lib.morph;
 
 struct VertexIn
 {
@@ -19,7 +25,9 @@ struct VertexIn
 };
 
 [shader("vertex")]
-float4 vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID) : SV_Position
+float4 vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint vertex : SV_VulkanVertexID) : SV_Position
 {
-    return mul(load_shadow_matrix(instance), float4(input.position, 1.0f));
+    GpuObject object  = load_object(instance % load_frame().counts.z);
+    Morphed   morphed = morph_vertex(object, vertex, input.position, float3(0.0f, 1.0f, 0.0f));
+    return mul(load_shadow_matrix(instance), float4(morphed.position, 1.0f));
 }

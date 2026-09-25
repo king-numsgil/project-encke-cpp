@@ -6,6 +6,20 @@
 
 namespace encke
 {
+    u32 pack_normal(f32vec3 const& normal)
+    {
+        f32vec2 p = f32vec2{normal.x, normal.y} / (std::abs(normal.x) + std::abs(normal.y) + std::abs(normal.z));
+        if (normal.z < 0.0f)
+        {
+            f32vec2 const sign{p.x >= 0.0f ? 1.0f : -1.0f, p.y >= 0.0f ? 1.0f : -1.0f};
+            p = (f32vec2{1.0f} - glm::abs(f32vec2{p.y, p.x})) * sign;
+        }
+        f32vec2 const unit = glm::clamp(p * 0.5f + 0.5f, 0.0f, 1.0f);
+        auto const    x    = static_cast<u32>(std::lround(unit.x * 65535.0f));
+        auto const    y    = static_cast<u32>(std::lround(unit.y * 65535.0f));
+        return x | (y << 16);
+    }
+
     namespace
     {
         // Face basis vectors: normal, then the two in-plane axes. Emitting

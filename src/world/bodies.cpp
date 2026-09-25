@@ -48,4 +48,27 @@ namespace encke
         }
         return nearest;
     }
+
+    optional<AtmosphereView> atmosphere_at(entt::registry const& registry, f64vec3 const& point)
+    {
+        optional<AtmosphereView> nearest;
+        f64 above_top = std::numeric_limits<f64>::infinity();
+        for (auto const [entity, world, body, atmosphere] :
+             registry.view<WorldTransform const, Body const, Atmosphere const>().each())
+        {
+            f64vec3 const centre = world.position + world.rotation * body.centre;
+            f64 const     above  = glm::length(point - centre) - body.radius - atmosphere.height;
+            if (above < above_top)
+            {
+                above_top = above;
+                nearest   = AtmosphereView{
+                    .centre        = centre,
+                    .radius        = body.radius,
+                    .ground_albedo = body.ground_albedo,
+                    .atmosphere    = atmosphere,
+                };
+            }
+        }
+        return nearest;
+    }
 }

@@ -6,9 +6,12 @@
 //                   toward that over time, and clear the histogram for the
 //                   next frame
 //
-// Bin 0 holds everything darker than the histogram's range -- empty sky above
-// all -- and is left out of the average, so pointing the camera at space does
-// not push the exposure to its limit.
+// Bin 0 holds everything darker than the histogram's range, and every pixel
+// where nothing was drawn, and is left out of the average: exposure follows
+// what is drawn, and the sky, bright air or black space, is backdrop. Metered
+// with it, the sky seen from high in the atmosphere, dim but not empty, took
+// half the frame and burned the planet below to white. A frame with nothing
+// drawn counts nothing and holds its exposure.
 //
 // The result is EV100 in a 1x1 R32F image, which tonemap samples. Metering is
 // the saturation-based ISO 100 convention (K = 12.5), so EV100 is
@@ -51,8 +54,9 @@ void histogram_main(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
 
     if (all(float2(id.xy) < frame.screen.xy))
     {
-        RWTexture2D<float4> hdr = g_images[NonUniformResourceIndex(push.hdr_storage)];
-        uint                bin = bin_of(luminance(hdr[id.xy].rgb), frame);
+        RWTexture2D<float4> hdr   = g_images[NonUniformResourceIndex(push.hdr_storage)];
+        float               depth = g_textures[NonUniformResourceIndex(push.gbuffer_depth)].Load(int3(id.xy, 0)).r;
+        uint                bin   = depth > 0.0f ? bin_of(luminance(hdr[id.xy].rgb), frame) : 0u;
         InterlockedAdd(g_bins[bin], 1u);
     }
     GroupMemoryBarrierWithGroupSync();

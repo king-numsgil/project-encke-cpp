@@ -80,6 +80,62 @@ namespace encke::terrain
         CHECK(coarsest <= root_lod(terrain));
     }
 
+    TEST_CASE("octree leaves that touch differ by at most one LOD", "[terrain][octree]")
+    {
+        // Geomorph's seams rely on it: a chunk collapses onto the LOD above
+        // it and no further. Split factors over sqrt(3) guarantee it.
+        BodyTerrain const terrain = asteroid();
+        TerrainSampler    sampler{terrain};
+
+        for (f64 const altitude : {500.0, 3'000.0, 12'000.0})
+        {
+            f64vec3 const         camera = glm::normalize(f64vec3{0.3, 1.0, -0.2}) * (terrain.radius + altitude);
+            vector<NodeKey> const leaves = select_leaves(terrain, camera, kSettings, [&](NodeKey const& key) {
+                return chunk_may_have_surface(sampler, key.origin, key.lod, kSettings.cull_factor);
+            });
+
+            u32 touching   = 0;
+            u32 unbalanced = 0;
+            for (NodeKey const& a : leaves)
+            {
+                i64vec3 const a_high = a.origin + i64vec3{i64{32} << a.lod};
+                for (NodeKey const& b : leaves)
+                {
+                    i64vec3 const b_high = b.origin + i64vec3{i64{32} << b.lod};
+                    bool const    touch  = glm::all(glm::lessThanEqual(a.origin, b_high)) &&
+                                          glm::all(glm::lessThanEqual(b.origin, a_high)) && !(a == b);
+                    if (touch && a.lod != b.lod)
+                    {
+                        ++touching;
+                        unbalanced += (a.lod > b.lod ? a.lod - b.lod : b.lod - a.lod) > 1 ? 1u : 0u;
+                    }
+                }
+            }
+            CAPTURE(altitude, leaves.size(), touching);
+            CHECK(touching > 0);
+            CHECK(unbalanced == 0);
+        }
+    }
+
+    TEST_CASE("geomorph ends before the parent replaces a chunk", "[terrain][octree]")
+    {
+        BodyTerrain const terrain = asteroid();
+        for (u32 lod = kSettings.finest_lod; lod < root_lod(terrain); ++lod)
+        {
+            Geomorph const morph      = geomorph_for(terrain, lod, kSettings);
+            f64 const      extent     = static_cast<f64>(i64{32} << lod) * terrain.base_voxel_size;
+            f64 const      merge_from = kSettings.split_factor * 2.0 * extent;
+
+            CAPTURE(lod);
+            CHECK(morph.start < morph.end);
+            // A voxel for apron vertices outside the chunk and one for the
+            // frame the octree trails the camera.
+            CHECK(static_cast<f64>(morph.end) <= merge_from - 2.0 * terrain.voxel_size(lod) + 1e-3);
+        }
+        Geomorph const root = geomorph_for(terrain, root_lod(terrain), kSettings);
+        CHECK(root.start >= 1e30f);
+    }
+
     TEST_CASE("the octree swaps chunks as the camera flies without overlap, and releases what it drops", "[terrain][octree]")
     {
         Scene        scene;

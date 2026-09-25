@@ -21,11 +21,31 @@ public struct GpuFrame
     public float4   env_up;          // view space, unit: away from the ground
     public float4   env_sky;         // linear rgb radiance above the horizon
     public float4   env_ground;      // linear rgb radiance below it
-    public uint4    counts;          // x light count, y cascade count
+    public uint4    counts;          // x light count, y cascade count, z max objects
     public float4   shadow;          // x shadow distance, y fade start, z normal offset (texels)
     public float4   exposure_range;  // x log2 min luminance, y log2 range, z low, w high percentile
     public float4   exposure_adapt;  // x frame seconds, y speed brighter, z darker, w compensation EV
     public float4   exposure_limits; // x min EV100, y max EV100, z 1 = jump to target, w EV100 to start from
+    public uint4    atmosphere;      // x GpuAtmosphere buffer or kNoAtmosphere, y transmittance LUT,
+                                     // z multiple-scattering LUT (sampled), w their sampler
+};
+
+public static const uint kNoAtmosphere = 0xFFFFFFFFu;
+
+// Kilometres. See Atmosphere in render/gpu_types.hpp.
+public struct GpuAtmosphere
+{
+    public float4 planet;            // xyz body centre in view space, w radius
+    public float4 shell;             // x top radius, y camera altitude, z cos sun radius, w sun solid angle
+    public float4 rayleigh;          // rgb scattering per km, w scale height
+    public float4 mie;               // rgb scattering per km, w scale height
+    public float4 mie_absorption;    // rgb per km, w phase g
+    public float4 ozone;             // rgb absorption per km, w tent apex altitude
+    public float4 ground;            // rgb body albedo, w tent half-width
+    public float4 surroundings;      // rgb nearest body's albedo, w its sky fill
+    public uint4  handles;           // x transmittance, y multiple scattering (storage), z ambient buffer,
+                                     // w sky-view LUT (storage)
+    public uint4  sky_view;          // x sky-view LUT (sampled), y 1 when built this frame
 };
 
 // A point light is a spot whose cone never cuts off: cos_outer below -1.
@@ -62,6 +82,16 @@ public struct GpuObject
     public uint4    textures;          // x albedo, y normal, z ORM, w emission; x kNoTexture if
                                        // untextured, y and w kNoTexture when that map is absent
     public float4   texture_scale;     // xyz scale / tile width (m), w tile width / height
+    public float4   morph;             // x start distance, y 1 / (end - start), z extent, w voxel (m)
+    public uint4    morph_masks;       // x coarser neighbours, y finer, z nonzero when morphing,
+                                       // w the MorphTarget buffer
+};
+
+// A vertex's geomorph target; see MorphTarget in render/mesh.hpp.
+public struct GpuMorphTarget
+{
+    public float3 position;
+    public uint   normal;              // octahedral, 16 bits a component, x low
 };
 
 public static const uint kNoTexture = 0xFFFFFFFFu;
@@ -111,8 +141,9 @@ public struct Push
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 272;
+public static const uint kFrameStride      = 288;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
-public static const uint kObjectStride     = 320;
+public static const uint kObjectStride     = 352;
+public static const uint kMorphStride      = 16;
 public static const uint kMatrixStride     = 64;

@@ -25,6 +25,29 @@ namespace encke
         f32     metallic  = 0.0f;
     };
 
+    // Beside a Renderable whose mesh carries morph targets: how far toward
+    // them each vertex is drawn. A vertex moves from its own position at
+    // `start` metres from the camera to its target at `end`, so a terrain
+    // chunk has become its parent by the distance the parent replaces it.
+    //
+    // The masks say which of the 26 chunks around this one are drawn one LOD
+    // coarser or finer, bit (dx + 1) + 3 (dy + 1) + 9 (dz + 1) for the chunk
+    // at offset (dx, dy, dz). Vertices near a coarser neighbour are pulled
+    // fully to their targets, the neighbour's own vertices, and near a finer
+    // one held at their own, which the neighbour's targets are; within a
+    // voxel of the face, where chunks share vertices, exactly, so the seam
+    // closes whatever the distances say. Positions near a face are measured
+    // in mesh space, where the chunk spans 0 to `extent` on each axis.
+    struct Geomorph
+    {
+        f32 start  = 0.0f;
+        f32 end    = 0.0f;
+        f32 extent = 0.0f;   // metres
+        f32 voxel  = 0.0f;   // metres
+        u32 coarser = 0;
+        u32 finer   = 0;
+    };
+
     // A point light at the entity's world position, or a spot facing the
     // entity's -Z when cos_outer is above -1. Only spots cast shadows;
     // casts_shadow on a point light is ignored. The entity's scale is not

@@ -106,30 +106,30 @@ namespace encke::terrain
 
         Clock::time_point const start = Clock::now();
 
-        // The parent's grid points from one parent voxel before the origin
-        // to one past the far side, `m` a side. All but the last layer on
-        // each axis are chunk samples; that last layer, past the chunk's far
-        // faces, only the gradients need.
-        u32 const     m     = request.cells / 2 + 3;
+        // The parent's grid points from two parent voxels before the origin
+        // to one past the far side, `m` a side: parent corners -2 to
+        // cells / 2 + 1. All but the outer layer are chunk samples; that
+        // layer, past the chunk's apron, only the gradients need.
+        u32 const     m     = request.cells / 2 + 4;
         u32vec3 const grid{m};
         i64 const     coarse_stride = 2 * stride;
-        i64vec3 const grid_first    = request.origin - i64vec3{coarse_stride};
+        i64vec3 const grid_first    = request.origin - i64vec3{2 * coarse_stride};
         coarse_grid_.resize(static_cast<size_t>(m) * m * m);
 
         // The snapshot taken on the way to the full sum. Parent point a is
-        // at offset 2a - 2 from the origin: sample 2a.
-        for (u32 c = 0; c + 1 < m; ++c)
+        // at offset 2a - 4 from the origin: sample 2a - 2.
+        for (u32 c = 1; c + 1 < m; ++c)
         {
-            for (u32 b = 0; b + 1 < m; ++b)
+            for (u32 b = 1; b + 1 < m; ++b)
             {
-                for (u32 a = 0; a + 1 < m; ++a)
+                for (u32 a = 1; a + 1 < m; ++a)
                 {
-                    coarse_grid_[flat(grid, a, b, c)] = partial_[flat(box.count, 2 * a, 2 * b, 2 * c)];
+                    coarse_grid_[flat(grid, a, b, c)] = partial_[flat(box.count, 2 * a - 2, 2 * b - 2, 2 * c - 2)];
                 }
             }
         }
 
-        // The far layer, face by face, evaluated as the parent would.
+        // The outer layer, face by face, evaluated as the parent would.
         auto const ring = [&](u32vec3 const& low, u32vec3 const& high) {
             GridBox const face{
                 .first  = grid_first + i64vec3{low} * coarse_stride,
@@ -152,9 +152,12 @@ namespace encke::terrain
         };
         u32 const last = m - 1;
         u32 const deep = m - 2;
-        ring(u32vec3{last, 0, 0}, u32vec3{last, last, last});
-        ring(u32vec3{0, last, 0}, u32vec3{deep, last, last});
-        ring(u32vec3{0, 0, last}, u32vec3{deep, deep, last});
+        for (u32 const side : {0u, last})
+        {
+            ring(u32vec3{side, 0, 0}, u32vec3{side, last, last});
+            ring(u32vec3{1, side, 0}, u32vec3{deep, side, last});
+            ring(u32vec3{1, 1, side}, u32vec3{deep, deep, side});
+        }
 
         f64 const     coarse_voxel = terrain_.voxel_size(request.lod + 1);
         u32vec3 const outputs{request.coarse_per_axis()};

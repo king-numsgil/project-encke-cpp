@@ -241,18 +241,19 @@ namespace encke::terrain
                 {
                     for (u32 a = 0; a < n; ++a)
                     {
-                        // Coarse point a is the parent's sample a + 2.
-                        REQUIRE(child.grid(2 * a + 2, 2 * b + 2, 2 * c + 2) == p.grid(a + 2, b + 2, c + 2));
+                        // Coarse point a is the parent's corner a - 1, its
+                        // sample a + 1.
+                        REQUIRE(child.grid(2 * a, 2 * b, 2 * c) == p.grid(a + 1, b + 1, c + 1));
 
                         size_t const  index    = child.coarse_index(a, b, c);
                         f32vec3 const gradient = child.coarse_gradients[index];
                         f32vec3 const expected{
-                            central_difference(p.at(a + 1, b + 2, c + 2), p.at(a + 3, b + 2, c + 2), voxel),
-                            central_difference(p.at(a + 2, b + 1, c + 2), p.at(a + 2, b + 3, c + 2), voxel),
-                            central_difference(p.at(a + 2, b + 2, c + 1), p.at(a + 2, b + 2, c + 3), voxel),
+                            central_difference(p.at(a, b + 1, c + 1), p.at(a + 2, b + 1, c + 1), voxel),
+                            central_difference(p.at(a + 1, b, c + 1), p.at(a + 1, b + 2, c + 1), voxel),
+                            central_difference(p.at(a + 1, b + 1, c), p.at(a + 1, b + 1, c + 2), voxel),
                         };
 
-                        if (!same_bits(child.coarse_values[index], p.at(a + 2, b + 2, c + 2)))
+                        if (!same_bits(child.coarse_values[index], p.at(a + 1, b + 1, c + 1)))
                         {
                             ++value_mismatches;
                         }
@@ -269,17 +270,21 @@ namespace encke::terrain
             CHECK(gradient_mismatches == 0);
 
             // A child across the parent's +x face, as at an LOD transition:
-            // its coarse points on the face are the parent's apron samples.
+            // its coarse points on the face, and one parent voxel into the
+            // parent, are the parent's samples.
             Chunk const neighbour = sample(sampler, sampler.chunk(parent.origin + i64vec3{i64{32} << coarse_lod, 0, 0}, fine_lod), true);
             u32         face_mismatches = 0;
             for (u32 c = 0; c < n; ++c)
             {
                 for (u32 b = 0; b < n; ++b)
                 {
-                    REQUIRE(neighbour.grid(2, 2 * b + 2, 2 * c + 2) == p.grid(34, b + 2, c + 2));
-                    if (!same_bits(neighbour.coarse_values[neighbour.coarse_index(0, b, c)], p.at(34, b + 2, c + 2)))
+                    for (u32 a = 0; a < 2; ++a)
                     {
-                        ++face_mismatches;
+                        REQUIRE(neighbour.grid(2 * a, 2 * b, 2 * c) == p.grid(33 + a, b + 1, c + 1));
+                        if (!same_bits(neighbour.coarse_values[neighbour.coarse_index(a, b, c)], p.at(33 + a, b + 1, c + 1)))
+                        {
+                            ++face_mismatches;
+                        }
                     }
                 }
             }
@@ -290,7 +295,7 @@ namespace encke::terrain
             bool differs = false;
             for (u32 a = 0; a < n && !differs; ++a)
             {
-                differs = !same_bits(child.coarse_values[child.coarse_index(a, a, a)], child.at(2 * a + 2, 2 * a + 2, 2 * a + 2));
+                differs = !same_bits(child.coarse_values[child.coarse_index(a, a, a)], child.at(2 * a, 2 * a, 2 * a));
             }
             CHECK(differs);
         }

@@ -93,6 +93,23 @@ namespace encke::config
 
     inline constexpr u32 kShadowViewCount = kCascadeCount + kMaxShadowedSpots;
 
+    // -- atmosphere -------------------------------------------------------------------
+    // Hillaire's LUT sizes: transmittance by zenith (u) and altitude (v), and
+    // multiple scattering by sun zenith and altitude, square.
+    inline constexpr u32 kTransmittanceLutWidth  = 256;
+    inline constexpr u32 kTransmittanceLutHeight = 64;
+    inline constexpr u32 kMultiscatterLutSize    = 32;
+
+    // The sky as seen from the camera, rebuilt every frame while it is inside
+    // the atmosphere: azimuth from the sun (u) by zenith angle (v), the
+    // horizon given most of the rows.
+    inline constexpr u32 kSkyViewLutWidth  = 192;
+    inline constexpr u32 kSkyViewLutHeight = 108;
+
+    // The sun's angular radius as seen from the Earth, for its disk in the
+    // sky: 0.2666 degrees.
+    inline constexpr f64 kSunAngularRadius = 0.004653;
+
     // -- auto-exposure ----------------------------------------------------------------
     // Off: the scene's fixed Scene::ev100 is used instead.
     inline constexpr bool kAutoExposure = true;

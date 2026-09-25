@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assets/handle.hpp"
+#include "render/components.hpp"
 #include "terrain/terrain_field.hpp"
 
 #include <memory>
@@ -111,13 +112,36 @@ namespace encke::terrain
     // past the bounding radius, so eight chunks cover the body.
     u32 root_lod(BodyTerrain const& terrain);
 
+    // The distances over which a chunk at `lod` morphs toward its parent,
+    // with its extent and voxel; no neighbours marked.
+    //
+    // A node splits within split_factor k of its edges, E, so a leaf's
+    // parent replaces it once the camera is 2kE from the parent: every
+    // vertex of the leaf is then at least that far, less the voxel its
+    // apron vertices reach outside the chunk. The morph ends a voxel short
+    // of that, for the frame the camera moves before the octree follows, and
+    // the swap shows nothing. It starts at (k + 1)E, past which a finer
+    // neighbour is rare; within kE the chunk would itself have split, so at
+    // the finest LOD, which never does, it starts there. The root never
+    // merges and never morphs.
+    Geomorph geomorph_for(BodyTerrain const& terrain, u32 lod, OctreeSettings const& settings);
+
     // The leaves for a camera at `camera`, body-relative: the nodes the
     // descent stops at, splitting from the eight roots while the camera is
     // near and the finest LOD is not reached, and skipping every node
     // `may_have_surface` rejects, with everything inside it. Disjoint, and
     // between them they hold every chunk of surface.
+    //
+    // `clearance` is a distance no surface is nearer the camera than; a node
+    // counts as at least that far. A chunk's box can reach far closer than
+    // the surface inside it, most of all from above, and splitting it for
+    // that meshes children that are drawn fully morphed back to it.
     vector<NodeKey> select_leaves(BodyTerrain const& terrain, f64vec3 const& camera, OctreeSettings const& settings,
-                                  function<bool(NodeKey const&)> const& may_have_surface);
+                                  function<bool(NodeKey const&)> const& may_have_surface, f64 clearance = 0.0);
+
+    // A distance from `camera` within which there is no surface: its field
+    // value over the Lipschitz bound the cull trusts. Zero inside.
+    f64 surface_clearance(TerrainSampler& sampler, f64vec3 const& camera, OctreeSettings const& settings);
 
     // Every PlanetTerrain body in a scene as an implicit octree of chunks,
     // chosen each frame from the camera: nodes appear as the camera nears
@@ -128,8 +152,14 @@ namespace encke::terrain
     //
     // Swaps leave no holes: a node the camera has moved off stays drawn
     // until everything that replaces it is ready, then goes in the same
-    // frame the replacements appear, and its mesh is released. No geomorph:
-    // neighbours at different LODs do not meet, and a swap pops.
+    // frame the replacements appear, and its mesh is released.
+    //
+    // Every chunk geomorphs toward its parent (Geomorph, geomorph_for), so
+    // by the distance a swap happens the two draw the same surface, and each
+    // chunk carries masks of which neighbours on screen are coarser or
+    // finer, which close the seams between LODs. Both hold once the octree
+    // has caught up with the camera; while meshing lags, a node kept on
+    // screen past its time can still pop when it goes.
     //
     // Main thread only; completions run in the pool's drain(), and update()
     // goes after it and before Scene::update.
@@ -159,6 +189,10 @@ namespace encke::terrain
         void submit(std::shared_ptr<Body> const& body, NodeKey const& key);
         void complete(std::shared_ptr<Body> const& body, NodeKey const& key,
                       std::shared_ptr<MeshData> const& data, bool skipped);
+
+        // Rewrites the Geomorph masks of every node on screen next to one of
+        // `changed`, which came on or went off this frame.
+        void update_neighbours(Body& body, entt::registry& registry, span<NodeKey const> changed) const;
 
         OctreeSettings                settings_;
         vector<std::shared_ptr<Body>> bodies_;

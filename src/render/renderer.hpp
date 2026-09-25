@@ -178,6 +178,10 @@ namespace encke
         // runs, so clearing it resumes from the metered value.
         void set_fixed_ev100(optional<f32> ev100) { fixed_ev100_ = ev100; }
 
+        // Off draws every mesh at its own vertices, morph targets ignored: to
+        // compare against, since off is what terrain looked like before.
+        void set_geomorph(bool on) { geomorph_ = on; }
+
         // Bindless sampled-image handle of a visualisation, in
         // READ_ONLY_OPTIMAL by the time the overlay runs. Stable across
         // resizes.
@@ -203,6 +207,7 @@ namespace encke
             Buffer lights;
             Buffer shadow_views;
             Buffer shadow_matrices;
+            Buffer atmosphere;   // gpu::Atmosphere
 
             // VkDrawIndexedIndirectCommand: the G-buffer's at 0, then shadow
             // view v's at (1 + v) * kMaxObjects.
@@ -213,6 +218,7 @@ namespace encke
             u32 lights_handle          = BindlessSet::kInvalid;
             u32 shadow_views_handle    = BindlessSet::kInvalid;
             u32 shadow_matrices_handle = BindlessSet::kInvalid;
+            u32 atmosphere_handle      = BindlessSet::kInvalid;
         };
 
         // A texture asset on the GPU, streamed in once and read-only after,
@@ -341,6 +347,38 @@ namespace encke
         f64    frame_seconds_           = 0.0;
         bool   exposure_jump_           = true;
         optional<f32> fixed_ev100_;
+        bool          geomorph_ = true;
+
+        // The atmosphere (shaders/atmosphere.slang). The LUTs depend on the
+        // air alone, so they are rebuilt only when the atmosphere the camera
+        // sees changes, and stay in READ_ONLY_OPTIMAL between; each is
+        // registered twice, storage for its build, sampled for its readers.
+        // The ambient buffer is written each frame by the ambient pass and
+        // read by lighting, both compute.
+        bool create_atmosphere_resources();
+
+        Image     transmittance_lut_;
+        Image     multiscatter_lut_;
+        Image     sky_view_lut_;   // rebuilt every frame the camera is in the air
+        u32       sky_view_storage_handle_ = BindlessSet::kInvalid;
+        u32       sky_view_sampled_handle_ = BindlessSet::kInvalid;
+        bool      sky_view_drawn_          = false;
+        u32       transmittance_storage_handle_ = BindlessSet::kInvalid;
+        u32       transmittance_sampled_handle_ = BindlessSet::kInvalid;
+        u32       multiscatter_storage_handle_  = BindlessSet::kInvalid;
+        u32       multiscatter_sampled_handle_  = BindlessSet::kInvalid;
+        VkSampler lut_sampler_                  = VK_NULL_HANDLE;
+        u32       lut_sampler_handle_           = BindlessSet::kInvalid;
+        Buffer    atmosphere_ambient_;
+        u32       atmosphere_ambient_handle_ = BindlessSet::kInvalid;
+
+        // What the LUTs were built for; nullopt until they first are.
+        // `atmosphere_drawn_` is whether this frame has one; upload() sets
+        // both flags and record() reads them.
+        optional<AtmosphereView> lut_atmosphere_;
+        bool                     atmosphere_drawn_ = false;
+        bool                     rebuild_luts_     = false;
+        bool                     luts_built_       = false;   // in READ_ONLY_OPTIMAL, else UNDEFINED
 
         // Neutral keeps the most colour and hue of the three; see CLAUDE.md.
         Tonemap tonemap_ = Tonemap::PbrNeutral;
@@ -374,6 +412,11 @@ namespace encke
         ComputePipeline  debug_pipeline_;
         ComputePipeline  histogram_pipeline_;
         ComputePipeline  adapt_pipeline_;
+        ComputePipeline  transmittance_pipeline_;
+        ComputePipeline  multiscatter_pipeline_;
+        ComputePipeline  sky_ambient_pipeline_;
+        ComputePipeline  sky_view_pipeline_;
+        ComputePipeline  atmosphere_pipeline_;
 
         // GPU state by asset handle index, checked against the handle's
         // generation. A mesh's pool id is not its handle index: the pool
@@ -387,6 +430,7 @@ namespace encke
         };
 
         GeometryPool                        geometry_;
+        u32                                 morph_handle_ = BindlessSet::kInvalid;
         vector<MeshSlot>                    meshes_;
         vector<u32>                         released_pool_ids_;   // handed back after stage()
         vector<std::unique_ptr<GpuTexture>> textures_;

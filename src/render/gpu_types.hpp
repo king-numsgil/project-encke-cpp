@@ -29,7 +29,7 @@ namespace encke::gpu
         f32vec4 env_up;              // view space, unit: away from the ground
         f32vec4 env_sky;             // linear rgb radiance above the horizon
         f32vec4 env_ground;          // linear rgb radiance below it
-        u32vec4 counts;             // x light count, y cascade count
+        u32vec4 counts;             // x light count, y cascade count, z max objects
         f32vec4 shadow;              // x shadow distance, y fade start, z normal offset (texels)
 
         // Auto-exposure; see render/config.hpp for what each one means.
@@ -37,6 +37,35 @@ namespace encke::gpu
         f32vec4 exposure_adapt;      // x frame seconds, y speed brighter, z darker, w compensation EV
         f32vec4 exposure_limits;     // x min EV100, y max EV100, z 1 = jump to target,
                                      // w EV100 to start from when jumping
+
+        // x the Atmosphere buffer, or kNoAtmosphere when the camera sees
+        // none; y the transmittance LUT, z the multiple-scattering LUT, both
+        // sampled; w their sampler, linear and clamped.
+        u32vec4 atmosphere;
+    };
+
+    inline constexpr u32 kNoAtmosphere = ~0u;
+
+    // The atmosphere the camera sees (encke::Atmosphere), in kilometres,
+    // which keeps squared planet radii inside f32's range with digits to
+    // spare. The camera's altitude comes from f64: its distance from the
+    // centre, a large number, differenced in f32 would be off by metres.
+    struct Atmosphere
+    {
+        f32vec4 planet;              // xyz the body's centre in view space, w its radius
+        f32vec4 shell;               // x top radius, y camera altitude above the radius,
+                                     // z cos of the sun's angular radius, w its disk's solid angle (sr)
+        f32vec4 rayleigh;            // rgb scattering per km, w scale height
+        f32vec4 mie;                 // rgb scattering per km, w scale height
+        f32vec4 mie_absorption;      // rgb per km, w phase asymmetry g
+        f32vec4 ozone;               // rgb absorption per km, w altitude of the tent's apex
+        f32vec4 ground;              // rgb the body's albedo, w half the ozone tent's base
+        f32vec4 surroundings;        // rgb the nearest body's albedo, w its sky fill
+        u32vec4 handles;             // x transmittance, y multiple scattering, storage images;
+                                     // z the ambient buffer, writable: sky, then ground radiance;
+                                     // w the sky-view LUT, storage
+        u32vec4 sky_view;            // x the sky-view LUT, sampled; y 1 when the camera is in
+                                     // the air and the LUT was built this frame
     };
 
     // Point and spot lights share one struct and one clustered path. A point
@@ -89,6 +118,13 @@ namespace encke::gpu
         // tile's width over its height. Stretches mesh UVs, which are metres
         // at unit scale, into tile repeats.
         f32vec4 texture_scale;
+
+        // Geomorph, as encke::Geomorph: x start distance, y 1 / (end -
+        // start), z chunk extent, w voxel, all metres.
+        f32vec4 morph;
+        // x coarser neighbours, y finer, z nonzero when the object morphs,
+        // w the bindless MorphTarget buffer.
+        u32vec4 morph_masks;
     };
 
     inline constexpr u32 kNoTexture = ~0u;
@@ -147,9 +183,10 @@ namespace encke::gpu
         u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 272);
+    static_assert(sizeof(Frame) == 288);
+    static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
-    static_assert(sizeof(Object) == 320);
+    static_assert(sizeof(Object) == 352);
     static_assert(sizeof(Push) == 124,"must fit the 128-byte guaranteed minimum");
 }

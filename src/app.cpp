@@ -320,6 +320,12 @@ namespace encke
             renderer_.set_fixed_ev100(ev100);
             log::info("exposure pinned to EV100 %.2f", static_cast<f64>(*ev100));
         }
+
+        if (std::getenv("ENCKE_NO_GEOMORPH") != nullptr)
+        {
+            renderer_.set_geomorph(false);
+            log::info("geomorph off");
+        }
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
         log::info("camera: hold right mouse to look; WASD move, Space/Ctrl up/down, "

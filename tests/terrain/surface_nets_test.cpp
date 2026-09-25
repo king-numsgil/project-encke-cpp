@@ -42,6 +42,62 @@ namespace encke::terrain
             return samples;
         }
 
+        // A chunk's coarse field as sample_chunk lays it out: the sphere at
+        // the parent's corners -1 to cells / 2, two voxels apart, and its
+        // central differences across them.
+        struct Coarse
+        {
+            vector<f32>     values;
+            vector<f32vec3> gradients;
+        };
+
+        Coarse sample_coarse(Sphere const& sphere, i32vec3 const& origin, u32 cells)
+        {
+            // Corners -2 to cells / 2 + 1, for the differences.
+            i32 const  wide  = static_cast<i32>(cells) / 2 + 4;
+            auto const value = [&](i32vec3 const& q) {
+                return static_cast<f32>(sphere.distance(f64vec3{origin + q * 2}));
+            };
+
+            i32 const axis = wide - 2;
+            Coarse    coarse;
+            for (i32 z = -1; z < axis - 1; ++z)
+            {
+                for (i32 y = -1; y < axis - 1; ++y)
+                {
+                    for (i32 x = -1; x < axis - 1; ++x)
+                    {
+                        i32vec3 const q{x, y, z};
+                        coarse.values.push_back(value(q));
+                        coarse.gradients.push_back(f32vec3{
+                            central_difference(value(q - i32vec3{1, 0, 0}), value(q + i32vec3{1, 0, 0}), 2.0),
+                            central_difference(value(q - i32vec3{0, 1, 0}), value(q + i32vec3{0, 1, 0}), 2.0),
+                            central_difference(value(q - i32vec3{0, 0, 1}), value(q + i32vec3{0, 0, 1}), 2.0),
+                        });
+                    }
+                }
+            }
+            return coarse;
+        }
+
+        // A coarse chunk's (cells + 4)^3 samples, two voxels apart.
+        vector<f32> sample_sphere_coarse(Sphere const& sphere, i32vec3 const& origin, u32 cells)
+        {
+            i32 const   axis = static_cast<i32>(cells) + 4;
+            vector<f32> samples;
+            for (i32 z = 0; z < axis; ++z)
+            {
+                for (i32 y = 0; y < axis; ++y)
+                {
+                    for (i32 x = 0; x < axis; ++x)
+                    {
+                        samples.push_back(static_cast<f32>(sphere.distance(f64vec3{origin + (i32vec3{x, y, z} - i32vec3{2}) * 2})));
+                    }
+                }
+            }
+            return samples;
+        }
+
         // Every chunk's triangles merged, vertices identified across chunks
         // by global cell.
         struct Merged
@@ -176,5 +232,63 @@ namespace encke::terrain
         // exercised on every face orientation.
         CHECK(merged.chunks_with_surface > 8);
         check_surface(merged, sphere);
+    }
+
+    TEST_CASE("surface nets morph targets are the parent chunk's own vertices", "[terrain][mesh]")
+    {
+        Sphere const sphere{};
+        u32 const    cells = 16;
+
+        // Fine chunks in every corner of one parent chunk and across its
+        // faces, so targets in cell -1, which belong to the parent's
+        // neighbours, are checked too.
+        for (i32vec3 const& fine_origin : {i32vec3{0, 0, 0}, i32vec3{16, 0, 0}, i32vec3{0, -16, 16}, i32vec3{-16, 0, 0}})
+        {
+            Coarse              coarse = sample_coarse(sphere, fine_origin, cells);
+            CoarseSamples const input{coarse.values, coarse.gradients};
+            SurfaceMesh         fine;
+            surface_nets(sample_sphere(sphere, fine_origin, cells), cells, 1.0, fine, &input);
+            REQUIRE(fine.coarse_positions.size() == fine.positions.size());
+
+            // The parent chunks, two voxels a cell, around the fine one:
+            // their vertices by global parent cell corner.
+            std::map<array<i32, 3>, f64vec3> parent_vertices;
+            for (i32 z = -1; z <= 1; ++z)
+            {
+                for (i32 y = -1; y <= 1; ++y)
+                {
+                    for (i32 x = -1; x <= 1; ++x)
+                    {
+                        i32vec3 const origin = i32vec3{x, y, z} * static_cast<i32>(2 * cells);
+                        SurfaceMesh   parent;
+                        surface_nets(sample_sphere_coarse(sphere, origin, cells), cells, 2.0, parent);
+                        for (size_t i = 0; i < parent.positions.size(); ++i)
+                        {
+                            i32vec3 const corner = origin + parent.cells[i] * 2;
+                            parent_vertices.try_emplace(array<i32, 3>{{corner.x, corner.y, corner.z}},
+                                                        f64vec3{origin} + f64vec3{parent.positions[i]});
+                        }
+                    }
+                }
+            }
+
+            u32 matched   = 0;
+            f64 worst     = 0.0;
+            for (size_t i = 0; i < fine.positions.size(); ++i)
+            {
+                i32vec3 const parent_cell = (fine.cells[i] + i32vec3{2}) / 2 - i32vec3{1};
+                i32vec3 const corner      = fine_origin + parent_cell * 2;
+                auto const    found       = parent_vertices.find(array<i32, 3>{{corner.x, corner.y, corner.z}});
+                if (found == parent_vertices.end())
+                {
+                    continue;
+                }
+                ++matched;
+                worst = std::max(worst, glm::length(f64vec3{fine_origin} + f64vec3{fine.coarse_positions[i]} - found->second));
+            }
+            CAPTURE(fine_origin.x, fine_origin.y, fine_origin.z, matched, worst);
+            CHECK(matched > 100);
+            CHECK(worst < 1e-5);
+        }
     }
 }

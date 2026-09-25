@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -136,6 +137,22 @@ namespace encke::terrain
                 };
             }
             data.indices = mesh.indices;
+
+            data.morphs.resize(mesh.coarse_positions.size());
+            for (size_t i = 0; i < mesh.coarse_positions.size(); ++i)
+            {
+                data.morphs[i] = MorphTarget{
+                    .position = mesh.coarse_positions[i],
+                    .normal   = pack_normal(mesh.coarse_normals[i]),
+                };
+            }
+        }
+
+        // The bit for the neighbour at `offset`, each component -1 to 1, as
+        // Geomorph's masks number them.
+        u32 neighbour_bit(i64vec3 const& offset)
+        {
+            return 1u << static_cast<u32>((offset.x + 1) + 3 * (offset.y + 1) + 9 * (offset.z + 1));
         }
     }
 
@@ -331,8 +348,40 @@ namespace encke::terrain
         return lod;
     }
 
+    Geomorph geomorph_for(BodyTerrain const& terrain, u32 lod, OctreeSettings const& settings)
+    {
+        f64 const extent = extent_metres(terrain, lod);
+        f64 const voxel  = terrain.voxel_size(lod);
+        f64 const k      = settings.split_factor;
+
+        f64 start = lod <= settings.finest_lod ? k * extent : (k + 1.0) * extent;
+        f64 end   = 2.0 * k * extent - 2.0 * voxel;
+        if (lod >= root_lod(terrain))
+        {
+            start = std::numeric_limits<f32>::max();
+            end   = start;
+        }
+
+        return Geomorph{
+            .start   = static_cast<f32>(start),
+            .end     = static_cast<f32>(end),
+            .extent  = static_cast<f32>(extent),
+            .voxel   = static_cast<f32>(voxel),
+            .coarser = 0,
+            .finer   = 0,
+        };
+    }
+
+    f64 surface_clearance(TerrainSampler& sampler, f64vec3 const& camera, OctreeSettings const& settings)
+    {
+        f64 const voxel   = sampler.terrain().voxel_size(settings.finest_lod);
+        u32 const octaves = octaves_for_voxel(sampler.octaves(), voxel);
+        f64 const value   = static_cast<f64>(sampler.sample_value(camera, voxel, octaves));
+        return std::max(value, 0.0) / settings.cull_factor;
+    }
+
     vector<NodeKey> select_leaves(BodyTerrain const& terrain, f64vec3 const& camera, OctreeSettings const& settings,
-                                  function<bool(NodeKey const&)> const& may_have_surface)
+                                  function<bool(NodeKey const&)> const& may_have_surface, f64 clearance)
     {
         vector<NodeKey> leaves;
 
@@ -341,8 +390,9 @@ namespace encke::terrain
             {
                 return;
             }
-            f64 const extent = extent_metres(terrain, key.lod);
-            if (key.lod > settings.finest_lod && distance_to(terrain, key, camera) < settings.split_factor * extent)
+            f64 const extent   = extent_metres(terrain, key.lod);
+            f64 const distance = std::max(distance_to(terrain, key, camera), clearance);
+            if (key.lod > settings.finest_lod && distance < settings.split_factor * extent)
             {
                 i64 const half = extent_of(key.lod - 1);
                 for (i64 z = 0; z < 2; ++z)
@@ -449,11 +499,15 @@ namespace encke::terrain
             TerrainSampler&    sampler = body->sampler(worker);
             ChunkRequest const request = sampler.chunk(key.origin, key.lod);
 
-            vector<f32> samples(request.sample_count());
-            sampler.sample_chunk(request, samples);
+            // The parent LOD's field too, for the morph targets.
+            vector<f32>         samples(request.sample_count());
+            vector<f32>         coarse_values(request.coarse_count());
+            vector<f32vec3>     coarse_gradients(request.coarse_count());
+            CoarseSamples const coarse{coarse_values, coarse_gradients};
+            sampler.sample_chunk(request, samples, &coarse);
 
             SurfaceMesh mesh;
-            surface_nets(samples, request.cells, body->terrain->voxel_size(key.lod), mesh);
+            surface_nets(samples, request.cells, body->terrain->voxel_size(key.lod), mesh, &coarse);
 
             f64vec3 const corner = f64vec3{key.origin} * body->terrain->base_voxel_size;
             auto          data   = std::make_shared<MeshData>();
@@ -507,6 +561,122 @@ namespace encke::terrain
         node.ready = true;
     }
 
+    void TerrainOctree::update_neighbours(Body& body, entt::registry& registry, span<NodeKey const> changed) const
+    {
+        auto const shown = [&](NodeKey const& key) {
+            auto const found = body.nodes.find(key);
+            return found != body.nodes.end() && found->second.displayed;
+        };
+        auto const any_child_shown = [&](NodeKey const& key) {
+            if (key.lod == 0)
+            {
+                return false;
+            }
+            i64 const half = extent_of(key.lod - 1);
+            for (i64 z = 0; z < 2; ++z)
+            {
+                for (i64 y = 0; y < 2; ++y)
+                {
+                    for (i64 x = 0; x < 2; ++x)
+                    {
+                        if (shown(NodeKey{.lod = key.lod - 1, .origin = key.origin + i64vec3{x, y, z} * half}))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+        auto const each_neighbour = [](NodeKey const& key, auto const& visit) {
+            i64 const extent = extent_of(key.lod);
+            for (i64 z = -1; z <= 1; ++z)
+            {
+                for (i64 y = -1; y <= 1; ++y)
+                {
+                    for (i64 x = -1; x <= 1; ++x)
+                    {
+                        i64vec3 const offset{x, y, z};
+                        if (offset != i64vec3{0})
+                        {
+                            visit(offset, NodeKey{.lod = key.lod, .origin = key.origin + offset * extent});
+                        }
+                    }
+                }
+            }
+        };
+
+        // Neighbours on screen differ by at most one LOD once the octree has
+        // settled, so a changed node's neighbours are at its LOD, one
+        // coarser, or one finer.
+        std::unordered_set<NodeKey, NodeKeyHash> affected;
+        for (NodeKey const& key : changed)
+        {
+            if (shown(key))
+            {
+                affected.insert(key);
+            }
+            each_neighbour(key, [&](i64vec3 const&, NodeKey const& near) {
+                if (shown(near))
+                {
+                    affected.insert(near);
+                }
+                if (NodeKey const parent = parent_of(near); shown(parent))
+                {
+                    affected.insert(parent);
+                }
+                if (near.lod > 0)
+                {
+                    i64 const half = extent_of(near.lod - 1);
+                    for (i64 z = 0; z < 2; ++z)
+                    {
+                        for (i64 y = 0; y < 2; ++y)
+                        {
+                            for (i64 x = 0; x < 2; ++x)
+                            {
+                                NodeKey const child{.lod = near.lod - 1, .origin = near.origin + i64vec3{x, y, z} * half};
+                                if (shown(child))
+                                {
+                                    affected.insert(child);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        for (NodeKey const& key : affected)
+        {
+            Node const& node = body.nodes.at(key);
+            if (node.entity == entt::null)
+            {
+                continue;
+            }
+
+            u32 coarser = 0;
+            u32 finer   = 0;
+            each_neighbour(key, [&](i64vec3 const& offset, NodeKey const& near) {
+                if (shown(near))
+                {
+                    return;
+                }
+                if (shown(parent_of(near)))
+                {
+                    coarser |= neighbour_bit(offset);
+                }
+                else if (any_child_shown(near))
+                {
+                    finer |= neighbour_bit(offset);
+                }
+            });
+
+            Geomorph& geomorph = registry.get<Geomorph>(node.entity);
+            geomorph.coarser   = coarser;
+            geomorph.finer     = finer;
+        }
+    }
+
     void TerrainOctree::update(Scene& scene, AssetManager& assets, WorkerPool& pool)
     {
         assets_ = &assets;
@@ -556,7 +726,7 @@ namespace encke::terrain
                     known->second = chunk_may_have_surface(*body->planner, key.origin, key.lod, settings_.cull_factor);
                 }
                 return known->second;
-            });
+            }, surface_clearance(*body->planner, eye, settings_));
             std::unordered_set<NodeKey, NodeKeyHash> const target(leaves.begin(), leaves.end());
 
             for (auto& [key, node] : body->nodes)
@@ -621,10 +791,18 @@ namespace encke::terrain
                 }
             }
 
+            // Nodes that came on or went off this frame: their neighbours'
+            // Geomorph masks change.
+            vector<NodeKey> changed;
+
             // Off a node the camera no longer wants once what replaces it is
             // ready: its target ancestor when merging, every leaf inside it
             // when splitting.
-            auto const hide = [&](Node& node) {
+            auto const hide = [&](NodeKey const& key, Node& node) {
+                if (node.displayed)
+                {
+                    changed.push_back(key);
+                }
                 if (node.entity != entt::null)
                 {
                     registry.destroy(node.entity);
@@ -665,7 +843,7 @@ namespace encke::terrain
             }
             for (NodeKey const& key : retire)
             {
-                hide(body->nodes.at(key));
+                hide(key, body->nodes.at(key));
                 body->nodes.erase(key);
             }
 
@@ -691,8 +869,10 @@ namespace encke::terrain
                                                                   .roughness = 1.0f,
                                                                   .metallic  = 1.0f,
                                                               });
+                    registry.emplace<Geomorph>(node.entity, geomorph_for(terrain, leaf.lod, settings_));
                 }
                 node.displayed = true;
+                changed.push_back(leaf);
             }
 
             // Meshed but never shown, and no longer wanted.
@@ -702,9 +882,11 @@ namespace encke::terrain
                 {
                     return false;
                 }
-                hide(node);
+                hide(key, node);
                 return true;
             });
+
+            update_neighbours(*body, registry, changed);
 
             // Settled: exactly the leaves on screen, nothing in flight.
             bool const settled =

@@ -62,9 +62,10 @@ namespace encke::terrain
         u32 samples_per_axis() const { return cells + 4; }
         u32 sample_count() const { return samples_per_axis() * samples_per_axis() * samples_per_axis(); }
 
-        // The samples at even offsets from the origin, 0, 2, ..., cells: the
-        // next-coarser LOD's grid points inside the chunk.
-        u32 coarse_per_axis() const { return cells / 2 + 1; }
+        // The next-coarser LOD's grid points at even offsets from the origin,
+        // -2, 0, 2, ..., cells: the corners of every parent cell holding a
+        // cell the mesher places vertices in, -1 to cells - 1.
+        u32 coarse_per_axis() const { return cells / 2 + 2; }
         u32 coarse_count() const { return coarse_per_axis() * coarse_per_axis() * coarse_per_axis(); }
     };
 
@@ -72,8 +73,8 @@ namespace encke::terrain
     // coarse_octaves, and its gradient by central differences across the
     // coarse voxel: what the parent LOD's chunk samples there, and the
     // gradient a mesher takes over the parent's samples. For geomorphing
-    // toward the parent. Point (i, j, k) is chunk sample (2i + 2, 2j + 2,
-    // 2k + 2), x fastest.
+    // toward the parent. Point (i, j, k) is chunk sample (2i, 2j, 2k): grid
+    // offset 2i - 2 from the origin, the parent's corner i - 1. x fastest.
     struct CoarseSamples
     {
         span<f32>     values;      // request.coarse_count() each

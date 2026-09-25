@@ -278,6 +278,7 @@ namespace encke
                                               .sky_fill      = 0.1f,
                                           });
             registry.emplace<terrain::PlanetTerrain>(earth, terrain::PlanetTerrain{.terrain = std::move(terrain)});
+            registry.emplace<Atmosphere>(earth);
         }
 
         // The Moon, straight up at its real distance from the Earth's centre.

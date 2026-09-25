@@ -16,6 +16,7 @@
 
 import lib.bindless;
 import lib.gpu_types;
+import lib.morph;
 import lib.normal;
 import lib.screen;
 
@@ -51,11 +52,12 @@ struct GBuffer
 };
 
 [shader("vertex")]
-VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID)
+VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint vertex : SV_VulkanVertexID)
 {
     // SV_VulkanInstanceID includes firstInstance; SV_InstanceID would not.
-    GpuObject object = load_object(instance);
-    float4    local  = float4(input.position, 1.0f);
+    GpuObject object  = load_object(instance);
+    Morphed   morphed = morph_vertex(object, vertex, input.position, input.normal);
+    float4    local   = float4(morphed.position, 1.0f);
 
     // Mesh UVs are metres at unit scale. Scaling by how much the object's
     // scale stretches the tangent and bitangent turns them into metres on
@@ -69,7 +71,7 @@ VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID)
     output.position = mul(object.mvp, local);
     output.current  = output.position;
     output.previous = mul(object.prev_mvp, local);
-    output.normal   = mul(object.normal_view, float4(input.normal, 0.0f)).xyz;
+    output.normal   = mul(object.normal_view, float4(morphed.normal, 0.0f)).xyz;
     output.tangent  = float4(mul(object.model_view, float4(input.tangent.xyz, 0.0f)).xyz,
                              input.tangent.w);
     output.uv       = input.uv * stretch;

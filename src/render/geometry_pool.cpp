@@ -64,7 +64,9 @@ namespace encke
         if (!vertex_buffer_.init_device(allocator, device, VkDeviceSize{vertex_capacity} * sizeof(Vertex),
                                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | kTarget) ||
             !index_buffer_.init_device(allocator, device, VkDeviceSize{index_capacity} * sizeof(u32),
-                                       VK_BUFFER_USAGE_INDEX_BUFFER_BIT | kTarget))
+                                       VK_BUFFER_USAGE_INDEX_BUFFER_BIT | kTarget) ||
+            !morph_buffer_.init_device(allocator, device, VkDeviceSize{vertex_capacity} * sizeof(MorphTarget),
+                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | kTarget))
         {
             return false;
         }
@@ -104,15 +106,22 @@ namespace encke
         copies_.clear();
         retired_.clear();
 
+        morph_buffer_.shutdown();
         index_buffer_.shutdown();
         vertex_buffer_.shutdown();
     }
 
-    optional<u32> GeometryPool::add(span<Vertex const> vertices, span<u32 const> indices)
+    optional<u32> GeometryPool::add(span<Vertex const> vertices, span<u32 const> indices,
+                                    span<MorphTarget const> morphs)
     {
         if (vertices.empty() || indices.empty())
         {
             log::error("mesh needs both vertices and indices");
+            return nullopt;
+        }
+        if (!morphs.empty() && morphs.size() != vertices.size())
+        {
+            log::error("mesh has %zu morph targets for %zu vertices", morphs.size(), vertices.size());
             return nullopt;
         }
 
@@ -158,6 +167,7 @@ namespace encke
             .mesh     = mesh,
             .vertices = vector<Vertex>(vertices.begin(), vertices.end()),
             .indices  = vector<u32>(indices.begin(), indices.end()),
+            .morphs   = vector<MorphTarget>(morphs.begin(), morphs.end()),
         });
 
         log::info("mesh %u: %zu vertices, %zu indices", mesh, vertices.size(), indices.size());
@@ -204,17 +214,19 @@ namespace encke
             Upload const&      upload       = uploads_[done];
             VkDeviceSize const vertex_bytes = upload.vertices.size() * sizeof(Vertex);
             VkDeviceSize const index_bytes  = upload.indices.size() * sizeof(u32);
+            VkDeviceSize const morph_bytes  = upload.morphs.size() * sizeof(MorphTarget);
+            VkDeviceSize const total        = vertex_bytes + index_bytes + morph_bytes;
 
-            // Both allocations' alignment slack included.
-            if (vertex_bytes + index_bytes + 32 > staging.bytes_per_slot())
+            // Every allocation's alignment slack included.
+            if (total + 48 > staging.bytes_per_slot())
             {
                 log::error("mesh %u needs %llu bytes of staging, over the %llu a frame allows; "
                            "it never draws",
-                           upload.mesh, static_cast<unsigned long long>(vertex_bytes + index_bytes),
+                           upload.mesh, static_cast<unsigned long long>(total),
                            static_cast<unsigned long long>(staging.bytes_per_slot()));
                 continue;
             }
-            if (vertex_bytes + index_bytes + 32 > staging.remaining())
+            if (total + 48 > staging.remaining())
             {
                 break;
             }
@@ -226,6 +238,18 @@ namespace encke
             std::memcpy(indices->data, upload.indices.data(), index_bytes);
 
             Range& range = meshes_[upload.mesh].range;
+
+            if (morph_bytes > 0)
+            {
+                optional<StagingArena::Allocation> const morphs = staging.allocate(morph_bytes);
+                std::memcpy(morphs->data, upload.morphs.data(), morph_bytes);
+                copies_.push_back(Copy{
+                    .source = morphs->buffer,
+                    .target = morph_buffer_.handle(),
+                    .region = {morphs->offset, VkDeviceSize{range.first_vertex} * sizeof(MorphTarget),
+                               morph_bytes},
+                });
+            }
             copies_.push_back(Copy{
                 .source = vertices->buffer,
                 .target = vertex_buffer_.handle(),
@@ -266,8 +290,9 @@ namespace encke
             .srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT,
             .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
             .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
-                             VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT,
+                             VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT |
+                             VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
         };
 
         VkDependencyInfo const dependency{

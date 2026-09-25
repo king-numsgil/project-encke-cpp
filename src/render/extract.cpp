@@ -39,6 +39,7 @@ namespace encke
 
         list.star         = starlight_at(registry, list.camera.position);
         list.surroundings = surroundings_at(registry, list.camera.position);
+        list.atmosphere   = atmosphere_at(registry, list.camera.position);
 
         for (auto const [entity, world, renderable] :
              registry.view<WorldTransform const, Renderable const>().each())
@@ -63,6 +64,8 @@ namespace encke
             f64vec3 const          centre = (min + max) * 0.5;
             f64vec3 const          extent = (max - min) * 0.5;
 
+            Geomorph const* const geomorph = registry.try_get<Geomorph>(entity);
+
             list.objects.push_back(RenderObject{
                 .entity        = entity,
                 .model         = model_matrix(world),
@@ -70,6 +73,7 @@ namespace encke
                 .bounds_centre = world.position + world.rotation * (centre * size),
                 .bounds_radius = glm::length(extent * size),
                 .renderable    = renderable,
+                .geomorph      = geomorph != nullptr ? optional<Geomorph>{*geomorph} : nullopt,
             });
         }
 

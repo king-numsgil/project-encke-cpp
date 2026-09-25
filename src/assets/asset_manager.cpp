@@ -300,7 +300,8 @@ namespace encke
                 MeshHandle const handle =
                     add_mesh(name + " " + std::to_string(primitive_index),
                              MeshData{.vertices = std::move(primitive.vertices),
-                                      .indices  = std::move(primitive.indices)});
+                                      .indices  = std::move(primitive.indices),
+                                      .morphs   = {}});
 
                 mesh.parts.push_back(ModelPart{
                     .mesh      = handle,
