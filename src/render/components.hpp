@@ -48,6 +48,17 @@ namespace encke
         u32 finer   = 0;
     };
 
+    // What terrain chunks are drawn with: gravel, rock, grass, snow and sand,
+    // blended by each vertex's weights (TerrainVertex::materials), each with
+    // a flat linear colour drawn until its maps have landed. Every tile must
+    // divide the period terrain UVs are offset by, or chunks' textures would
+    // not meet.
+    struct TerrainPalette
+    {
+        array<MaterialHandle, 5> materials;
+        array<f32vec3, 5>        albedo;
+    };
+
     // A point light at the entity's world position, or a spot facing the
     // entity's -Z when cos_outer is above -1. Only spots cast shadows;
     // casts_shadow on a point light is ignored. The entity's scale is not

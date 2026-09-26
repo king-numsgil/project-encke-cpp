@@ -76,6 +76,7 @@ src/
     pch.hpp           precompiled header
     types.hpp         global type prelude
     log.{hpp,cpp}     unbuffered stderr diagnostics, millisecond stamps
+    sanitizers.cpp    ASan's default options for this binary, under ASan only
   platform/
     window.{hpp,cpp}  SDL3 init, window, event pump -> FrameEvents
     cpu.{hpp,cpp}     physical and logical core counts, via pytorch/cpuinfo
@@ -115,7 +116,7 @@ src/
     material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
     gltf.{hpp,cpp}       glTF -> CPU meshes, nodes, materials; image decoding, via fastgltf
     pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
-    mesh.{hpp,cpp}       Vertex, MorphTarget, procedural cube and sphere
+    mesh.{hpp,cpp}       Vertex, TerrainVertex, procedural cube and sphere
     geometry_pool.{hpp,cpp} every mesh in one vertex and one index buffer, VMA virtual blocks
     config.hpp           every renderer capacity and tuning constant
     shadows.{hpp,cpp}    cascade fitting and spot selection, f64, CPU only
@@ -225,8 +226,9 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   like textures and draw from the frame they are staged in; until then
   they are left out of the draw lists. Terrain chunks are released as the
   octree swaps them; see *The Earth as terrain* for the ordering it needs.
-  Beside the vertex buffer is a storage buffer of `MorphTarget`s, indexed
-  like it, which only geomorphing meshes fill; see *Geomorph and seams*.
+  Beside the vertex buffer is a storage buffer of `TerrainVertex`, indexed
+  like it, which only terrain chunks fill: each vertex's morph target and its
+  ground materials; see *Geomorph and seams* and *Ground materials*.
 - **Each raster pass is one indirect draw.** `upload()` writes one
   `VkDrawIndexedIndirectCommand` per object into a per-frame buffer (the
   G-buffer's first, then each shadow view's casters), and `record()` binds
@@ -555,8 +557,9 @@ inside the shell.
   horizon in the wrong place from the ground.
 - **The ground that shadows the air is 10 km inside the radius**
   (`kGroundDepth`). The radius is a reference sphere the terrain rises and
-  falls about; the pole's ground is 778 m below it, and against the sphere
-  itself the whole scene sat in the planet's shadow. The air between is at
+  falls about, by kilometres; when it was written the pole's ground was
+  778 m below it, and against the sphere itself the whole scene sat in the
+  planet's shadow. The air between is at
   sea-level density, which leaves a grazing ray dark anyway.
 - **Transmittance and multiple scattering are LUTs built once**, when the
   atmosphere the camera sees changes (`lut_atmosphere_`), and kept in
@@ -801,8 +804,10 @@ Known gaps:
 (`terrain::example_planet`) whose entity is a radius below `kWorldOrigin`,
 at its centre, so `kWorldOrigin` is the pole of the sphere; see *The Earth as
 terrain* for the meshing. The object field does not stand there. The
-terrain's height puts the ground under the pole somewhere else -- 778 m below
-the sphere with seed 1337 -- so `origin()` is moved onto it. The ground is
+terrain's height puts the ground under the pole somewhere else -- 72 m above
+the sphere with seed 1337, logged at startup with the pole's climate -- so
+`origin()` is moved onto it. It is cold grassland and gravel there, on a
+knoll the start pose looks across. The ground is
 found by `terrain::GroundProbe`, which marches and bisects the point query at
 the octree's finest LOD, the LOD drawn around the camera there; Surface Nets
 at 0.25 m voxels sits within centimetres of it. The ground is not level: the
@@ -821,8 +826,9 @@ is a few pixels across, as it should be; look straight up to find it.
 
 ## Textures
 
-Six CC0 sets from ambientCG live in `assets/textures/`, 1K JPGs, with their
-source and licence in `CREDITS.md`. Ground110 covers every terrain body. They are read from the source tree through
+Ten CC0 sets from ambientCG live in `assets/textures/`, 1K JPGs, with their
+source and licence in `CREDITS.md`. Five of them are the terrain's palette;
+see *Ground materials*. They are read from the source tree through
 `ENCKE_ASSET_DIR`, which CMake bakes in, rather than copied beside the
 executable like SPIR-V: tens of megabytes that rarely change. A shipped build
 would need that revisited.
@@ -908,16 +914,17 @@ non-uniformly scaled sphere would smear.
   so neither wraps nor pinches.
 - **Terrain**: a cube projection from the body's centre. Each vertex takes
   the face its position points through, and u and v are its other two
-  body-relative coordinates in metres, less a whole number of tiles taken
-  from its chunk's corner on that face, in f64. **The offset is load-bearing.**
-  Without it UVs reach thousands of kilometres, where f32 steps by a hundred
-  texels, and the GPU's per-pixel interpolation rounds differently as the
-  view turns: far from the pole the texture and its normal map swam, which
-  read as the ground popping while the geometry was still to 0.0001 cm. The
-  texture repeats, so the offset changes nothing; neighbours' offsets differ
-  by whole tiles, so it stays continuous across chunks; and a chunk's UVs are
-  no bigger than the chunk. The tile is the material's f32, so the offsets are
-  whole tiles to the shader too. Triangles along the cube's edges, whose
+  body-relative coordinates in metres, less a whole number of 16 m periods
+  (`kUvPeriod`) taken from its chunk's corner on that face, in f64. **The
+  offset is load-bearing.** Without it UVs reach thousands of kilometres,
+  where f32 steps by a hundred texels, and the GPU's per-pixel interpolation
+  rounds differently as the view turns: far from the pole the texture and its
+  normal map swam, which read as the ground popping while the geometry was
+  still to 0.0001 cm. Every palette material's tile divides the period, so the
+  offset changes nothing; neighbours' offsets differ by whole periods, so it
+  stays continuous across chunks; and a chunk's UVs are no bigger than the
+  chunk. Tiles and period are powers of two, exact in f32 as in f64, so the
+  offsets are whole tiles to the shader too. Triangles along the cube's edges, whose
   corners pick different faces, are smeared, and show from orbit as faint
   lines. The tangent is +u laid into the surface, with w chosen so the
   bitangent points to -v.
@@ -1093,7 +1100,7 @@ Known gaps:
 - No Node Editor live link. The port builds without the editor tools, and
   its `NodeEditorIpc` library is not packaged.
 - `example_planet` stands in for authored graphs; its channel graphs are built
-  in code through `encode_fbm_graph`.
+  in code through `GraphBuilder`.
 - Bit-exactness holds within one build. GCC and clang builds of FastNoise2
   are not known to agree with each other.
 
@@ -1119,7 +1126,11 @@ and a grid corner (`NodeKey`), and its children are found by arithmetic.
   that a factor of 0.3 does lose surface, which checking only the culled
   chunks next to kept ones finds too: the surface is closed and connected, so
   if it crossed a culled chunk it would cross one of those. Results are
-  cached per node for the session.
+  cached per node for the session. The factor is 2.0: `planet_test` also
+  measures the example planet's slope at its surface, over half a chunk edge,
+  and its mountain belts reach about 1.9 at LOD 4 and 1.6 at LOD 8, over the
+  1.5 it used to be. The looser cull keeps about a third more candidate
+  chunks near the surface, which settle has to sample.
 - **Meshing** runs on `WorkerPool`: `std::jthread`s, like `AssetWorker`, one
   per physical core less one, at background priority. A free worker takes the
   queued job with the lowest priority, which the octree rewrites every frame
@@ -1157,10 +1168,8 @@ and a grid corner (`NodeKey`), and its children are found by arithmetic.
   the seams. `surface_nets_test` merges chunks of an analytic sphere by global
   cell and requires every directed edge exactly once each way, outward
   winding, and normals within 1.5 degrees of the analytic.
-- **Material**: the Ground110 ambientCG set, tiling every 2.1 m, one for
-  every body; UVs are described under *Textures*. One material per object and
-  no vertex colour means there is no variation by height or slope: that
-  wants a vertex colour or a splat map.
+- **Materials**: five blended per vertex by climate, altitude and slope; see
+  *Ground materials*. UVs are described under *Textures*.
 - **Captures** wait for `TerrainOctree::idle()`, every body showing exactly
   its leaves, as well as asset streaming. The camera must not move.
 - The test scene's object field stands on the ground below the pole; see
@@ -1184,10 +1193,12 @@ neighbour changed.
   quads, wherever fine and coarse agree on which parent cells the surface
   crosses. Where the parent cell has no vertex, the target is the vertex
   itself.
-- **The targets are a second vertex stream.** `MorphTarget` (position, packed
-  octahedral normal, 16 bytes) lives in `GeometryPool`'s morph buffer, element
-  for element beside the vertex buffer, uploaded with the mesh when it has
-  targets. `shaders/lib/morph.slang` reads it at `SV_VulkanVertexID`, which is
+- **The targets are a second vertex stream.** `TerrainVertex` (target
+  position, packed octahedral normal, and the ground materials, 20 bytes)
+  lives in `GeometryPool`'s terrain buffer, element for element beside the
+  vertex buffer, uploaded with the mesh when it has one. The G-buffer and
+  shadow passes load it (`load_terrain_vertex` in `shaders/lib/morph.slang`)
+  at `SV_VulkanVertexID`, which is
   `gl_VertexIndex` and includes the draw's `vertexOffset`. **Not
   `SV_VertexID`**: Slang lowers that to `gl_VertexIndex - gl_BaseVertex`, as
   it does `SV_InstanceID`, and every chunk read the first mesh's targets,
@@ -1251,6 +1262,71 @@ Known gaps:
   asset manager.
 - The octree reads the camera's world transform from the previous
   `Scene::update`, a frame behind.
+- At LOD 0 the detail octaves are steeper than the cull factor over a chunk,
+  about 2.5, and were before the mountain belts too (2.4). A chunk whose
+  centre is further from the surface than 2 half-diagonals, on ground that
+  steep, is culled with surface in it. No hole has been seen; `planet_test`
+  leaves LOD 0 out of its check rather than pretend otherwise.
+
+### The example planet: continents, ranges and climate
+
+`terrain::example_planet` builds its macro graphs in code with
+`terrain::GraphBuilder`, which assembles FastNoise2 nodes (simplex, FBm,
+ridged, domain warp, add, multiply, remap, power) and encodes them as the
+Node Editor would, so an authored graph can replace any of them.
+
+- **Height**: domain-warped continents, a few kilometres of relief over
+  hundreds, plus mountain belts: a low-frequency mask, 0 across most of the
+  planet, times ridged noise at 60 km down to spurs of 4 km. FastNoise2's
+  ridged fractal is `1 - |n|`, high almost everywhere with narrow valleys, a
+  plateau with gullies; raised to the power 2.5, most of it falls away and
+  the crests stay, which is a range. Peaks reach about 4.5 km. Every term is
+  bounded so the graph stays inside [-1, 1], which `height_bound` assumes.
+- **The detail layer follows the belts**: rougher and more ridged in them,
+  through the same mask built again in those channels' graphs with the same
+  seed offset, which gives the same values.
+- **Climate** is two more macro channels, Temperature and Moisture, which the
+  field never samples (`MacroField::sample` takes a channel range; the field
+  asks for the first four). `TerrainSampler::sample_climate` reads them at
+  mesh vertices. They only perturb what latitude and altitude set; see
+  *Ground materials*.
+
+### Ground materials
+
+Terrain chunks blend five ambientCG sets, `TerrainPalette` in
+`render/components.hpp`, in this order: gravel (Ground110), rock (Rock051),
+grass (Grass004), snow (Snow010A), sand (Ground093C).
+
+- **Weights are per vertex, computed on the CPU** when a chunk is meshed
+  (`ground_materials` in `terrain/planet.cpp`), and packed as four bytes in
+  the chunk's `TerrainVertex` stream beside its morph target: rock, grass,
+  snow, sand, with gravel whatever they leave. Rock is by slope against the
+  body's radial up. Among what rock leaves: snow where it is cold, and more
+  readily on wet ground, and only on the flat; sand where it is hot and dry;
+  grass where it is mild and wet; gravel for the rest.
+- **Climate is latitude and altitude, perturbed by noise.** 26°C at the
+  equator, 20 degrees colder at a pole, 6.5 per kilometre up, plus the
+  Temperature channel's few degrees. Moisture is the Moisture channel, less
+  a dry belt around 28° and plus a wet one at the equator. So the tropics
+  are green, the subtropics carry deserts, high ground is snowbound at any
+  latitude, and the pole, near the radius, is cold grass and gravel.
+- **The G-buffer samples only the two heaviest materials** of the five, with
+  explicit UV gradients: which two varies across a quad, and implicit
+  derivatives in that divergent flow are undefined. Each material has its
+  own tile; the object's UVs arrive in metres (the renderer sends a texture
+  scale of 1 for palette objects) and each sample divides by its tile.
+- **The palette is per frame** (`Frame::terrain`, a buffer of
+  `gpu::TerrainMaterial`), each material resolved as an object's is: its
+  maps once all have landed, its flat colour until then. `morph_masks.z` is
+  the terrain object's flags: 1 morphs, 2 blends the palette.
+- The scene logs the climate channels at the pole on startup, for tuning.
+
+Known gaps:
+
+- Blending is linear between the two heaviest materials, over the distance
+  between vertices; no height-based blend, so transitions are soft washes.
+- Cube-projected UVs stretch rock along steep slopes; triplanar would not.
+- One palette for every body.
 
 ## Camera control
 
@@ -1563,6 +1639,16 @@ mimalloc ASan-aware, but it is unreachable through vcpkg (the port exposes only
 compiler, while vcpkg builds dependencies with ucrt64 GCC and the preset uses
 clang64. Even if built, ASan's own allocator is the stronger detector — it has
 redzones and a free quarantine that mimalloc has no equivalent for.
+
+**ASan's container-overflow check is off** (`__asan_default_options` in
+`src/core/sanitizers.cpp`, which the runtime reads before main; it takes
+effect under this MinGW toolchain). It depends on every piece of code that
+touches a `std::vector` annotating it, and the vcpkg ports are built without
+sanitizers: FastNoise2's graph decoder grows a vector in its own
+uninstrumented code while the linker hands it some of our instrumented
+template instances, and ASan aborted inside FastNoise2 on a false positive
+once the macro graphs were deep enough to make it reallocate. Heap and stack
+redzones still catch real overflows.
 
 ### Built by CPM, not vcpkg, and why
 

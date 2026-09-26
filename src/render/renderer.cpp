@@ -310,12 +310,16 @@ namespace encke
             resources.shadow_matrices_handle = bindless_.add_storage_buffer(
                 resources.shadow_matrices.handle(), resources.shadow_matrices.size());
 
-            if (!resources.atmosphere.init_mapped(allocator, sizeof(gpu::Atmosphere), storage))
+            if (!resources.atmosphere.init_mapped(allocator, sizeof(gpu::Atmosphere), storage) ||
+                !resources.terrain.init_mapped(allocator, gpu::kTerrainMaterialCount * sizeof(gpu::TerrainMaterial),
+                                               storage))
             {
                 return false;
             }
             resources.atmosphere_handle =
                 bindless_.add_storage_buffer(resources.atmosphere.handle(), resources.atmosphere.size());
+            resources.terrain_handle =
+                bindless_.add_storage_buffer(resources.terrain.handle(), resources.terrain.size());
         }
 
         if (!create_shadow_maps())
@@ -348,8 +352,8 @@ namespace encke
         {
             return false;
         }
-        morph_handle_ =
-            bindless_.add_storage_buffer(geometry_.morph_buffer().handle(), geometry_.morph_buffer().size());
+        terrain_vertices_handle_ =
+            bindless_.add_storage_buffer(geometry_.terrain_buffer().handle(), geometry_.terrain_buffer().size());
 
         if (!create_material_resources() || !create_atmosphere_resources())
         {
@@ -740,7 +744,7 @@ namespace encke
         // uploads within the budget from this frame on.
         for (AssetManager::ReadyMesh& ready : assets.take_ready_meshes())
         {
-            optional<u32> const pool = geometry_.add(ready.data.vertices, ready.data.indices, ready.data.morphs);
+            optional<u32> const pool = geometry_.add(ready.data.vertices, ready.data.indices, ready.data.terrain);
             if (!pool.has_value())
             {
                 continue;   // logged; the mesh never draws
@@ -1181,6 +1185,33 @@ namespace encke
             }
         }
 
+        // The terrain palette, each material resolved as an object's is: its
+        // maps once every one has landed, its flat colour until then.
+        u32 terrain_handle = BindlessSet::kInvalid;
+        if (terrain_palette_.has_value())
+        {
+            auto* const palette = static_cast<gpu::TerrainMaterial*>(resources.terrain.mapped());
+            for (size_t index = 0; index < gpu::kTerrainMaterialCount; ++index)
+            {
+                u32vec4 textures{gpu::kNoTexture};
+                f32     inverse_tile = 1.0f;
+                if (MaterialAsset const* material = assets.material(terrain_palette_->materials[index]))
+                {
+                    if (optional<u32vec4> const live = material_textures(*material, assets))
+                    {
+                        textures = *live;
+                    }
+                    inverse_tile = 1.0f / material->tile.x;
+                }
+                gpu::TerrainMaterial const entry{
+                    .textures = textures,
+                    .params   = f32vec4{inverse_tile, terrain_palette_->albedo[index]},
+                };
+                std::memcpy(&palette[index], &entry, sizeof(entry));
+            }
+            terrain_handle = resources.terrain_handle;
+        }
+
         gpu::Frame const frame{
             .projection    = f32mat4{jittered},
             .screen        = f32vec4{static_cast<f32>(extent.width), static_cast<f32>(extent.height),
@@ -1219,6 +1250,7 @@ namespace encke
                                         lut_sampler_handle_},
             .sky_reprojection = f32mat4{sky_reprojection},
             .post             = f32vec4{taa_ ? config::kCasSharpness : 0.0f, 0.0f, 0.0f, 0.0f},
+            .terrain          = u32vec4{terrain_handle, 0u, 0u, 0u},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 
@@ -1313,14 +1345,23 @@ namespace encke
                                     : f32vec4{1.0f};
             }
 
+            // Terrain chunks, the objects with a Geomorph, carry a
+            // TerrainVertex each: flag 1 morphs toward its target, flag 2
+            // blends the terrain palette by its materials, whose UVs are then
+            // metres, left for each material's own tile.
             f32vec4 morph{0.0f};
             u32vec4 morph_masks{0u};
-            if (object.geomorph.has_value() && geomorph_)
+            if (object.geomorph.has_value())
             {
                 Geomorph const& geomorph = *object.geomorph;
+                u32 const       flags    = (geomorph_ ? 1u : 0u) | (terrain_palette_.has_value() ? 2u : 0u);
                 morph       = f32vec4{geomorph.start, 1.0f / std::max(geomorph.end - geomorph.start, 1e-3f),
                                       geomorph.extent, geomorph.voxel};
-                morph_masks = u32vec4{geomorph.coarser, geomorph.finer, 1u, morph_handle_};
+                morph_masks = u32vec4{geomorph.coarser, geomorph.finer, flags, terrain_vertices_handle_};
+                if (terrain_palette_.has_value())
+                {
+                    texture_scale = f32vec4{1.0f};
+                }
             }
 
             gpu::Object const gpu_object{
@@ -2382,6 +2423,7 @@ namespace encke
             resources.shadow_views.shutdown();
             resources.shadow_matrices.shutdown();
             resources.atmosphere.shutdown();
+            resources.terrain.shutdown();
         }
 
         for (Image& map : shadow_maps_)

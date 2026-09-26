@@ -27,7 +27,12 @@ struct VertexIn
 [shader("vertex")]
 float4 vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint vertex : SV_VulkanVertexID) : SV_Position
 {
-    GpuObject object  = load_object(instance % load_frame().counts.z);
-    Morphed   morphed = morph_vertex(object, vertex, input.position, float3(0.0f, 1.0f, 0.0f));
-    return mul(load_shadow_matrix(instance), float4(morphed.position, 1.0f));
+    GpuObject object   = load_object(instance % load_frame().counts.z);
+    float3    position = input.position;
+    if (is_terrain(object))
+    {
+        position = morph_vertex(object, load_terrain_vertex(object, vertex), position, float3(0.0f, 1.0f, 0.0f))
+                       .position;
+    }
+    return mul(load_shadow_matrix(instance), float4(position, 1.0f));
 }

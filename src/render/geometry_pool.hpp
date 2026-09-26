@@ -26,9 +26,9 @@ namespace encke
     // within the budget, record() records the copies. A mesh is drawable
     // from the frame it is staged in.
     //
-    // Beside the vertex buffer is a storage buffer of MorphTargets, element
+    // Beside the vertex buffer is a storage buffer of TerrainVertex, element
     // for element: a mesh's vertex range addresses both. Only meshes that
-    // bring targets fill their range of it; the rest is never read.
+    // bring them fill their range of it; the rest is never read.
     class GeometryPool
     {
     public:
@@ -55,10 +55,10 @@ namespace encke
 
         // Reserves room and queues the data for upload. The id is valid at
         // once; the mesh draws once resident. Ids are dense and reused after
-        // release. Nullopt, logged, when the pool is full. `morphs` is empty
+        // release. Nullopt, logged, when the pool is full. `terrain` is empty
         // or one per vertex.
         optional<u32> add(span<Vertex const> vertices, span<u32 const> indices,
-                          span<MorphTarget const> morphs = {});
+                          span<TerrainVertex const> terrain = {});
 
         // Frees `mesh` once every frame that might draw it has retired: the
         // ranges go back to the pool when `slot` next comes round. Stop
@@ -75,8 +75,8 @@ namespace encke
 
         void bind(VkCommandBuffer command) const;
 
-        // The MorphTarget stream, for the bindless set's read-only buffers.
-        Buffer const& morph_buffer() const { return morph_buffer_; }
+        // The TerrainVertex stream, for the bindless set's read-only buffers.
+        Buffer const& terrain_buffer() const { return terrain_buffer_; }
 
         Range const& range(u32 mesh) const { return meshes_[mesh].range; }
 
@@ -97,7 +97,7 @@ namespace encke
             u32            mesh = 0;
             vector<Vertex>      vertices;
             vector<u32>         indices;
-            vector<MorphTarget> morphs;
+            vector<TerrainVertex> terrain;
         };
 
         struct Copy
@@ -111,7 +111,7 @@ namespace encke
 
         Buffer          vertex_buffer_;
         Buffer          index_buffer_;
-        Buffer          morph_buffer_;
+        Buffer          terrain_buffer_;
         VmaVirtualBlock vertex_block_ = nullptr;
         VmaVirtualBlock index_block_  = nullptr;
 

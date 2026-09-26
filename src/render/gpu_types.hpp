@@ -59,7 +59,23 @@ namespace encke::gpu
 
         // x CAS sharpening in tonemap, 0 to 1; 0 skips it. yzw unused.
         f32vec4 post;
+
+        // x the TerrainMaterial buffer, kTerrainMaterialCount of them, or
+        // ~0 with none; yzw unused.
+        u32vec4 terrain;
     };
+
+    // One of the ground's materials, which the G-buffer blends by each
+    // terrain vertex's weights, in TerrainVertex::materials's order after
+    // gravel: gravel, rock, grass, snow, sand.
+    struct TerrainMaterial
+    {
+        u32vec4 textures;            // x albedo, y normal, z ORM, sampled; x kNoTexture until
+                                     // all three have landed, and then none is read
+        f32vec4 params;              // x 1 / tile width (m); yzw linear albedo when untextured
+    };
+
+    inline constexpr u32 kTerrainMaterialCount = 5;
 
     inline constexpr u32 kNoAtmosphere = ~0u;
 
@@ -139,8 +155,9 @@ namespace encke::gpu
         // Geomorph, as encke::Geomorph: x start distance, y 1 / (end -
         // start), z chunk extent, w voxel, all metres.
         f32vec4 morph;
-        // x coarser neighbours, y finer, z nonzero when the object morphs,
-        // w the bindless MorphTarget buffer.
+        // A terrain chunk's: x coarser neighbours, y finer; z flags, 1 to
+        // morph, 2 to blend the terrain palette, 0 for anything not terrain;
+        // w the bindless TerrainVertex buffer.
         u32vec4 morph_masks;
     };
 
@@ -200,7 +217,8 @@ namespace encke::gpu
         u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 400);
+    static_assert(sizeof(Frame) == 416);
+    static_assert(sizeof(TerrainMaterial) == 32);
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);

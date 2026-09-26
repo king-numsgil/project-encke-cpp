@@ -42,16 +42,72 @@ namespace encke::terrain
             return terrain.macro.channels[static_cast<size_t>(which)];
         };
 
-        // Continents and ranges: a few kilometres of relief over hundreds.
-        channel(MacroChannel::Height) = MacroChannelSpec{
-            .graph = encode_fbm_graph(400'000.0f, 6, 0.5f, 2.0f), .scale = 2'500.0f, .bias = 0.0f};
-        // Rough country and smooth plains, 20 to 100 m of detail.
-        channel(MacroChannel::DetailAmplitude) = MacroChannelSpec{
-            .graph = encode_fbm_graph(50'000.0f, 3, 0.5f, 2.0f), .scale = 40.0f, .bias = 60.0f};
-        channel(MacroChannel::Ridge) = MacroChannelSpec{
-            .graph = encode_fbm_graph(80'000.0f, 3, 0.5f, 2.0f), .scale = 0.5f, .bias = 0.5f};
+        // Each channel is its own graph, so what two share -- the mountain
+        // belts -- is built again in each, with the same seed offset, which
+        // gives the same values.
+        //
+        // Belts: where ranges rise, 0 to 1 across a few hundred kilometres,
+        // most of the planet 0.
+        auto const belts = [](GraphBuilder& g) {
+            return g.remap(g.fbm(g.simplex(900'000.0f, 11), 3), -0.05f, 0.45f, 0.0f, 1.0f, true);
+        };
+
+        // Height: warped continents, a few kilometres of relief over hundreds,
+        // and in the belts, ridged ranges up to 5 km with sharp crests, 60 km
+        // apart down to spurs of 4 km. Ridged noise is 1 - |n|, high almost
+        // everywhere with narrow valleys, a plateau; raised to a power, most
+        // of it falls away and only the crests stay, which is a range. The
+        // sum stays within [-0.45, 1], inside the [-1, 1] the bounds assume.
+        {
+            GraphBuilder g;
+            auto const continents = g.warp(g.fbm(g.simplex(400'000.0f, 1), 6), 60'000.0f, 250'000.0f, 2);
+            auto const ranges     = g.power(
+                g.remap(g.ridged(g.simplex(60'000.0f, 3), 5, 0.45f), -1.0f, 1.0f, 0.0f, 1.0f, true), 2.5f);
+            auto const mountains  = g.multiply(ranges, belts(g));
+            channel(MacroChannel::Height) = MacroChannelSpec{
+                .graph = g.encode(g.add(g.scale(continents, 0.45f), g.scale(mountains, 0.55f))),
+                .scale = 5'000.0f,
+                .bias  = -500.0f,
+            };
+        }
+
+        // Detail: rough country and smooth plains, and roughest in the
+        // mountains, 28 to 90 m of first octave. With the ridged detail
+        // below, that is as steep as the cull factor allows at LOD 4:
+        // planet_test measures it.
+        {
+            GraphBuilder g;
+            auto const country = g.fbm(g.simplex(50'000.0f, 4), 3);
+            channel(MacroChannel::DetailAmplitude) = MacroChannelSpec{
+                .graph = g.encode(g.add(g.scale(country, 0.3f), g.scale(belts(g), 0.7f))),
+                .scale = 48.0f,
+                .bias  = 42.0f,
+            };
+        }
+
+        // Ridged detail in the mountains, rounded hills elsewhere.
+        {
+            GraphBuilder g;
+            channel(MacroChannel::Ridge) = MacroChannelSpec{.graph = g.encode(belts(g)), .scale = 0.6f, .bias = 0.2f};
+        }
+
         channel(MacroChannel::Persistence) = MacroChannelSpec{
             .graph = encode_fbm_graph(30'000.0f, 2, 0.5f, 2.0f), .scale = 0.1f, .bias = 0.5f};
+
+        // Climate, for the ground's materials. Latitude and altitude set the
+        // pattern where it is read; these only perturb it: temperature by a
+        // few degrees over continents, moisture down to kilometre patches, so
+        // biome edges are not straight.
+        {
+            GraphBuilder g;
+            channel(MacroChannel::Temperature) = MacroChannelSpec{
+                .graph = g.encode(g.fbm(g.simplex(2'000'000.0f, 21), 5)), .scale = 8.0f, .bias = 0.0f};
+        }
+        {
+            GraphBuilder g;
+            channel(MacroChannel::Moisture) = MacroChannelSpec{
+                .graph = g.encode(g.fbm(g.simplex(1'500'000.0f, 31), 9)), .scale = 0.45f, .bias = 0.55f};
+        }
 
         return terrain;
     }
@@ -219,6 +275,19 @@ namespace encke::terrain
         };
         timing_ = combine(p, voxel_size, zero, zero, zero, detail_octaves, fill_octave, 0, {}, value);
         return value[0];
+    }
+
+    void TerrainSampler::sample_climate(f64vec3 const& origin, f64 voxel_size, span<f32 const> x,
+                                        span<f32 const> y, span<f32 const> z, span<f32> temperature,
+                                        span<f32> moisture)
+    {
+        auto const first = static_cast<size_t>(MacroChannel::Temperature);
+        macro_.sample(origin, voxel_size, x, y, z, climate_values_, first, kMacroChannelCount);
+
+        span<f32 const> const t = climate_values_[MacroChannel::Temperature];
+        span<f32 const> const m = climate_values_[MacroChannel::Moisture];
+        std::copy(t.begin(), t.end(), temperature.begin());
+        std::copy(m.begin(), m.end(), moisture.begin());
     }
 
     LayerTiming TerrainSampler::evaluate_box(GridBox const& box, u32 detail_octaves,

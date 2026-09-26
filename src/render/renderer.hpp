@@ -194,6 +194,10 @@ namespace encke
         // frames are the same whatever came before: for captures.
         void reset_taa() { history_valid_ = false; }
 
+        // What terrain chunks blend; nullopt draws them with their own
+        // Renderable's material alone.
+        void set_terrain_palette(optional<TerrainPalette> const& palette) { terrain_palette_ = palette; }
+
         // Bindless sampled-image handle of a visualisation, in
         // READ_ONLY_OPTIMAL by the time the overlay runs. Stable across
         // resizes.
@@ -220,6 +224,7 @@ namespace encke
             Buffer shadow_views;
             Buffer shadow_matrices;
             Buffer atmosphere;   // gpu::Atmosphere
+            Buffer terrain;      // gpu::TerrainMaterial, kTerrainMaterialCount
 
             // VkDrawIndexedIndirectCommand: the G-buffer's at 0, then shadow
             // view v's at (1 + v) * kMaxObjects.
@@ -231,6 +236,7 @@ namespace encke
             u32 shadow_views_handle    = BindlessSet::kInvalid;
             u32 shadow_matrices_handle = BindlessSet::kInvalid;
             u32 atmosphere_handle      = BindlessSet::kInvalid;
+            u32 terrain_handle         = BindlessSet::kInvalid;
         };
 
         // A texture asset on the GPU, streamed in once and read-only after,
@@ -361,6 +367,8 @@ namespace encke
         optional<f32> fixed_ev100_;
         bool          geomorph_ = true;
 
+        optional<TerrainPalette> terrain_palette_;
+
         // The atmosphere (shaders/atmosphere.slang). The LUTs depend on the
         // air alone, so they are rebuilt only when the atmosphere the camera
         // sees changes, and stay in READ_ONLY_OPTIMAL between; each is
@@ -457,7 +465,7 @@ namespace encke
         };
 
         GeometryPool                        geometry_;
-        u32                                 morph_handle_ = BindlessSet::kInvalid;
+        u32                                 terrain_vertices_handle_ = BindlessSet::kInvalid;
         vector<MeshSlot>                    meshes_;
         vector<u32>                         released_pool_ids_;   // handed back after stage()
         vector<std::unique_ptr<GpuTexture>> textures_;

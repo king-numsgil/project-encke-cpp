@@ -158,6 +158,7 @@ add_library(encke_core OBJECT
 
     src/core/log.cpp
     src/core/memory.cpp
+    src/core/sanitizers.cpp
 
     src/platform/cpu.cpp
     src/platform/thread.cpp

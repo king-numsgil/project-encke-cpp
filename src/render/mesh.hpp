@@ -29,17 +29,23 @@ namespace encke
     static_assert(offsetof(Vertex, tangent) == 24);
     static_assert(offsetof(Vertex, uv) == 40);
 
-    // Where a vertex goes when its mesh is fully geomorphed toward the next
-    // coarser LOD, in a stream parallel to the vertices: the geometry pool
-    // keeps one beside its vertex buffer, element for element, and a vertex
-    // shader reads it by vertex index. Only terrain chunks carry them.
-    struct MorphTarget
+    // What a terrain vertex has beyond a Vertex, in a stream parallel to the
+    // vertices: the geometry pool keeps one beside its vertex buffer, element
+    // for element, and a vertex shader reads it by vertex index. Only terrain
+    // chunks carry them.
+    //
+    // The morph target is where the vertex goes when its mesh is fully
+    // geomorphed toward the next coarser LOD. The materials are the ground's
+    // mix at the vertex, four weights of 0 to 255 in bytes from the lowest:
+    // rock, grass, snow, sand; gravel is whatever they leave of 255.
+    struct TerrainVertex
     {
-        f32vec3 position;
-        u32     normal;   // pack_normal
+        f32vec3 morph_position;
+        u32     morph_normal;   // pack_normal
+        u32     materials;
     };
 
-    static_assert(sizeof(MorphTarget) == 16);
+    static_assert(sizeof(TerrainVertex) == 20);
 
     // A unit normal, octahedral, 16 bits a component in [0, 1], x low:
     // shaders/lib/normal.slang's encode_normal, quantised.

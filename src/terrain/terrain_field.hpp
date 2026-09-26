@@ -26,8 +26,10 @@ namespace encke::terrain
         f64 voxel_size(u32 lod) const { return std::ldexp(base_voxel_size, static_cast<int>(lod)); }
     };
 
-    // An Earth-radius planet with an FBm graph in every macro channel, for
-    // the benchmark and tests until bodies carry authored graphs.
+    // An Earth-radius planet, for the scene, the benchmark and tests until
+    // bodies carry authored graphs: domain-warped continents, ridged
+    // mountain belts that also roughen the detail layer, and temperature
+    // and moisture for the ground's materials.
     BodyTerrain example_planet(i32 seed);
 
     // Grid coordinates are integers in base voxels, body-relative: point g is
@@ -133,6 +135,13 @@ namespace encke::terrain
         // sample_point's value alone, a seventh of the work.
         f32 sample_value(f64vec3 const& p, f64 voxel_size, u32 detail_octaves);
 
+        // The climate channels at origin + (x[i], y[i], z[i]): temperature
+        // and moisture as the macro graphs map them, before altitude and
+        // latitude. On the same lattice as the field, so continuous across
+        // chunks.
+        void sample_climate(f64vec3 const& origin, f64 voxel_size, span<f32 const> x, span<f32 const> y,
+                            span<f32 const> z, span<f32> temperature, span<f32> moisture);
+
         LayerTiming const& last_timing() const { return timing_; }
 
     private:
@@ -179,6 +188,7 @@ namespace encke::terrain
         MacroField   macro_;
         vector<i64>  anchor_blocks_;
         MacroValues  macro_values_;
+        MacroValues  climate_values_;
         LayerTiming  timing_;
 
         vector<f32> offset_x_;

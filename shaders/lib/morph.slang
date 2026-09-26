@@ -61,24 +61,30 @@ float neighbour_weight(uint mask, float3 low, float3 high)
     return weight;
 }
 
-// The pool's morph stream, whose handle the object carries: reading it from
-// the Frame loaded the whole Frame for every vertex, which cost the G-buffer
-// pass more than all the rest of the morph.
-public GpuMorphTarget load_morph_target(GpuObject object, uint vertex)
+// Whether the object is a terrain chunk, which carries a TerrainVertex per
+// vertex.
+public bool is_terrain(GpuObject object)
 {
-    return g_buffers[NonUniformResourceIndex(object.morph_masks.w)].Load<GpuMorphTarget>(vertex * kMorphStride);
+    return object.morph_masks.z != 0u;
 }
 
+// The pool's TerrainVertex stream, whose handle the object carries.
 // `vertex` is SV_VulkanVertexID, gl_VertexIndex, which includes the draw's
-// vertexOffset, so it indexes the pool's morph stream directly. Not
-// SV_VertexID: Slang lowers that to gl_VertexIndex - gl_BaseVertex, as it
-// does SV_InstanceID, and every mesh would read the first mesh's targets.
-public Morphed morph_vertex(GpuObject object, uint vertex, float3 position, float3 normal)
+// vertexOffset, so it indexes the stream directly. Not SV_VertexID: Slang
+// lowers that to gl_VertexIndex - gl_BaseVertex, as it does SV_InstanceID,
+// and every mesh would read the first mesh's.
+public GpuTerrainVertex load_terrain_vertex(GpuObject object, uint vertex)
+{
+    return g_buffers[NonUniformResourceIndex(object.morph_masks.w)]
+        .Load<GpuTerrainVertex>(vertex * kTerrainVertexStride);
+}
+
+public Morphed morph_vertex(GpuObject object, GpuTerrainVertex target, float3 position, float3 normal)
 {
     Morphed result;
     result.position = position;
     result.normal   = normal;
-    if (object.morph_masks.z == 0u)
+    if ((object.morph_masks.z & 1u) == 0u)
     {
         return result;
     }
@@ -99,10 +105,9 @@ public Morphed morph_vertex(GpuObject object, uint vertex, float3 position, floa
     amount = min(amount, 1.0f - neighbour_weight(object.morph_masks.y, low, high));
     amount = max(amount, neighbour_weight(object.morph_masks.x, low, high));
 
-    GpuMorphTarget target = load_morph_target(object, vertex);
-    float2 packed = float2(float(target.normal & 0xFFFFu), float(target.normal >> 16u)) / 65535.0f;
+    float2 packed = float2(float(target.morph_normal & 0xFFFFu), float(target.morph_normal >> 16u)) / 65535.0f;
 
-    result.position = lerp(position, target.position, amount);
+    result.position = lerp(position, target.morph_position, amount);
     result.normal   = normalize(lerp(normal, decode_normal(packed), amount));
     return result;
 }

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <stdexcept>
 
@@ -76,16 +77,16 @@ namespace encke::terrain
 
     void MacroField::sample(f64vec3 const& origin, f64 voxel_size,
                             span<f32 const> x, span<f32 const> y, span<f32 const> z,
-                            MacroValues& out)
+                            MacroValues& out, size_t first, size_t last)
     {
         size_t const count = x.size();
-        for (vector<f32>& channel : out.channels)
+        for (size_t channel = first; channel < last; ++channel)
         {
-            channel.resize(count);
+            out.channels[channel].resize(count);
         }
 
         bool any_graph = false;
-        for (size_t channel = 0; channel < kMacroChannelCount; ++channel)
+        for (size_t channel = first; channel < last; ++channel)
         {
             if (nodes_->graphs[channel])
             {
@@ -149,7 +150,7 @@ namespace encke::terrain
         size_t const stride_y = static_cast<size_t>(dims.x);
         size_t const stride_z = static_cast<size_t>(dims.x * dims.y);
 
-        for (size_t channel = 0; channel < kMacroChannelCount; ++channel)
+        for (size_t channel = first; channel < last; ++channel)
         {
             FastNoise::SmartNode<> const& graph = nodes_->graphs[channel];
             if (!graph)
@@ -198,6 +199,131 @@ namespace encke::terrain
         if (encoded.empty())
         {
             throw std::logic_error("FastNoise2 could not encode an FBm graph");
+        }
+        return encoded;
+    }
+
+    // A deque, so nodes keep their addresses as more are added: they point
+    // at one another.
+    struct GraphBuilder::Nodes
+    {
+        std::deque<FastNoise::NodeData> data;
+
+        template <typename T>
+        std::pair<Node, FastNoise::NodeData&> make()
+        {
+            data.emplace_back(&FastNoise::Metadata::Get<T>());
+            return {static_cast<Node>(data.size() - 1), data.back()};
+        }
+
+        FastNoise::NodeData* at(Node node) { return &data.at(node); }
+    };
+
+    GraphBuilder::GraphBuilder()
+        : nodes_(std::make_unique<Nodes>())
+    {
+    }
+
+    GraphBuilder::~GraphBuilder() = default;
+
+    GraphBuilder::Node GraphBuilder::simplex(f32 feature_scale, i32 seed_offset)
+    {
+        auto [node, data]              = nodes_->make<FastNoise::Simplex>();
+        variable(data, "Feature Scale") = feature_scale;
+        variable(data, "Seed Offset")   = seed_offset;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::fbm(Node source, i32 octaves, f32 gain, f32 lacunarity)
+    {
+        FastNoise::NodeData* const from = nodes_->at(source);
+        auto [node, data]               = nodes_->make<FastNoise::FractalFBm>();
+        data.nodeLookups.at(0)          = from;
+        variable(data, "Octaves")       = octaves;
+        variable(data, "Lacunarity")    = lacunarity;
+        hybrid(data, "Gain")            = gain;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::ridged(Node source, i32 octaves, f32 gain, f32 lacunarity)
+    {
+        FastNoise::NodeData* const from = nodes_->at(source);
+        auto [node, data]               = nodes_->make<FastNoise::FractalRidged>();
+        data.nodeLookups.at(0)          = from;
+        variable(data, "Octaves")       = octaves;
+        variable(data, "Lacunarity")    = lacunarity;
+        hybrid(data, "Gain")            = gain;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::warp(Node source, f32 amplitude, f32 feature_scale, i32 seed_offset)
+    {
+        FastNoise::NodeData* const from = nodes_->at(source);
+        auto [node, data]               = nodes_->make<FastNoise::DomainWarpGradient>();
+        data.nodeLookups.at(0)          = from;
+        hybrid(data, "Warp Amplitude")  = amplitude;
+        variable(data, "Feature Scale") = feature_scale;
+        variable(data, "Seed Offset")   = seed_offset;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::add(Node a, Node b)
+    {
+        FastNoise::NodeData* const lhs = nodes_->at(a);
+        FastNoise::NodeData* const rhs = nodes_->at(b);
+        auto [node, data]              = nodes_->make<FastNoise::Add>();
+        data.nodeLookups.at(0)         = lhs;
+        data.hybrids.at(0).first       = rhs;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::multiply(Node a, Node b)
+    {
+        FastNoise::NodeData* const lhs = nodes_->at(a);
+        FastNoise::NodeData* const rhs = nodes_->at(b);
+        auto [node, data]              = nodes_->make<FastNoise::Multiply>();
+        data.nodeLookups.at(0)         = lhs;
+        data.hybrids.at(0).first       = rhs;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::scale(Node a, f32 factor)
+    {
+        FastNoise::NodeData* const lhs = nodes_->at(a);
+        auto [node, data]              = nodes_->make<FastNoise::Multiply>();
+        data.nodeLookups.at(0)         = lhs;
+        hybrid(data, "RHS")            = factor;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::remap(Node source, f32 from_min, f32 from_max, f32 to_min, f32 to_max, bool clamp)
+    {
+        FastNoise::NodeData* const from = nodes_->at(source);
+        auto [node, data]               = nodes_->make<FastNoise::Remap>();
+        data.nodeLookups.at(0)          = from;
+        hybrid(data, "From Min")        = from_min;
+        hybrid(data, "From Max")        = from_max;
+        hybrid(data, "To Min")          = to_min;
+        hybrid(data, "To Max")          = to_max;
+        variable(data, "Clamp Output")  = clamp ? 1 : 0;
+        return node;
+    }
+
+    GraphBuilder::Node GraphBuilder::power(Node source, f32 exponent)
+    {
+        FastNoise::NodeData* const from = nodes_->at(source);
+        auto [node, data]               = nodes_->make<FastNoise::PowFloat>();
+        data.hybrids.at(0).first        = from;
+        hybrid(data, "Pow")             = exponent;
+        return node;
+    }
+
+    string GraphBuilder::encode(Node root) const
+    {
+        string encoded = FastNoise::Metadata::SerialiseNodeData(nodes_->at(root));
+        if (encoded.empty())
+        {
+            throw std::logic_error("FastNoise2 could not encode a built graph");
         }
         return encoded;
     }

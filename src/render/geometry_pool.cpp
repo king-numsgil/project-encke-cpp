@@ -65,8 +65,8 @@ namespace encke
                                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | kTarget) ||
             !index_buffer_.init_device(allocator, device, VkDeviceSize{index_capacity} * sizeof(u32),
                                        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | kTarget) ||
-            !morph_buffer_.init_device(allocator, device, VkDeviceSize{vertex_capacity} * sizeof(MorphTarget),
-                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | kTarget))
+            !terrain_buffer_.init_device(allocator, device, VkDeviceSize{vertex_capacity} * sizeof(TerrainVertex),
+                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | kTarget))
         {
             return false;
         }
@@ -106,22 +106,22 @@ namespace encke
         copies_.clear();
         retired_.clear();
 
-        morph_buffer_.shutdown();
+        terrain_buffer_.shutdown();
         index_buffer_.shutdown();
         vertex_buffer_.shutdown();
     }
 
     optional<u32> GeometryPool::add(span<Vertex const> vertices, span<u32 const> indices,
-                                    span<MorphTarget const> morphs)
+                                    span<TerrainVertex const> terrain)
     {
         if (vertices.empty() || indices.empty())
         {
             log::error("mesh needs both vertices and indices");
             return nullopt;
         }
-        if (!morphs.empty() && morphs.size() != vertices.size())
+        if (!terrain.empty() && terrain.size() != vertices.size())
         {
-            log::error("mesh has %zu morph targets for %zu vertices", morphs.size(), vertices.size());
+            log::error("mesh has %zu terrain vertices for %zu vertices", terrain.size(), vertices.size());
             return nullopt;
         }
 
@@ -167,7 +167,7 @@ namespace encke
             .mesh     = mesh,
             .vertices = vector<Vertex>(vertices.begin(), vertices.end()),
             .indices  = vector<u32>(indices.begin(), indices.end()),
-            .morphs   = vector<MorphTarget>(morphs.begin(), morphs.end()),
+            .terrain  = vector<TerrainVertex>(terrain.begin(), terrain.end()),
         });
 
         log::info("mesh %u: %zu vertices, %zu indices", mesh, vertices.size(), indices.size());
@@ -214,8 +214,8 @@ namespace encke
             Upload const&      upload       = uploads_[done];
             VkDeviceSize const vertex_bytes = upload.vertices.size() * sizeof(Vertex);
             VkDeviceSize const index_bytes  = upload.indices.size() * sizeof(u32);
-            VkDeviceSize const morph_bytes  = upload.morphs.size() * sizeof(MorphTarget);
-            VkDeviceSize const total        = vertex_bytes + index_bytes + morph_bytes;
+            VkDeviceSize const terrain_bytes = upload.terrain.size() * sizeof(TerrainVertex);
+            VkDeviceSize const total         = vertex_bytes + index_bytes + terrain_bytes;
 
             // Every allocation's alignment slack included.
             if (total + 48 > staging.bytes_per_slot())
@@ -239,15 +239,15 @@ namespace encke
 
             Range& range = meshes_[upload.mesh].range;
 
-            if (morph_bytes > 0)
+            if (terrain_bytes > 0)
             {
-                optional<StagingArena::Allocation> const morphs = staging.allocate(morph_bytes);
-                std::memcpy(morphs->data, upload.morphs.data(), morph_bytes);
+                optional<StagingArena::Allocation> const terrain = staging.allocate(terrain_bytes);
+                std::memcpy(terrain->data, upload.terrain.data(), terrain_bytes);
                 copies_.push_back(Copy{
-                    .source = morphs->buffer,
-                    .target = morph_buffer_.handle(),
-                    .region = {morphs->offset, VkDeviceSize{range.first_vertex} * sizeof(MorphTarget),
-                               morph_bytes},
+                    .source = terrain->buffer,
+                    .target = terrain_buffer_.handle(),
+                    .region = {terrain->offset, VkDeviceSize{range.first_vertex} * sizeof(TerrainVertex),
+                               terrain_bytes},
                 });
             }
             copies_.push_back(Copy{

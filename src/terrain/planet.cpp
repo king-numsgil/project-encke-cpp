@@ -74,27 +74,114 @@ namespace encke::terrain
             };
         }
 
-        // The terrain's ambientCG set and the metres one repeat covers.
-        constexpr char kGroundSet[] = "Ground110";
-        constexpr f32  kGroundTile  = 2.1f;
+        // The ground's ambientCG sets, in the palette's order, with the
+        // metres one repeat covers and the flat linear colour each draws in
+        // until its maps land. Every tile divides kUvPeriod.
+        struct GroundSet
+        {
+            char const* name;
+            f32         tile;
+            f32vec3     albedo;
+        };
+        array<GroundSet, 5> const kGroundSets{{
+            {"Ground110", 2.0f, {0.20f, 0.17f, 0.14f}},    // gravel
+            {"Rock051", 4.0f, {0.25f, 0.25f, 0.23f}},      // rock
+            {"Grass004", 2.0f, {0.07f, 0.13f, 0.03f}},     // grass
+            {"Snow010A", 4.0f, {0.80f, 0.85f, 0.90f}},     // snow
+            {"Ground093C", 2.0f, {0.45f, 0.35f, 0.22f}},   // sand
+        }};
 
-        // Surface nets output as render vertices, UVs in metres for a tiling
-        // material that repeats every `tile` metres. Each vertex is projected
-        // onto the face of the body's cube its position points through, from
-        // the body's centre: the two other body-relative coordinates are u
-        // and v. Triangles whose corners pick different faces, along the
-        // cube's edges, are smeared.
+        // UVs are offset by whole multiples of this, which every material's
+        // tile must divide; a power of two, so exact in f32 as in f64.
+        constexpr f64 kUvPeriod = 16.0;
+
+        // The climate by latitude, before the macro channels perturb it:
+        // degrees Celsius at the equator at the body's radius, lost toward a
+        // pole as the square of the sine of latitude, and lost per kilometre
+        // climbed. A pole at the radius sits about 6 degrees over freezing:
+        // cold grass and gravel, snow a few hundred metres up, and an ice cap
+        // only on high ground, which leaves the test scene at the north pole
+        // on open ground.
+        constexpr f32 kEquatorTemperature = 26.0f;
+        constexpr f32 kPolarCooling       = 20.0f;
+        constexpr f32 kLapseRate          = 6.5f;
+
+        // Moisture taken from the subtropics, peaking at this latitude in
+        // radians (28 degrees), over this half-width: the desert belts. And
+        // added at the equator, over its own half-width: the wet tropics.
+        constexpr f32 kDesertLatitude = 0.49f;
+        constexpr f32 kDesertWidth    = 0.2f;
+        constexpr f32 kDesertDrying   = 0.35f;
+        constexpr f32 kTropicsWidth   = 0.25f;
+        constexpr f32 kTropicsWetting = 0.25f;
+
+        f32 smoothstep(f32 edge0, f32 edge1, f32 x)
+        {
+            f32 const t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        }
+
+        // The ground's mix at a vertex, as TerrainVertex packs it: rock where
+        // it is steep, then among what rock leaves, snow where it is cold,
+        // sand where it is hot and dry, grass where it is mild and wet, and
+        // gravel for the rest. The climate is set by latitude, against the
+        // body's Y axis, and altitude, and perturbed by the macro channels'
+        // `temperature` and `moisture`.
+        u32 ground_materials(f64vec3 const& point, f32vec3 const& normal, f64 radius, f32 temperature, f32 moisture)
+        {
+            f64 const     distance = glm::length(point);
+            f32vec3 const up{point / distance};
+            f32 const     altitude = static_cast<f32>((distance - radius) * 1e-3);
+            f32 const     latitude = std::asin(std::clamp(up.y, -1.0f, 1.0f));
+
+            f32 const warmth = kEquatorTemperature - kPolarCooling * up.y * up.y - kLapseRate * altitude + temperature;
+            f32 const belt    = (std::abs(latitude) - kDesertLatitude) / kDesertWidth;
+            f32 const tropics = latitude / kTropicsWidth;
+            f32 const wet     = moisture - kDesertDrying * std::exp(-belt * belt) +
+                            kTropicsWetting * std::exp(-tropics * tropics);
+            f32 const flat   = glm::dot(normal, up);
+
+            // Snow lies at a warmer temperature on wet ground, and slides off
+            // slopes long before they are rock.
+            f32 const rock      = smoothstep(0.80f, 0.62f, flat);
+            f32 const snow_line = 1.0f + 6.0f * (wet - 0.55f);
+            f32 const snow      = smoothstep(snow_line, snow_line - 4.0f, warmth) * smoothstep(0.82f, 0.95f, flat);
+            f32 const sand  = smoothstep(16.0f, 22.0f, warmth) * smoothstep(0.3f, 0.15f, wet);
+            f32 const grass = smoothstep(0.3f, 0.5f, wet) * smoothstep(3.0f, 8.0f, warmth) *
+                              smoothstep(34.0f, 28.0f, warmth);
+
+            // The flat materials share what rock leaves; past a full share
+            // between them, they are scaled down, and gravel gets nothing.
+            f32 const share = (1.0f - rock) / std::max(snow + sand + grass, 1.0f);
+            auto const byte = [](f32 weight) {
+                return static_cast<u32>(std::lround(std::clamp(weight, 0.0f, 1.0f) * 255.0f));
+            };
+            return byte(rock) | (byte(grass * share) << 8) | (byte(snow * share) << 16) | (byte(sand * share) << 24);
+        }
+
+        // Surface nets output as render vertices, UVs in metres for tiling
+        // materials. Each vertex is projected onto the face of the body's
+        // cube its position points through, from the body's centre: the two
+        // other body-relative coordinates are u and v. Triangles whose
+        // corners pick different faces, along the cube's edges, are smeared.
         //
         // Those coordinates reach thousands of kilometres, where f32 steps
         // by tens of centimetres, a hundred texels, and the GPU's per-pixel
         // interpolation rounds differently as the view turns: the texture and
         // its normal map swim. So each chunk subtracts, per face, a whole
-        // number of tiles taken from its corner, in f64. The texture repeats,
-        // so it is unchanged, and neighbouring chunks' offsets differ by whole
-        // tiles, so it stays continuous across them; and a chunk's UVs are no
-        // bigger than the chunk. Near the camera that is metres.
-        void to_vertices(SurfaceMesh const& mesh, f64vec3 const& corner, f64 tile, MeshData& data)
+        // number of kUvPeriod taken from its corner, in f64. Every material
+        // repeats within the period, so it is unchanged, and neighbouring
+        // chunks' offsets differ by whole periods, so it stays continuous
+        // across them; and a chunk's UVs are no bigger than the chunk. Near
+        // the camera that is metres.
+        //
+        // Each vertex's materials come from its climate, `temperature` and
+        // `moisture`, one per vertex, and its altitude and slope.
+        void to_vertices(SurfaceMesh const& mesh, f64vec3 const& corner, f64 radius, span<f32 const> temperature,
+                         span<f32 const> moisture, MeshData& data)
         {
+            f64 const tile = kUvPeriod;
+
             // Per face axis: the directions u and v run along.
             array<f64vec3, 3> const u_axes{{{0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}}};
             array<f64vec3, 3> const v_axes{{{0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}, {0.0, 1.0, 0.0}}};
@@ -138,12 +225,14 @@ namespace encke::terrain
             }
             data.indices = mesh.indices;
 
-            data.morphs.resize(mesh.coarse_positions.size());
-            for (size_t i = 0; i < mesh.coarse_positions.size(); ++i)
+            data.terrain.resize(mesh.positions.size());
+            for (size_t i = 0; i < mesh.positions.size(); ++i)
             {
-                data.morphs[i] = MorphTarget{
-                    .position = mesh.coarse_positions[i],
-                    .normal   = pack_normal(mesh.coarse_normals[i]),
+                data.terrain[i] = TerrainVertex{
+                    .morph_position = mesh.coarse_positions[i],
+                    .morph_normal   = pack_normal(mesh.coarse_normals[i]),
+                    .materials      = ground_materials(corner + f64vec3{mesh.positions[i]}, mesh.normals[i], radius,
+                                                       temperature[i], moisture[i]),
                 };
             }
         }
@@ -510,10 +599,20 @@ namespace encke::terrain
             surface_nets(samples, request.cells, body->terrain->voxel_size(key.lod), mesh, &coarse);
 
             f64vec3 const corner = f64vec3{key.origin} * body->terrain->base_voxel_size;
-            auto          data   = std::make_shared<MeshData>();
-            // The tile exactly as the material has it, an f32, so the offsets
-            // are whole tiles to the shader too.
-            to_vertices(mesh, corner, static_cast<f64>(kGroundTile), *data);
+
+            // The climate at every vertex, for its materials.
+            size_t const count = mesh.positions.size();
+            vector<f32>  x(count), y(count), z(count), temperature(count), moisture(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                x[i] = mesh.positions[i].x;
+                y[i] = mesh.positions[i].y;
+                z[i] = mesh.positions[i].z;
+            }
+            sampler.sample_climate(corner, body->terrain->voxel_size(key.lod), x, y, z, temperature, moisture);
+
+            auto data = std::make_shared<MeshData>();
+            to_vertices(mesh, corner, body->terrain->radius, temperature, moisture, *data);
 
             return [this, body, key, data] { complete(body, key, data, false); };
         }, node.priority);
@@ -683,10 +782,16 @@ namespace encke::terrain
         pool_   = &pool;
         entt::registry& registry = scene.registry;
 
-        // One tiling set for every body until bodies name their own.
-        if (!material_)
+        // One palette for every body until bodies name their own.
+        if (!palette_.has_value())
         {
-            material_ = assets.load_ambientcg(kGroundSet, f32vec2{kGroundTile});
+            TerrainPalette palette{};
+            for (size_t index = 0; index < kGroundSets.size(); ++index)
+            {
+                palette.materials[index] = assets.load_ambientcg(kGroundSets[index].name, f32vec2{kGroundSets[index].tile});
+                palette.albedo[index]    = kGroundSets[index].albedo;
+            }
+            palette_ = palette;
         }
 
         for (auto const [entity, planet] : registry.view<PlanetTerrain const>().each())
@@ -864,7 +969,7 @@ namespace encke::terrain
                                                              });
                     registry.emplace<Renderable>(node.entity, Renderable{
                                                                   .mesh      = node.mesh,
-                                                                  .material  = material_,
+                                                                  .material  = palette_->materials[0],
                                                                   .albedo    = f32vec3{1.0f},
                                                                   .roughness = 1.0f,
                                                                   .metallic  = 1.0f,

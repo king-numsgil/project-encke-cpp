@@ -34,7 +34,18 @@ public struct GpuFrame
                                      // z EV100 image (sampled) or ~0, w linear clamped sampler
     public float4x4 sky_reprojection; // view direction now -> last frame's clip, rotation only
     public float4   post;            // x CAS sharpness in tonemap, 0 skips it
+    public uint4    terrain;         // x GpuTerrainMaterial buffer or ~0
 };
+
+// Gravel, rock, grass, snow, sand. See TerrainMaterial in render/gpu_types.hpp.
+public struct GpuTerrainMaterial
+{
+    public uint4  textures;          // x albedo, y normal, z ORM; x kNoTexture until all have landed
+    public float4 params;            // x 1 / tile width (m), yzw linear albedo when untextured
+};
+
+public static const uint kTerrainMaterialCount  = 5;
+public static const uint kTerrainMaterialStride = 32;
 
 public static const uint kNoAtmosphere = 0xFFFFFFFFu;
 
@@ -89,15 +100,16 @@ public struct GpuObject
                                        // untextured, y and w kNoTexture when that map is absent
     public float4   texture_scale;     // xyz scale / tile width (m), w tile width / height
     public float4   morph;             // x start distance, y 1 / (end - start), z extent, w voxel (m)
-    public uint4    morph_masks;       // x coarser neighbours, y finer, z nonzero when morphing,
-                                       // w the MorphTarget buffer
+    public uint4    morph_masks;       // terrain: x coarser neighbours, y finer, z flags (1 morph,
+                                       // 2 terrain palette, 0 not terrain), w TerrainVertex buffer
 };
 
-// A vertex's geomorph target; see MorphTarget in render/mesh.hpp.
-public struct GpuMorphTarget
+// See TerrainVertex in render/mesh.hpp.
+public struct GpuTerrainVertex
 {
-    public float3 position;
-    public uint   normal;              // octahedral, 16 bits a component, x low
+    public float3 morph_position;
+    public uint   morph_normal;        // octahedral, 16 bits a component, x low
+    public uint   materials;           // bytes from the lowest: rock, grass, snow, sand
 };
 
 public static const uint kNoTexture = 0xFFFFFFFFu;
@@ -147,9 +159,9 @@ public struct Push
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 400;
+public static const uint kFrameStride      = 416;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
 public static const uint kObjectStride     = 352;
-public static const uint kMorphStride      = 16;
+public static const uint kTerrainVertexStride = 20;
 public static const uint kMatrixStride     = 64;

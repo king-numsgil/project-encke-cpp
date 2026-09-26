@@ -8,14 +8,21 @@ namespace encke::terrain
     // FastNoise2 node graphs authored in its Node Editor, loaded from their
     // encoded strings. A graph has one scalar output, so each channel is its
     // own graph.
+    //
+    // The first four shape the field. The climate channels do not: the
+    // field never samples them, and they are read at mesh vertices to choose
+    // the ground's materials.
     enum class MacroChannel : u32
     {
         Height,            // metres above the body's radius
         DetailAmplitude,   // metres: the detail layer's first-octave amplitude
         Ridge,             // 0 plain fBm, 1 fully ridged
         Persistence,       // amplitude ratio from one detail octave to the next
+        Temperature,       // degrees Celsius against the latitude's own, at the body's radius
+        Moisture,          // 0 arid to 1 wet, before the dry subtropics
     };
-    inline constexpr size_t kMacroChannelCount = 4;
+    inline constexpr size_t kMacroChannelCount = 6;
+    inline constexpr size_t kFieldChannelCount = 4;
 
     // bias + scale * graph(p). An empty graph is the constant bias.
     struct MacroChannelSpec
@@ -63,10 +70,12 @@ namespace encke::terrain
         MacroField(MacroField const&)            = delete;
         MacroField& operator=(MacroField const&) = delete;
 
-        // Every channel at origin + (x[i], y[i], z[i]), metres.
+        // Channels `first` to `last` - 1 at origin + (x[i], y[i], z[i]),
+        // metres; the others are left as they were. The field's channels by
+        // default.
         void sample(f64vec3 const& origin, f64 voxel_size,
                     span<f32 const> x, span<f32 const> y, span<f32 const> z,
-                    MacroValues& out);
+                    MacroValues& out, size_t first = 0, size_t last = kFieldChannelCount);
 
     private:
         struct Nodes;
@@ -85,4 +94,44 @@ namespace encke::terrain
     // An FBm-over-Simplex graph, encoded as the Node Editor would: for
     // defaults and tests until bodies carry authored graphs.
     string encode_fbm_graph(f32 feature_scale, i32 octaves, f32 gain, f32 lacunarity);
+
+    // Builds a FastNoise2 node graph in code and encodes it as the Node
+    // Editor would, for bodies without authored graphs. Nodes are numbered
+    // in order of creation and live as long as the builder. Positions are
+    // metres, so feature scales and warp amplitudes are too. Every noise
+    // takes a seed offset, so two noises of the same scale do not share
+    // their features.
+    class GraphBuilder
+    {
+    public:
+        using Node = u32;
+
+        GraphBuilder();
+        ~GraphBuilder();
+
+        GraphBuilder(GraphBuilder const&)            = delete;
+        GraphBuilder& operator=(GraphBuilder const&) = delete;
+
+        Node simplex(f32 feature_scale, i32 seed_offset);
+        Node fbm(Node source, i32 octaves, f32 gain = 0.5f, f32 lacunarity = 2.0f);
+        // Sharp crests where the source crosses zero: mountain ranges.
+        Node ridged(Node source, i32 octaves, f32 gain = 0.5f, f32 lacunarity = 2.0f);
+        // Displaces the source's input by up to `amplitude` metres, along a
+        // gradient noise of `feature_scale`.
+        Node warp(Node source, f32 amplitude, f32 feature_scale, i32 seed_offset);
+        Node add(Node a, Node b);
+        Node multiply(Node a, Node b);
+        Node scale(Node a, f32 factor);
+        // Linear from [from_min, from_max] to [to_min, to_max], clamped to
+        // the latter when `clamp`.
+        Node remap(Node source, f32 from_min, f32 from_max, f32 to_min, f32 to_max, bool clamp);
+        // source ^ exponent; the source must not go negative.
+        Node power(Node source, f32 exponent);
+
+        string encode(Node root) const;
+
+    private:
+        struct Nodes;
+        std::unique_ptr<Nodes> nodes_;
+    };
 }

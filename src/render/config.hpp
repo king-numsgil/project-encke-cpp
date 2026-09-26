@@ -37,9 +37,10 @@ namespace encke::config
 
     // A chunk is culled when |SDF| at its centre exceeds this many
     // half-diagonals, plus what the octaves its LOD leaves out could add. The
-    // field's gradient is 1 plus the terrain's slope, so 1 is not safe;
-    // planet_test checks this value.
-    inline constexpr f64 kTerrainCullFactor = 1.5;
+    // field's gradient is 1 plus the terrain's slope, so 1 is not safe, and
+    // the example planet's mountain belts are steeper than 1.5 allows over a
+    // chunk from LOD 4 to 8; planet_test measures them against this.
+    inline constexpr f64 kTerrainCullFactor = 2.0;
 
     // -- material textures ---------------------------------------------------------
     // Capped further by the device's maxSamplerAnisotropy.

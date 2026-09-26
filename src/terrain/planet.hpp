@@ -177,6 +177,11 @@ namespace encke::terrain
         // Every body shows exactly the leaves the camera wants, all meshed.
         bool idle() const;
 
+        // What its chunks are drawn with, once the first update has loaded
+        // it: for the renderer. A chunk's own Renderable names only the
+        // first, gravel.
+        optional<TerrainPalette> const& palette() const { return palette_; }
+
         // What is on screen, over every body, and every mesh the octree holds,
         // on screen or waiting: for tests.
         vector<NodeKey>    displayed() const;
@@ -196,7 +201,7 @@ namespace encke::terrain
 
         OctreeSettings                settings_;
         vector<std::shared_ptr<Body>> bodies_;
-        MaterialHandle                material_;
+        optional<TerrainPalette>      palette_;
 
         // Set by update(), for completions and resubmissions; main thread.
         AssetManager* assets_ = nullptr;

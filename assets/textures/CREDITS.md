@@ -7,23 +7,31 @@ public-domain dedication. CC0 asks for no attribution; this file gives it
 anyway, and records where each set came from so it can be fetched again at
 another resolution.
 
-All sets are the 1K JPG downloads, retrieved 2026-09-22. Only the maps the
-renderer reads were kept: Color, NormalGL, Roughness, and AmbientOcclusion and
-Metalness where the set has them. Each set's NormalDX, Displacement, preview
-and scene files were left out.
+All sets are the 1K JPG downloads, retrieved 2026-09-22, and the four terrain
+sets added after them (Rock051, Grass004, Snow010A, Ground093C) on
+2026-09-25. Only the maps the renderer reads were kept: Color, NormalGL,
+Roughness, and AmbientOcclusion and Metalness where the set has them, except
+Rock051's Metalness, which is black and packs as the default. Each set's
+NormalDX, Displacement, preview and scene files were left out.
 
 | Set | Source | Maps | Tile size used |
 | --- | --- | --- | --- |
-| Ground110 | <https://ambientcg.com/view?id=Ground110> | colour, normal, roughness, AO | 2.1 m square |
+| Ground110 | <https://ambientcg.com/view?id=Ground110> | colour, normal, roughness, AO | 2.0 m square (terrain gravel) |
+| Rock051 | <https://ambientcg.com/view?id=Rock051> | colour, normal, roughness, AO | 4.0 m square (terrain rock) |
+| Grass004 | <https://ambientcg.com/view?id=Grass004> | colour, normal, roughness, AO | 2.0 m square (terrain grass) |
+| Snow010A | <https://ambientcg.com/view?id=Snow010A> | colour, normal, roughness, AO | 4.0 m square (terrain snow) |
+| Ground093C | <https://ambientcg.com/view?id=Ground093C> | colour, normal, roughness, AO | 2.0 m square (terrain sand) |
 | Concrete034 | <https://ambientcg.com/view?id=Concrete034> | colour, normal, roughness | 1.1 x 0.55 m |
 | Planks037A | <https://ambientcg.com/view?id=Planks037A> | colour, normal, roughness, AO, metalness | 2.0 m square |
 | PaintedMetal006 | <https://ambientcg.com/view?id=PaintedMetal006> | colour, normal, roughness, AO, metalness | 1.5 m square |
 | Metal041B | <https://ambientcg.com/view?id=Metal041B> | colour, normal, roughness, metalness | 1.0 m square |
 | MetalPlates013 | <https://ambientcg.com/view?id=MetalPlates013> | colour, normal, roughness, AO, metalness | 1.6 m square |
 
-Ground110, Concrete034 and MetalPlates013 carry physical dimensions in
-ambientCG's metadata and use them. The others have none, so their sizes are
-judged by eye.
+Concrete034 and MetalPlates013 carry physical dimensions in ambientCG's
+metadata and use them. The terrain sets' tiles must all divide the 16 m
+period terrain UVs are offset by, so they are powers of two: Ground110's
+2.1 m and Grass004's 1.4 m are rounded to 2 m. The others have no dimensions,
+so their sizes are judged by eye.
 
 Download URLs follow the pattern
 `https://ambientcg.com/get?file=<Set>_1K-JPG.zip`; swap `1K` for `2K`, `4K`

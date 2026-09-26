@@ -263,6 +263,15 @@ namespace encke
                 ground_pole_ = *ground;
                 log::info("scene: ground at the pole is %.1f m from the sphere; the object field moves to it",
                           ground->y - pole.y);
+
+                // What the ground's materials start from there, for tuning.
+                terrain::TerrainSampler sampler{*terrain};
+                array<f32, 1> const     zero{{0.0f}};
+                array<f32, 1>           temperature{};
+                array<f32, 1>           moisture{};
+                sampler.sample_climate(*ground, terrain->voxel_size(terrain_lod), zero, zero, zero, temperature, moisture);
+                log::info("scene: climate channels at the pole: temperature %+.1f, moisture %.2f",
+                          static_cast<f64>(temperature[0]), static_cast<f64>(moisture[0]));
             }
             else
             {

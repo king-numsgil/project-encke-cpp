@@ -673,6 +673,7 @@ namespace encke
             // camera's world transform from the last update, a frame behind.
             pool_.drain();
             terrain_.update(scene_, assets_, pool_);
+            renderer_.set_terrain_palette(terrain_.palette());
             scene_.update(seconds, assets_);
 
             draw_ui();
