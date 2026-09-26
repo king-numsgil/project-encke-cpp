@@ -59,6 +59,24 @@ namespace encke
         u32 face = 1;
     };
 
+    // A body's baked look from far off (terrain/surface_map): its albedo in
+    // `material`'s albedo and its normal and roughness in its ORM slot. Beside
+    // a Renderable, the object is shaded from it. With `impostor` the
+    // object is the body itself, a sphere of `radius` about the entity's
+    // origin, its Renderable's mesh only the shape the rasteriser covers the
+    // sphere with; the map's heights, which the surface is raised by, run
+    // from height.x over height.y metres. Otherwise it is a terrain chunk
+    // whose voxels are wider than the map's texels, whose mesh space is
+    // body space less `corner`.
+    struct BodyMap
+    {
+        MaterialHandle material;
+        f32vec3        corner{0.0f};
+        f32            radius = 0.0f;
+        f32vec2        height{0.0f, 1.0f};
+        bool           impostor = false;
+    };
+
     // What terrain chunks are drawn with: gravel, rock, grass, snow and sand,
     // blended by each vertex's weights (TerrainVertex::materials), each with
     // a flat linear colour drawn until its maps have landed. Every tile must

@@ -129,7 +129,9 @@ src/
     macro_field.{hpp,cpp}  FastNoise2 graphs per channel on a body-fixed lattice, trilinear
     terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
     surface_nets.{hpp,cpp}  a chunk's samples -> vertices and quads, under the ownership rule
-    planet.{hpp,cpp}     PlanetTerrain, culling, GroundProbe, TerrainOctree: the chunks the camera wants
+    ground.{hpp,cpp}     the five ground sets and the climate rule that weighs them, for chunks and maps
+    surface_map.{hpp,cpp} a body's look from far off, baked: a cube atlas of albedo, normal, roughness, height
+    planet.{hpp,cpp}     PlanetTerrain, culling, GroundProbe, TerrainOctree: the chunks the camera wants, or the impostor
     benchmark.{hpp,cpp}  `encke --headless`: octaves per LOD; samples/s per layer, apron, gradients, LOD 0 and 4;
                          `encke --sweep [n]`: every LOD, n random-seed chunks, against FastNoise2's own cost
 shaders/
@@ -151,6 +153,7 @@ shaders/
     pbr.slang            GGX / Smith / Schlick, spot cone
     normal.slang         octahedral encode and decode
     morph.slang          terrain geomorph: target, distance, neighbour masks
+    surface_map.slang    a surface map's lookup by body-space direction; mirrors terrain/surface_map
     atmosphere.slang     the air: medium, phases, LUT parameterisations, the view-ray march
     cas.slang            AMD's Contrast Adaptive Sharpening, ported; MIT notice kept
     screen.slang         fragment/NDC/UV conversions and the Y conventions
@@ -158,7 +161,7 @@ shaders/
 tests/                 Catch2, mirroring src/: camera projection and view, transform propagation,
                        which atmosphere a point sees, terrain noise against an f64 oracle
                        (terrain/perlin_reference), meshing and morph targets, octree balance,
-                       FastNoise2 under mimalloc
+                       the impostor's handover, surface map projection and bake, FastNoise2 under mimalloc
 ports/fastnoise2/      vcpkg overlay port: FastNoise2 v1.1.1 plus two patches
 assets/
   textures/            one directory per ambientCG set; CREDITS.md says where each came from
@@ -1409,6 +1412,89 @@ Known gaps:
 - The X and Z projections have not been seen on a real cliff; the pole
   has none near it.
 - One palette for every body.
+
+### Surface maps and impostors
+
+Each body's look from far off is baked once into a surface map
+(`terrain/surface_map`), and past the distance its relief goes under a
+pixel the body is drawn as an impostor: a sphere shaded from that map, with
+no chunk meshed. The reason is scale, not speed: the octree already draws
+the Earth from geostationary orbit as its eight root chunks, but a system
+of a dozen bodies should cost a draw and a map each until the camera nears
+one.
+
+- **The map is a cube atlas**, two RGBA8 textures three faces across and
+  two down: albedo (sRGB), and the normal in each face's tangent frame,
+  roughness and height (UNORM). Each face's tile carries a border of the
+  same projection carried on past its edge, so filtering and the first
+  four mips never reach another tile; the shader clamps its level there.
+  `kSurfaceMapFace` is 1024, about 12 km a texel at the Earth's face
+  centres. `shaders/lib/surface_map.slang` mirrors the projection and the
+  tangent frame, which is right-handed about the outward direction, so its
+  second axis is -t on the negative faces; `surface_map_test` pins both.
+- **The bake is the chunks' own rules at the texel's scale.** The macro
+  height alone, at 2x2 sub-samples a texel, each with its normal across
+  its neighbours and its ground materials by `ground_materials`, which
+  lives in `terrain/ground` so chunks and maps share it; the climate is
+  read once a texel. The macro graphs are evaluated at the points
+  (`MacroField::sample_points`), since a lattice box spanning a face would
+  be enormous. Each ground set's colour and roughness are what the
+  G-buffer shows once its maps have mipped to one texel: the mean of its
+  colour map in linear, its roughness remapped to its floor, and Toksvig
+  for the bump its normal map averages away (`measure_ground`, once per
+  octree). One sample a texel turned the mountain belts' few-kilometre
+  spurs into speckle wherever slope decides snow and rock; the
+  sub-samples soften it to a mottle.
+- **Six jobs on the pool, one per face;** the last to finish lays out the
+  atlas, so the main thread only hands the pixels to the asset manager
+  (`add_texture`, `add_material`). The bake's priority is the nearest a
+  chunk shaded from it can be, `map_priority`: from orbit it goes before
+  every chunk, on the ground after the ones near the camera.
+- **Chunks from `kSurfaceMapLod` (16) up are shaded from the map** (flag 4
+  in `morph_masks.z`, the map's handles in `textures`, the chunk's corner
+  in `Object::surface_map`), once its textures have landed; until then
+  they keep the palette. Their voxels are wider than most of the map's
+  texels, and so the root chunks and the impostor show the same colour,
+  normal and roughness: the handover changes only geometry.
+- **The impostor** is an entity under the body with a `BodyMap` whose
+  `impostor` is set, drawn by its own pipeline (`impostor_main` in
+  `gbuffer.slang`) after every other G-buffer draw, since it writes
+  `SV_DepthLessEqual` and would cost the main pipeline its early depth
+  test. Its mesh is a UV sphere scaled to cover the highest ground; each
+  pixel intersects its ray with the sphere of the radius, from the ray's
+  closest approach rather than differencing two huge squares, reads the
+  map, is lifted to the ground's height on it, and writes everything the
+  G-buffer holds, motion included. Lighting, the air and TAA treat it like
+  any geometry, which is what gives it its terminator and limb. It casts
+  no shadow map; the body's shadow is the lighting pass's.
+- **The handover is the octree's swap rule.** Past `impostor_distance`,
+  (k + sqrt 3) root edges from the centre, no root splits; past that times
+  `kImpostorHysteresis` the impostor replaces every chunk at once and
+  nothing is meshed. Coming back in, chunks are meshed from there while it
+  stays, and inside `impostor_distance` they replace it in the frame the
+  last is ready. `octree_test` flies out and in, checking every frame that
+  exactly one of the two is on screen.
+- `TerrainOctree::idle()` waits for every map, since landing one changes
+  the coarse chunks.
+
+Verified by capture: the ground start view is byte-identical to before
+maps existed; the root chunks and the impostor, captured from the same
+pose inside the hysteresis band at a pinned EV, differ by a few percent
+where the chunks' 262 km facets bend the air and the lookup.
+
+Known gaps:
+
+- The map is magnified from a few thousand kilometres, where map-shaded
+  chunks still are: its texels show, and the spurs still mottle snowfields.
+  Supersampling further, or a bake prefiltered by octave, would help.
+- The night side is lit by the frame's one ambient environment, taken at
+  the camera, as the chunks are.
+- Impostors are traced at one height per pixel: no parallax, no relief on
+  the limb, and no mountain casts a shadow on the map.
+- The map lives in memory and is baked every run; nothing caches it.
+- An impostor waits for its textures to land before it draws. The octree
+  switches once the bake is done, and they land in the same frame unless
+  the upload budget is full, which would leave a frame with neither.
 
 ## Camera control
 

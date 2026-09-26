@@ -243,6 +243,37 @@ namespace encke::terrain
         }
     }
 
+    void MacroField::sample_points(span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                                   MacroValues& out, size_t first, size_t last)
+    {
+        size_t const count = x.size();
+        if (!fill_constants(count, out, first, last))
+        {
+            return;
+        }
+
+        node_values_.resize(count);
+        for (size_t channel = first; channel < last; ++channel)
+        {
+            FastNoise::SmartNode<> const& graph = nodes_->graphs[channel];
+            if (!graph)
+            {
+                continue;
+            }
+
+            graph->GenPositionArray3D(node_values_.data(), static_cast<int>(count), x.data(), y.data(), z.data(),
+                                      0.0f, 0.0f, 0.0f, seed_);
+
+            MacroChannelSpec const& mapping = spec_.channels[channel];
+            span<f32> const         values  = out.channels[channel];
+            for (size_t i = 0; i < count; ++i)
+            {
+                values[i] = static_cast<f32>(static_cast<f64>(mapping.bias) +
+                                             static_cast<f64>(mapping.scale) * static_cast<f64>(node_values_[i]));
+            }
+        }
+    }
+
     void MacroField::sample(f64vec3 const& origin, f64 voxel_size,
                             span<f32 const> x, span<f32 const> y, span<f32 const> z,
                             MacroValues& out, size_t first, size_t last)

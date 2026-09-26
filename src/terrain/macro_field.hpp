@@ -85,6 +85,15 @@ namespace encke::terrain
                          span<f32 const> x, span<f32 const> y, span<f32 const> z,
                          MacroValues& out, size_t first = 0, size_t last = kFieldChannelCount);
 
+        // The same at the body-relative points (x[i], y[i], z[i]) by the
+        // graphs alone, with no lattice: for bakes whose points are far
+        // apart, which sample() would cover with one lattice box spanning
+        // all of them. Within f32 rounding of the lattice's values, since
+        // the graphs vary over kilometres and the lattice is a few tens of
+        // metres.
+        void sample_points(span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                           MacroValues& out, size_t first = 0, size_t last = kFieldChannelCount);
+
     private:
         struct Nodes;
 

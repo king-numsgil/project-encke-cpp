@@ -112,6 +112,19 @@ namespace encke
         return handle;
     }
 
+    TextureHandle AssetManager::add_texture(string name, TextureEncoding encoding, Pixels pixels)
+    {
+        TextureHandle const handle{.index = static_cast<u32>(textures_.size()), .generation = 0};
+        textures_.push_back(TextureAsset{
+            .name       = std::move(name),
+            .generation = 0,
+            .state      = AssetState::Ready,
+            .encoding   = encoding,
+        });
+        ready_textures_.push_back(ReadyTexture{.handle = handle, .pixels = std::move(pixels)});
+        return handle;
+    }
+
     TextureHandle AssetManager::load_texture(string const& key, string name,
                                              TextureEncoding encoding,
                                              function<bool(Pixels& pixels)> decode)

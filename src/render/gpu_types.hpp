@@ -61,7 +61,8 @@ namespace encke::gpu
         f32vec4 post;
 
         // x the TerrainMaterial buffer, kTerrainMaterialCount of them, or
-        // ~0 with none; yzw unused.
+        // ~0 with none; y a surface map's face size in texels, z its
+        // border (terrain/surface_map); w unused.
         u32vec4 terrain;
     };
 
@@ -158,12 +159,20 @@ namespace encke::gpu
         // start), z chunk extent, w voxel, all metres.
         f32vec4 morph;
         // A terrain chunk's: x coarser neighbours, y finer; z flags, 1 to
-        // morph, 2 to blend the terrain palette, 0 for anything not terrain;
-        // w the bindless TerrainVertex buffer.
+        // morph, 2 to blend the terrain palette, 4 to shade from its body's
+        // surface map instead, 0 for anything not terrain; w the bindless
+        // TerrainVertex buffer.
         u32vec4 morph_masks;
         // Terrain: xyz Geomorph::period_offset, added to mesh positions for
         // the triplanar rock and the cube-projected UVs; w Geomorph::face.
         f32vec4 period_offset;
+        // Shaded from a body's surface map (BodyMap), whose albedo is then
+        // textures.x and whose normal, roughness and height textures.z. A
+        // chunk's xyz is its corner, body-relative, so mesh space plus this
+        // is body space; an impostor's xy the lowest height and the span
+        // above it that the map's heights run across. w the body's radius,
+        // which an impostor is the sphere of.
+        f32vec4 surface_map;
     };
 
     inline constexpr u32 kNoTexture = ~0u;
@@ -227,6 +236,6 @@ namespace encke::gpu
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
-    static_assert(sizeof(Object) == 368);
+    static_assert(sizeof(Object) == 384);
     static_assert(sizeof(Push) == 124,"must fit the 128-byte guaranteed minimum");
 }

@@ -27,7 +27,15 @@ namespace encke::terrain
             return terrain;
         }
 
-        OctreeSettings const kSettings{.finest_lod = 8, .split_factor = 2.0, .cull_factor = 1.5};
+        // A small surface map, so the bake the octree starts is quick.
+        OctreeSettings const kSettings{
+            .finest_lod = 8,
+            .split_factor = 2.0,
+            .cull_factor = 1.5,
+            .map_layout = SurfaceMapLayout{.face = 32, .border = 4},
+            .map_lod = 11,
+            .impostor_hysteresis = 1.25,
+        };
 
         bool contains(NodeKey const& outer, NodeKey const& inner)
         {
@@ -219,6 +227,90 @@ namespace encke::terrain
             CHECK(assets.mesh(handle) != nullptr);
         }
 
+        pool.stop();
+    }
+
+    TEST_CASE("the impostor replaces the whole body far out and hands back without a gap", "[terrain][octree]")
+    {
+        Scene        scene;
+        AssetManager assets;
+        WorkerPool   pool;
+        pool.start(2, "impostor test");
+
+        BodyTerrain const  terrain = asteroid();
+        entt::entity const body    = scene.registry.create();
+        scene.registry.emplace<Transform>(body);
+        scene.registry.emplace<PlanetTerrain>(body, PlanetTerrain{.terrain = std::make_shared<BodyTerrain const>(terrain)});
+
+        scene.camera = scene.registry.create();
+        scene.registry.emplace<Transform>(scene.camera);
+
+        TerrainOctree octree{kSettings};
+
+        // Something is on screen every frame once anything has been: the
+        // impostor, or chunks, and never both.
+        bool shown_once = false;
+        u32  empty      = 0;
+        u32  both       = 0;
+        auto const frame = [&](f64vec3 const& camera) {
+            scene.registry.get<Transform>(scene.camera).position = camera;
+            propagate_transforms(scene.registry);
+            pool.drain();
+            octree.update(scene, assets, pool);
+            assets.take_released_meshes();
+            assets.take_ready_meshes();
+            assets.take_ready_textures();
+
+            bool const impostor = octree.impostors_shown() > 0;
+            bool const chunks   = !octree.displayed().empty();
+            shown_once          = shown_once || impostor || chunks;
+            empty += shown_once && !impostor && !chunks ? 1u : 0u;
+            both += impostor && chunks ? 1u : 0u;
+        };
+        auto const settle = [&](f64vec3 const& camera) {
+            frame(camera);
+            for (int step = 0; step < 1'000'000 && !octree.idle(); ++step)
+            {
+                frame(camera);
+            }
+            REQUIRE(octree.idle());
+        };
+
+        f64 const leave = impostor_distance(terrain, kSettings);
+        f64 const enter = leave * kSettings.impostor_hysteresis;
+
+        // Near: chunks, and the coarse ones shaded from the map.
+        settle(f64vec3{0.0, 0.6 * leave, 0.0});
+        CHECK(octree.impostors_shown() == 0);
+        CHECK(!octree.displayed().empty());
+        CHECK(scene.registry.view<BodyMap>().size() > 0);
+
+        // Out past `enter`: the impostor alone, and no chunk kept.
+        settle(f64vec3{0.0, 1.2 * enter, 0.0});
+        CHECK(octree.impostors_shown() == 1);
+        CHECK(octree.displayed().empty());
+        CHECK(octree.meshes().empty());
+
+        // Back inside `enter` but not `leave`: still the impostor, with the
+        // chunks meshed behind it.
+        settle(f64vec3{0.0, 0.5 * (leave + enter), 0.0});
+        CHECK(octree.impostors_shown() == 1);
+        CHECK(octree.displayed().empty());
+        CHECK(!octree.meshes().empty());
+
+        // Inside `leave`: the chunks, which were ready, in its place.
+        settle(f64vec3{0.0, 0.9 * leave, 0.0});
+        CHECK(octree.impostors_shown() == 0);
+        CHECK(!octree.displayed().empty());
+
+        // Straight out and straight back in, a frame at each, with nothing
+        // meshed yet for the way back: the impostor holds until they are.
+        settle(f64vec3{0.0, 2.0 * enter, 0.0});
+        settle(f64vec3{0.0, 0.3 * leave, 0.0});
+        CHECK(octree.impostors_shown() == 0);
+
+        CHECK(empty == 0);
+        CHECK(both == 0);
         pool.stop();
     }
 }

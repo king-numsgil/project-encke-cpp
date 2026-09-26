@@ -180,8 +180,10 @@ add_library(encke_core OBJECT
 
     src/terrain/benchmark.cpp
     src/terrain/detail_noise.cpp
+    src/terrain/ground.cpp
     src/terrain/macro_field.cpp
     src/terrain/planet.cpp
+    src/terrain/surface_map.cpp
     src/terrain/surface_nets.cpp
     src/terrain/terrain_field.cpp
 
@@ -454,6 +456,7 @@ add_executable(encke_tests
     tests/terrain/octree_test.cpp
     tests/terrain/perlin_reference.cpp
     tests/terrain/planet_test.cpp
+    tests/terrain/surface_map_test.cpp
     tests/terrain/surface_nets_test.cpp
     tests/terrain/terrain_field_test.cpp
     tests/world/bodies_test.cpp

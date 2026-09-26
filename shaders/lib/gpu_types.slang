@@ -34,7 +34,7 @@ public struct GpuFrame
                                      // z EV100 image (sampled) or ~0, w linear clamped sampler
     public float4x4 sky_reprojection; // view direction now -> last frame's clip, rotation only
     public float4   post;            // x CAS sharpness in tonemap, 0 skips it
-    public uint4    terrain;         // x GpuTerrainMaterial buffer or ~0
+    public uint4    terrain;         // x GpuTerrainMaterial buffer or ~0; y surface map face size, z border
 };
 
 // Gravel, rock, grass, snow, sand. See TerrainMaterial in render/gpu_types.hpp.
@@ -102,9 +102,13 @@ public struct GpuObject
     public float4   texture_scale;     // xyz scale / tile width (m), w tile width / height
     public float4   morph;             // x start distance, y 1 / (end - start), z extent, w voxel (m)
     public uint4    morph_masks;       // terrain: x coarser neighbours, y finer, z flags (1 morph,
-                                       // 2 terrain palette, 0 not terrain), w TerrainVertex buffer
+                                       // 2 terrain palette, 4 surface map, 0 not terrain),
+                                       // w TerrainVertex buffer
     public float4   period_offset;     // terrain: xyz added to mesh positions for triplanar
                                        // and cube-projected UVs, w the cube face (0 x, 1 y, 2 z)
+    public float4   surface_map;       // surface map: xyz chunk corner (body space = mesh + this), or
+                                       // an impostor's xy lowest height and span; w body radius;
+                                       // textures.x albedo, textures.z normal, roughness, height
 };
 
 // See TerrainVertex in render/mesh.hpp.
@@ -165,6 +169,6 @@ public struct Push
 public static const uint kFrameStride      = 416;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
-public static const uint kObjectStride     = 368;
+public static const uint kObjectStride     = 384;
 public static const uint kTerrainVertexStride = 20;
 public static const uint kMatrixStride     = 64;

@@ -29,6 +29,7 @@ namespace encke
 
         Renderable         renderable;
         optional<Geomorph> geomorph;
+        optional<BodyMap>  body_map;
     };
 
     struct RenderLight

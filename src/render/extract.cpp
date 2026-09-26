@@ -65,6 +65,7 @@ namespace encke
             f64vec3 const          extent = (max - min) * 0.5;
 
             Geomorph const* const geomorph = registry.try_get<Geomorph>(entity);
+            BodyMap const* const  body_map = registry.try_get<BodyMap>(entity);
 
             list.objects.push_back(RenderObject{
                 .entity        = entity,
@@ -74,6 +75,7 @@ namespace encke
                 .bounds_radius = glm::length(extent * size),
                 .renderable    = renderable,
                 .geomorph      = geomorph != nullptr ? optional<Geomorph>{*geomorph} : nullopt,
+                .body_map      = body_map != nullptr ? optional<BodyMap>{*body_map} : nullopt,
             });
         }
 

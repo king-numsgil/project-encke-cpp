@@ -356,6 +356,11 @@ namespace encke
         vector<std::pair<f64, VkDrawIndexedIndirectCommand>> gbuffer_order_;
         array<u32, config::kShadowViewCount>     shadow_draws_{};
 
+        // Impostors in view, written after the G-buffer's draws; drawn last,
+        // behind everything, by impostor_pipeline_.
+        vector<VkDrawIndexedIndirectCommand> impostor_order_;
+        u32                                  impostor_draws_ = 0;
+
         // Auto-exposure. The histogram is GPU-only and zeroed by the adapt
         // pass after reading, so it starts each frame empty. The EV100 image
         // persists across frames, which is the adaptation state; it is
@@ -444,6 +449,10 @@ namespace encke
         bool    capture_recorded_  = false;
 
         GraphicsPipeline gbuffer_pipeline_;
+        // The G-buffer's for impostors, which write their own depth, so kept
+        // off the main pipeline, where it would cost every draw its early
+        // depth test.
+        GraphicsPipeline impostor_pipeline_;
         GraphicsPipeline shadow_pipeline_;
         GraphicsPipeline tonemap_pipeline_;
         ComputePipeline  cluster_pipeline_;

@@ -94,6 +94,9 @@ namespace encke
             .finest_lod   = config::kTerrainFinestLod,
             .split_factor = config::kTerrainSplitFactor,
             .cull_factor  = config::kTerrainCullFactor,
+            .map_layout   = terrain::SurfaceMapLayout{.face = config::kSurfaceMapFace, .border = config::kSurfaceMapBorder},
+            .map_lod      = config::kSurfaceMapLod,
+            .impostor_hysteresis = config::kImpostorHysteresis,
         }};
 
         // Last, so its threads stop before anything above goes: completions

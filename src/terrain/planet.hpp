@@ -2,8 +2,10 @@
 
 #include "assets/handle.hpp"
 #include "render/components.hpp"
+#include "terrain/surface_map.hpp"
 #include "terrain/terrain_field.hpp"
 
+#include <atomic>
 #include <memory>
 
 namespace encke
@@ -106,7 +108,26 @@ namespace encke::terrain
         // it, so a leaf's voxels cover about the same angle wherever it is.
         f64 split_factor = 2.0;
         f64 cull_factor  = 1.5;
+
+        // Each body's surface map: its resolution, the LOD from which chunks
+        // are shaded from it, and how much further out than
+        // impostor_distance the impostor takes over, so it does not flicker
+        // back and forth across one distance.
+        SurfaceMapLayout map_layout{};
+        u32              map_lod             = 16;
+        f64              impostor_hysteresis = 1.25;
     };
+
+    // Past this distance from a body's centre no root node would split, so
+    // the octree shows the eight roots and nothing finer: (k + sqrt 3) root
+    // edges, since every root touches the centre and reaches sqrt 3 edges
+    // from it. The impostor replaces the roots from here out.
+    f64 impostor_distance(BodyTerrain const& terrain, OctreeSettings const& settings);
+
+    // The nearest a chunk at settings.map_lod or coarser is to the camera,
+    // since a node splits within split_factor of its edges: the bake's
+    // priority on the pool, which orders chunks by distance.
+    f64 map_priority(BodyTerrain const& terrain, OctreeSettings const& settings);
 
     // The coarsest LOD: the least whose chunk edge reaches from the centre
     // past the bounding radius, so eight chunks cover the body.
@@ -161,6 +182,18 @@ namespace encke::terrain
     // has caught up with the camera; while meshing lags, a node kept on
     // screen past its time can still pop when it goes.
     //
+    // Every body's surface map is baked on the pool as soon as the body is
+    // seen, as urgently as the nearest chunk that would be shaded from it:
+    // a chunk's priority is its distance, and no chunk from map_lod up is
+    // nearer than map_priority. From orbit that is ahead of every chunk, and
+    // on the ground behind the ones around the camera. Once it is baked,
+    // chunks from settings.map_lod up
+    // are shaded from it, and past impostor_distance times the hysteresis a
+    // sphere shaded from it replaces the whole body, with no chunk meshed.
+    // Coming back in, the chunks are meshed from that distance while the
+    // sphere stays, and replace it together inside impostor_distance, once
+    // all are ready: the same rule as any swap.
+    //
     // Main thread only; completions run in the pool's drain(), and update()
     // goes after it and before Scene::update.
     class TerrainOctree
@@ -174,7 +207,8 @@ namespace encke::terrain
 
         void update(Scene& scene, AssetManager& assets, WorkerPool& pool);
 
-        // Every body shows exactly the leaves the camera wants, all meshed.
+        // Every body's surface map is baked, and it shows exactly the
+        // leaves the camera wants, all meshed, or its impostor.
         bool idle() const;
 
         // Frozen, update() selects, submits and swaps nothing: what is on
@@ -194,13 +228,33 @@ namespace encke::terrain
         vector<NodeKey>    displayed() const;
         vector<MeshHandle> meshes() const;
 
+        // How many bodies are drawn as their impostor: for tests.
+        u32 impostors_shown() const;
+
     private:
         struct Body;
         struct Node;
+        struct Bake;
 
         void submit(std::shared_ptr<Body> const& body, NodeKey const& key);
         void complete(std::shared_ptr<Body> const& body, NodeKey const& key,
                       std::shared_ptr<MeshData> const& data, bool skipped);
+
+        // The six faces of a body's surface map, one job each; the last to
+        // finish lays out the atlas, and finish_map takes it on the main
+        // thread.
+        void bake_map(std::shared_ptr<Body> const& body);
+        void finish_map(Body& body, Bake& bake, entt::registry& registry);
+
+        // Takes a node off screen: its entity destroyed, its mesh released.
+        // Returns whether it was on screen.
+        bool hide(Node& node, entt::registry& registry);
+
+        // A displayed chunk takes the body's map if it is coarse enough.
+        void give_map(Body const& body, NodeKey const& key, Node const& node, entt::registry& registry) const;
+
+        void show_impostor(Body& body, entt::registry& registry);
+        void hide_impostor(Body& body, entt::registry& registry);
 
         // Rewrites the Geomorph masks of every node on screen next to one of
         // `changed`, which came on or went off this frame.
@@ -211,8 +265,18 @@ namespace encke::terrain
         optional<TerrainPalette>      palette_;
         bool                          frozen_ = false;
 
+        // The ground sets' far-off looks, measured once for every body's map
+        // on the pool; null until then.
+        std::shared_ptr<GroundLook const> ground_look_;
+        bool                              measuring_ = false;
+
+        // The sphere every impostor is drawn over, sized per body; added on
+        // first use.
+        MeshHandle impostor_mesh_;
+
         // Set by update(), for completions and resubmissions; main thread.
-        AssetManager* assets_ = nullptr;
-        WorkerPool*   pool_   = nullptr;
+        AssetManager*   assets_   = nullptr;
+        WorkerPool*     pool_     = nullptr;
+        entt::registry* registry_ = nullptr;
     };
 }

@@ -460,7 +460,11 @@ namespace encke
             return false;
         }
 
+        GraphicsPipeline::Config impostor_config = gbuffer_config;
+        impostor_config.fragment_entry           = "impostor_main";
+
         if (!gbuffer_pipeline_.init(device, gbuffer_config) ||
+            !impostor_pipeline_.init(device, impostor_config) ||
             !shadow_pipeline_.init(device, shadow_config) ||
             !tonemap_pipeline_.init(device, tonemap_config) ||
             !cluster_pipeline_.init(device, cluster_config) ||
@@ -1251,7 +1255,7 @@ namespace encke
                                         lut_sampler_handle_},
             .sky_reprojection = f32mat4{sky_reprojection},
             .post             = f32vec4{taa_ ? config::kCasSharpness : 0.0f, 0.0f, 0.0f, 0.0f},
-            .terrain          = u32vec4{terrain_handle, 0u, 0u, 0u},
+            .terrain          = u32vec4{terrain_handle, config::kSurfaceMapFace, config::kSurfaceMapBorder, 0u},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 
@@ -1285,9 +1289,12 @@ namespace encke
             casters      = 0;
             for (u32 object = 0; object < object_count; ++object)
             {
+                // An impostor's mesh is only the cover its sphere is traced
+                // under, and the body's shadow is the lighting pass's.
                 RenderObject const&        caster = render_list_.objects[object];
                 GeometryPool::Range const* range  = mesh_range(caster.renderable.mesh);
-                if (range == nullptr || !range->resident ||
+                bool const impostor = caster.body_map.has_value() && caster.body_map->impostor;
+                if (range == nullptr || !range->resident || impostor ||
                     !map.may_cast(caster.bounds_centre, caster.bounds_radius))
                 {
                     continue;
@@ -1367,6 +1374,34 @@ namespace encke
                 }
             }
 
+            // Shaded from its body's surface map once the map's textures have
+            // landed: a coarse chunk with flag 4, which leaves its palette
+            // alone until then, and an impostor, which draws nothing until
+            // then.
+            f32vec4 surface_map{0.0f};
+            bool    impostor = false;
+            if (object.body_map.has_value())
+            {
+                BodyMap const&             body_map = *object.body_map;
+                MaterialAsset const* const map      = assets.material(body_map.material);
+                optional<u32vec4> const    live     = map != nullptr ? material_textures(*map, assets) : nullopt;
+                impostor                            = body_map.impostor;
+                if (live.has_value())
+                {
+                    textures    = *live;
+                    surface_map = impostor ? f32vec4{body_map.height, 0.0f, body_map.radius}
+                                           : f32vec4{body_map.corner, body_map.radius};
+                    if (!impostor)
+                    {
+                        morph_masks.z |= 4u;
+                    }
+                }
+                else if (impostor)
+                {
+                    continue;
+                }
+            }
+
             gpu::Object const gpu_object{
                 .mvp               = f32mat4{jittered * model_view},
                 .prev_mvp          = f32mat4{previous_projection * previous_model_view},
@@ -1380,6 +1415,7 @@ namespace encke
                 .morph             = morph,
                 .morph_masks       = morph_masks,
                 .period_offset     = period_offset,
+                .surface_map       = surface_map,
             };
             std::memcpy(&objects[index], &gpu_object, sizeof(gpu_object));
 
@@ -1394,6 +1430,11 @@ namespace encke
             if (range != nullptr && range->resident &&
                 sphere_in_view(centre, radius, projection[0][0], projection[1][1]))
             {
+                if (impostor)
+                {
+                    impostor_order_.push_back(draw_command(*range, index));
+                    continue;
+                }
                 f64 const nearest = std::max(glm::length(centre) - radius, 0.0);
                 gbuffer_order_.emplace_back(nearest, draw_command(*range, index));
             }
@@ -1406,6 +1447,11 @@ namespace encke
             draws[gbuffer_draws_++] = command;
         }
         gbuffer_order_.clear();
+
+        // Every object is one draw at most, so these still fit.
+        impostor_draws_ = static_cast<u32>(impostor_order_.size());
+        std::ranges::copy(impostor_order_, draws + gbuffer_draws_);
+        impostor_order_.clear();
 
         // Only this frame's objects carry over, so a destroyed entity's entry
         // goes with it, and a recycled entity id never meets a stale one.
@@ -1651,6 +1697,15 @@ namespace encke
             {
                 vkCmdDrawIndexedIndirect(command, resources.draws.handle(), 0, gbuffer_draws_,
                                          static_cast<u32>(kDrawStride));
+            }
+
+            // Last, behind everything already drawn, whose depth rejects
+            // most of their pixels before they trace anything.
+            if (impostor_draws_ > 0)
+            {
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, impostor_pipeline_.handle());
+                vkCmdDrawIndexedIndirect(command, resources.draws.handle(), gbuffer_draws_ * kDrawStride,
+                                         impostor_draws_, static_cast<u32>(kDrawStride));
             }
 
             vkCmdEndRendering(command);
@@ -2394,6 +2449,7 @@ namespace encke
         timestamps_.shutdown();
 
         gbuffer_pipeline_.shutdown();
+        impostor_pipeline_.shutdown();
         shadow_pipeline_.shutdown();
         tonemap_pipeline_.shutdown();
         cluster_pipeline_.shutdown();

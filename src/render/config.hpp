@@ -42,6 +42,23 @@ namespace encke::config
     // chunk from LOD 4 to 8; planet_test measures them against this.
     inline constexpr f64 kTerrainCullFactor = 2.0;
 
+    // Each body's surface map (terrain/surface_map): a cube of this many
+    // texels a face side, about 12 km at the Earth's face centres, inside a
+    // border of this many, which keeps filtering and the first four mips
+    // from reaching into the next face's tile.
+    inline constexpr u32 kSurfaceMapFace   = 1024;
+    inline constexpr u32 kSurfaceMapBorder = 16;
+
+    // Chunks from this LOD up, whose 16 km voxels are wider than most of the map's
+    // texels, are shaded from the map instead of their vertices' materials,
+    // which is also what the impostor draws: the handover then changes only
+    // geometry, and that is under a pixel.
+    inline constexpr u32 kSurfaceMapLod = 16;
+
+    // The impostor takes over this much further out than the distance past
+    // which no root node would split, and hands back at that distance.
+    inline constexpr f64 kImpostorHysteresis = 1.25;
+
     // -- material textures ---------------------------------------------------------
     // Capped further by the device's maxSamplerAnisotropy.
     inline constexpr f32 kMaxAnisotropy = 16.0f;

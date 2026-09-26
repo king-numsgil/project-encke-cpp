@@ -19,6 +19,7 @@ import lib.gpu_types;
 import lib.morph;
 import lib.normal;
 import lib.screen;
+import lib.surface_map;
 
 struct VertexIn
 {
@@ -45,6 +46,9 @@ struct VertexOut
     // period offset, and the mesh-space normal, for the triplanar rock.
     float3 mesh_position : TEXCOORD4;
     float3 mesh_normal   : TEXCOORD5;
+
+    // The impostor's view ray goes through this.
+    float3 view_position : TEXCOORD6;
 
     // The object index, which the draw's firstInstance carries. Flat, and
     // the same for every vertex of a draw.
@@ -116,6 +120,7 @@ VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint 
     output.materials     = materials;
     output.mesh_position = morphed.position + object.period_offset.xyz;
     output.mesh_normal   = morphed.normal;
+    output.view_position = mul(object.model_view, local).xyz;
     output.object        = instance;
     return output;
 }
@@ -383,7 +388,24 @@ GBuffer fragment_main(VertexOut input)
 
     // Uniform across one draw of the indirect batch, but not across the
     // batch: hence NonUniformResourceIndex on every handle.
-    if ((object.morph_masks.z & 2u) != 0u)
+    if ((object.morph_masks.z & 4u) != 0u)
+    {
+        // A chunk coarser than the body's surface map's texels: shaded as
+        // the impostor is, from the map at its body-space direction. Its
+        // own normal is only as fine as its voxels, the map's is finer.
+        GpuFrame     frame  = load_frame();
+        SamplerState filter = g_samplers[NonUniformResourceIndex(push.material_sampler)];
+        float3       body   = input.mesh_position - object.period_offset.xyz + object.surface_map.xyz;
+        float3       d      = normalize(body);
+        MapSample    map    = sample_surface_map(object.textures.x, object.textures.z, filter, frame.terrain.y,
+                                                 frame.terrain.z, d, ddx(d), ddy(d));
+
+        albedo    = map.albedo;
+        roughness = map.roughness;
+        metallic  = 0.0f;
+        normal    = normalize(mul(object.normal_view, float4(map.normal, 0.0f)).xyz);
+    }
+    else if ((object.morph_masks.z & 2u) != 0u)
     {
         // Terrain: the palette's materials, their maps as they are. The
         // chunk's own factors are all 1.
@@ -432,5 +454,91 @@ GBuffer fragment_main(VertexOut input)
     output.material  = float2(roughness, metallic);
     output.motion    = previous_uv - current_uv;
     output.emissive  = float4(emissive, 1.0f);
+    return output;
+}
+
+struct ImpostorGBuffer
+{
+    float4 albedo_ao : SV_Target0;
+    float2 normal    : SV_Target1;
+    float2 material  : SV_Target2;
+    float2 motion    : SV_Target3;
+    float4 emissive  : SV_Target4;
+
+    // Always behind the sphere drawn over it, which in reversed-Z is less,
+    // so the rasterised depth may still reject it early.
+    float depth : SV_DepthLessEqual;
+};
+
+// A body far enough off that its relief is under a pixel: the sphere of its
+// radius, shaded from its surface map. The mesh is only a cover for the
+// rasteriser, a little larger than the sphere; each pixel intersects its
+// view ray with the sphere and writes what it hits, depth included, and is
+// discarded if the ray misses.
+//
+// Everything is view space and small against f32's range: the centre tens
+// of thousands of kilometres off, which differences to metres.
+[shader("fragment")]
+ImpostorGBuffer impostor_main(VertexOut input)
+{
+    GpuObject object = load_object(input.object);
+    GpuFrame  frame  = load_frame();
+
+    float3 ray    = normalize(input.view_position);
+    float3 centre = mul(object.model_view, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    float  radius = object.surface_map.w;
+
+    // Nearest hit, from the ray's closest approach to the centre rather than
+    // |centre|^2 - radius^2, which would cancel two huge squares.
+    float  along   = dot(ray, centre);
+    float3 closest = centre - ray * along;
+    float  inside  = radius * radius - dot(closest, closest);
+    float3 hit     = ray * (along - sqrt(max(inside, 0.0f)));
+
+    // Body space, through the transpose of the model's rotation; the mesh's
+    // scale comes out in the normalise. Derivatives before the discard, so
+    // the pixels that hit still have their neighbours.
+    float3 local = mul(float4(hit - centre, 0.0f), object.model_view).xyz;
+    float3 d     = normalize(local);
+    float3 d_dx  = ddx(d);
+    float3 d_dy  = ddy(d);
+    if (inside < 0.0f)
+    {
+        discard;
+    }
+
+    SamplerState filter = g_samplers[NonUniformResourceIndex(push.material_sampler)];
+    MapSample    map    = sample_surface_map(object.textures.x, object.textures.z, filter, frame.terrain.y,
+                                             frame.terrain.z, d, d_dx, d_dy);
+
+    // Up to the ground's own height: the chunks this stands in for lie
+    // there, and lighting and the air go by altitude, so a range seen
+    // through less air is as bright here as on them. Shaded from where the
+    // ray met the radius, a few kilometres off, well inside a texel.
+    float lifted = radius + object.surface_map.x + object.surface_map.y * map.height;
+    float reach  = lifted * lifted - dot(closest, closest);
+    if (reach >= 0.0f)
+    {
+        hit   = ray * (along - sqrt(reach));
+        local = mul(float4(hit - centre, 0.0f), object.model_view).xyz;
+    }
+
+    // Rasterised through the jittered projection, whose third column does
+    // not touch z, so depth is the same either way; motion is measured
+    // without the jitter, as the vertex path does. Last frame's position is
+    // the hit in the mesh's own space, unscaled.
+    float4 current  = mul(frame.projection, float4(hit, 1.0f));
+    float  depth    = current.z / current.w;
+    current.xy     -= frame.taa.xy * current.w;
+    float3 column   = mul(object.model_view, float4(1.0f, 0.0f, 0.0f, 0.0f)).xyz;
+    float4 previous = mul(object.prev_mvp, float4(local / dot(column, column), 1.0f));
+
+    ImpostorGBuffer output;
+    output.albedo_ao = float4(map.albedo, 1.0f);
+    output.normal    = encode_normal(normalize(mul(object.normal_view, float4(map.normal, 0.0f)).xyz));
+    output.material  = float2(map.roughness, 0.0f);
+    output.motion    = ndc_to_uv(previous.xy / previous.w) - ndc_to_uv(current.xy / current.w);
+    output.emissive  = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    output.depth     = depth;
     return output;
 }

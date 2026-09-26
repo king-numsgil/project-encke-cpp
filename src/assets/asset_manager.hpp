@@ -149,6 +149,12 @@ namespace encke
         // second asks for.
         MaterialHandle load_ambientcg(string const& set, f32vec2 tile);
 
+        // A texture made in code; Ready at once. Not deduplicated.
+        TextureHandle add_texture(string name, TextureEncoding encoding, Pixels pixels);
+
+        // A material over textures already known; Ready at once.
+        MaterialHandle add_material(MaterialAsset material);
+
         // A glTF, parsed and converted on the worker. When it is Ready its
         // meshes are Ready too and its textures are decoding. Failed, logged,
         // if the file does not load.
@@ -184,8 +190,6 @@ namespace encke
         // worker, so it must capture only what it owns or shares.
         TextureHandle load_texture(string const& key, string name, TextureEncoding encoding,
                                    function<bool(Pixels& pixels)> decode);
-
-        MaterialHandle add_material(MaterialAsset material);
 
         // On the main thread, once the worker has parsed the file: registers
         // its meshes, textures and materials and builds the node tree over

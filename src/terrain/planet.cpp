@@ -7,6 +7,7 @@
 #include "platform/worker_pool.hpp"
 #include "render/components.hpp"
 #include "render/scene.hpp"
+#include "terrain/ground.hpp"
 #include "terrain/surface_nets.hpp"
 #include "world/transform.hpp"
 
@@ -74,94 +75,9 @@ namespace encke::terrain
             };
         }
 
-        // The ground's ambientCG sets, in the palette's order, with the
-        // metres one repeat covers, the flat linear colour each draws in
-        // until its maps land, and its roughness floor. Every tile divides
-        // kUvPeriod. The maps' own roughness averages 0.26 for Grass004 and
-        // 0.55 to 0.7 for the rest, which under a low sun read as wet stone
-        // and plastic grass; snow keeps the lowest floor, for its sheen.
-        struct GroundSet
-        {
-            char const* name;
-            f32         tile;
-            f32vec3     albedo;
-            f32         roughness;
-        };
-        array<GroundSet, 5> const kGroundSets{{
-            {"Ground110", 2.0f, {0.20f, 0.17f, 0.14f}, 0.75f},    // gravel
-            {"Rock051", 4.0f, {0.25f, 0.25f, 0.23f}, 0.65f},      // rock
-            {"Grass004", 2.0f, {0.07f, 0.13f, 0.03f}, 0.80f},     // grass
-            {"Snow010A", 4.0f, {0.80f, 0.85f, 0.90f}, 0.55f},     // snow
-            {"Ground093C", 2.0f, {0.45f, 0.35f, 0.22f}, 0.75f},   // sand
-        }};
-
-        // UVs are offset by whole multiples of this, which every material's
+        // UVs are offset by whole multiples of this, which every ground set's
         // tile must divide; a power of two, so exact in f32 as in f64.
         constexpr f64 kUvPeriod = 16.0;
-
-        // The climate by latitude, before the macro channels perturb it:
-        // degrees Celsius at the equator at the body's radius, lost toward a
-        // pole as the square of the sine of latitude, and lost per kilometre
-        // climbed. A pole at the radius sits about 6 degrees over freezing:
-        // cold grass and gravel, snow a few hundred metres up, and an ice cap
-        // only on high ground, which leaves the test scene at the north pole
-        // on open ground.
-        constexpr f32 kEquatorTemperature = 26.0f;
-        constexpr f32 kPolarCooling       = 20.0f;
-        constexpr f32 kLapseRate          = 6.5f;
-
-        // Moisture taken from the subtropics, peaking at this latitude in
-        // radians (28 degrees), over this half-width: the desert belts. And
-        // added at the equator, over its own half-width: the wet tropics.
-        constexpr f32 kDesertLatitude = 0.49f;
-        constexpr f32 kDesertWidth    = 0.2f;
-        constexpr f32 kDesertDrying   = 0.35f;
-        constexpr f32 kTropicsWidth   = 0.25f;
-        constexpr f32 kTropicsWetting = 0.25f;
-
-        f32 smoothstep(f32 edge0, f32 edge1, f32 x)
-        {
-            f32 const t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-            return t * t * (3.0f - 2.0f * t);
-        }
-
-        // The ground's mix at a vertex, as TerrainVertex packs it: rock where
-        // it is steep, then among what rock leaves, snow where it is cold,
-        // sand where it is hot and dry, grass where it is mild and wet, and
-        // gravel for the rest. The climate is set by latitude, against the
-        // body's Y axis, and altitude, and perturbed by the macro channels'
-        // `temperature` and `moisture`.
-        u32 ground_materials(f64vec3 const& point, f32vec3 const& normal, f64 radius, f32 temperature, f32 moisture)
-        {
-            f64 const     distance = glm::length(point);
-            f32vec3 const up{point / distance};
-            f32 const     altitude = static_cast<f32>((distance - radius) * 1e-3);
-            f32 const     latitude = std::asin(std::clamp(up.y, -1.0f, 1.0f));
-
-            f32 const warmth = kEquatorTemperature - kPolarCooling * up.y * up.y - kLapseRate * altitude + temperature;
-            f32 const belt    = (std::abs(latitude) - kDesertLatitude) / kDesertWidth;
-            f32 const tropics = latitude / kTropicsWidth;
-            f32 const wet     = moisture - kDesertDrying * std::exp(-belt * belt) +
-                            kTropicsWetting * std::exp(-tropics * tropics);
-            f32 const flat   = glm::dot(normal, up);
-
-            // Snow lies at a warmer temperature on wet ground, and slides off
-            // slopes long before they are rock.
-            f32 const rock      = smoothstep(0.80f, 0.62f, flat);
-            f32 const snow_line = 1.0f + 6.0f * (wet - 0.55f);
-            f32 const snow      = smoothstep(snow_line, snow_line - 4.0f, warmth) * smoothstep(0.82f, 0.95f, flat);
-            f32 const sand  = smoothstep(16.0f, 22.0f, warmth) * smoothstep(0.3f, 0.15f, wet);
-            f32 const grass = smoothstep(0.3f, 0.5f, wet) * smoothstep(3.0f, 8.0f, warmth) *
-                              smoothstep(34.0f, 28.0f, warmth);
-
-            // The flat materials share what rock leaves; past a full share
-            // between them, they are scaled down, and gravel gets nothing.
-            f32 const share = (1.0f - rock) / std::max(snow + sand + grass, 1.0f);
-            auto const byte = [](f32 weight) {
-                return static_cast<u32>(std::lround(std::clamp(weight, 0.0f, 1.0f) * 255.0f));
-            };
-            return byte(rock) | (byte(grass * share) << 8) | (byte(snow * share) << 16) | (byte(sand * share) << 24);
-        }
 
         // Surface nets output as render vertices, UVs in metres for tiling
         // materials. Each vertex is projected onto the face of the body's
@@ -652,6 +568,14 @@ namespace encke::terrain
         std::unordered_map<NodeKey, Node, NodeKeyHash> nodes;
         u32                                            in_flight = 0;
 
+        // The surface map: its faces submitted, and once baked, the material
+        // holding it. The impostor's entity exists while it is shown.
+        bool              map_started = false;
+        Clock::time_point map_since;
+        MaterialHandle    map;
+        bool              impostor_shown = false;
+        entt::entity      impostor       = entt::null;
+
         bool              settled = false;
         Clock::time_point busy_since;
 
@@ -664,6 +588,24 @@ namespace encke::terrain
             return *samplers[worker];
         }
     };
+
+    struct TerrainOctree::Bake
+    {
+        array<SurfaceTile, 6> tiles;
+        std::atomic<u32>      left{6};
+        Pixels                albedo;
+        Pixels                surface;
+    };
+
+    f64 impostor_distance(BodyTerrain const& terrain, OctreeSettings const& settings)
+    {
+        return (settings.split_factor + std::sqrt(3.0)) * extent_metres(terrain, root_lod(terrain));
+    }
+
+    f64 map_priority(BodyTerrain const& terrain, OctreeSettings const& settings)
+    {
+        return settings.split_factor * extent_metres(terrain, settings.map_lod);
+    }
 
     TerrainOctree::TerrainOctree(OctreeSettings const& settings)
         : settings_(settings)
@@ -764,6 +706,147 @@ namespace encke::terrain
                                               std::move(*data));
         }
         node.ready = true;
+    }
+
+    void TerrainOctree::bake_map(std::shared_ptr<Body> const& body)
+    {
+        body->map_started = true;
+        body->map_since   = Clock::now();
+
+        auto const                        bake     = std::make_shared<Bake>();
+        std::shared_ptr<GroundLook const> look     = ground_look_;
+        SurfaceMapLayout const            layout   = settings_.map_layout;
+        auto const                        priority = std::make_shared<std::atomic<f64>>(map_priority(*body->terrain, settings_));
+        for (u32 face = 0; face < 6; ++face)
+        {
+            pool_->submit([this, body, bake, look, layout, face](u32) -> WorkerPool::Completion {
+                bake_face(*body->terrain, *look, layout, face, bake->tiles[face]);
+                // The last face lays out the atlas, off the main thread; the
+                // decrement orders every other face's writes before it.
+                if (bake->left.fetch_sub(1, std::memory_order_acq_rel) != 1)
+                {
+                    return {};
+                }
+                assemble_atlas(bake->tiles, layout, bake->albedo, bake->surface);
+                bake->tiles = {};
+                return [this, body, bake] { finish_map(*body, *bake, *registry_); };
+            }, priority);
+        }
+    }
+
+    void TerrainOctree::finish_map(Body& body, Bake& bake, entt::registry& registry)
+    {
+        u32 const width  = bake.albedo.width;
+        u32 const height = bake.albedo.height;
+        string const name = "surface map " + std::to_string(entt::to_integral(body.entity));
+
+        MaterialAsset material{
+            .name       = name,
+            .generation = 0,
+            .state      = AssetState::Ready,
+            .albedo     = assets_->add_texture(name + " albedo", TextureEncoding::Srgb, std::move(bake.albedo)),
+            .normal     = TextureHandle{},
+            .orm        = assets_->add_texture(name + " surface", TextureEncoding::Linear, std::move(bake.surface)),
+            .emission   = TextureHandle{},
+            .tiling     = false,
+            .tile       = f32vec2{1.0f},
+        };
+        body.map = assets_->add_material(std::move(material));
+
+        log::info("terrain: surface map baked, %ux%u, %.1f ms", width, height,
+                  std::chrono::duration<f64, std::milli>(Clock::now() - body.map_since).count());
+
+        // The coarse chunks already on screen take it now.
+        for (auto const& [key, node] : body.nodes)
+        {
+            give_map(body, key, node, registry);
+        }
+    }
+
+    bool TerrainOctree::hide(Node& node, entt::registry& registry)
+    {
+        bool const was_displayed = node.displayed;
+        if (node.entity != entt::null)
+        {
+            registry.destroy(node.entity);
+            node.entity = entt::null;
+        }
+        if (node.mesh)
+        {
+            assets_->release_mesh(node.mesh);
+            node.mesh = MeshHandle{};
+        }
+        node.displayed = false;
+        return was_displayed;
+    }
+
+    void TerrainOctree::give_map(Body const& body, NodeKey const& key, Node const& node, entt::registry& registry) const
+    {
+        if (!body.map || node.entity == entt::null || key.lod < settings_.map_lod)
+        {
+            return;
+        }
+        registry.emplace_or_replace<BodyMap>(node.entity, BodyMap{
+                                                              .material = body.map,
+                                                              .corner   = f32vec3{f64vec3{key.origin} * body.terrain->base_voxel_size},
+                                                              .radius   = static_cast<f32>(body.terrain->radius),
+                                                              .height   = f32vec2{map_height_range(*body.terrain)},
+                                                              .impostor = false,
+                                                          });
+    }
+
+    void TerrainOctree::show_impostor(Body& body, entt::registry& registry)
+    {
+        // A UV sphere's facets lie inside the sphere through its vertices,
+        // by at most the cosine of half a slice and half a stack; scaled out
+        // by both, it covers the sphere it stands for, raised to the highest
+        // ground, which the impostor's depth never comes in front of.
+        constexpr u32 kSlices = 64;
+        constexpr u32 kStacks = 32;
+        constexpr f64 kPi     = 3.14159265358979323846;
+        if (!impostor_mesh_)
+        {
+            MeshData data;
+            build_sphere(data.vertices, data.indices, kSlices, kStacks);
+            impostor_mesh_ = assets_->add_mesh("impostor sphere", std::move(data));
+        }
+        f64vec2 const height  = map_height_range(*body.terrain);
+        f64 const     highest = body.terrain->radius + std::max(height.x + height.y, 0.0);
+        f64 const     cover   = 1.0 / (std::cos(kPi / kSlices) * std::cos(kPi / kStacks));
+
+        body.impostor = registry.create();
+        registry.emplace<Transform>(body.impostor, Transform{
+                                                       .position = f64vec3{0.0},
+                                                       .rotation = f64quat{1.0, 0.0, 0.0, 0.0},
+                                                       .scale    = f32vec3{static_cast<f32>(2.0 * highest * cover)},
+                                                       .parent   = body.entity,
+                                                   });
+        registry.emplace<Renderable>(body.impostor, Renderable{
+                                                        .mesh      = impostor_mesh_,
+                                                        .material  = body.map,
+                                                        .albedo    = f32vec3{1.0f},
+                                                        .roughness = 1.0f,
+                                                        .emissive  = f32vec3{0.0f},
+                                                        .metallic  = 0.0f,
+                                                    });
+        registry.emplace<BodyMap>(body.impostor, BodyMap{
+                                                     .material = body.map,
+                                                     .corner   = f32vec3{0.0f},
+                                                     .radius   = static_cast<f32>(body.terrain->radius),
+                                                     .height   = f32vec2{height},
+                                                     .impostor = true,
+                                                 });
+        body.impostor_shown = true;
+    }
+
+    void TerrainOctree::hide_impostor(Body& body, entt::registry& registry)
+    {
+        if (body.impostor != entt::null)
+        {
+            registry.destroy(body.impostor);
+            body.impostor = entt::null;
+        }
+        body.impostor_shown = false;
     }
 
     void TerrainOctree::update_neighbours(Body& body, entt::registry& registry, span<NodeKey const> changed) const
@@ -884,19 +967,21 @@ namespace encke::terrain
 
     void TerrainOctree::update(Scene& scene, AssetManager& assets, WorkerPool& pool)
     {
-        assets_ = &assets;
-        pool_   = &pool;
+        assets_   = &assets;
+        pool_     = &pool;
+        registry_ = &scene.registry;
         entt::registry& registry = scene.registry;
 
         // One palette for every body until bodies name their own.
         if (!palette_.has_value())
         {
             TerrainPalette palette{};
-            for (size_t index = 0; index < kGroundSets.size(); ++index)
+            span<GroundSet const, kGroundSetCount> const sets = ground_sets();
+            for (size_t index = 0; index < sets.size(); ++index)
             {
-                palette.materials[index] = assets.load_ambientcg(kGroundSets[index].name, f32vec2{kGroundSets[index].tile});
-                palette.albedo[index]    = kGroundSets[index].albedo;
-                palette.roughness[index] = kGroundSets[index].roughness;
+                palette.materials[index] = assets.load_ambientcg(sets[index].name, f32vec2{sets[index].tile});
+                palette.albedo[index]    = sets[index].albedo;
+                palette.roughness[index] = sets[index].roughness;
             }
             palette_ = palette;
         }
@@ -920,6 +1005,17 @@ namespace encke::terrain
             }
         }
 
+        // The ground sets' looks, once, which every body's map needs, as
+        // urgent as the first body's map.
+        if (!ground_look_ && !measuring_ && !bodies_.empty())
+        {
+            measuring_ = true;
+            pool.submit([this](u32) -> WorkerPool::Completion {
+                auto look = std::make_shared<GroundLook const>(measure_ground());
+                return [this, look] { ground_look_ = look; };
+            }, std::make_shared<std::atomic<f64>>(map_priority(*bodies_.front()->terrain, settings_)));
+        }
+
         WorldTransform const* const camera = registry.try_get<WorldTransform>(scene.camera);
         if (camera == nullptr)
         {
@@ -928,6 +1024,11 @@ namespace encke::terrain
 
         for (std::shared_ptr<Body> const& body : bodies_)
         {
+            if (ground_look_ && !body->map_started)
+            {
+                bake_map(body);
+            }
+
             WorldTransform const* const frame = registry.try_get<WorldTransform>(body->entity);
             if (frame == nullptr)
             {
@@ -935,6 +1036,34 @@ namespace encke::terrain
             }
             BodyTerrain const& terrain = *body->terrain;
             f64vec3 const      eye     = glm::inverse(frame->rotation) * (camera->position - frame->position);
+
+            // Far enough out that no root would split, and then some: the
+            // impostor alone, and no chunk kept or meshed.
+            f64 const distance = glm::length(eye);
+            f64 const leave    = impostor_distance(terrain, settings_);
+            f64 const enter    = leave * settings_.impostor_hysteresis;
+            if (body->map && !body->impostor_shown && distance > enter)
+            {
+                show_impostor(*body, registry);
+            }
+            if (body->impostor_shown && distance > enter)
+            {
+                for (auto& [key, node] : body->nodes)
+                {
+                    node.wanted->store(false);
+                    node.priority->store(-1.0, std::memory_order_relaxed);
+                    hide(node, registry);
+                }
+                body->nodes.clear();
+
+                bool const settled = body->in_flight == 0;
+                if (settled && !body->settled)
+                {
+                    log::info("terrain: settled on the impostor");
+                }
+                body->settled = settled;
+                continue;
+            }
 
             vector<NodeKey> const leaves = select_leaves(terrain, eye, settings_, [&](NodeKey const& key) {
                 auto const [known, added] = body->may_have_surface.try_emplace(key, false);
@@ -979,6 +1108,31 @@ namespace encke::terrain
                 }
             }
 
+            // Coming back in with the impostor on screen: the leaves are
+            // meshed from `enter` on, and replace it all at once inside
+            // `leave`, when every one is ready.
+            if (body->impostor_shown)
+            {
+                bool const all_ready = std::ranges::all_of(leaves, [&](NodeKey const& leaf) {
+                    return body->nodes.at(leaf).ready;
+                });
+                if (distance > leave || !all_ready)
+                {
+                    std::erase_if(body->nodes, [&](auto& entry) {
+                        auto& [key, node] = entry;
+                        if (target.contains(key) || !node.ready)
+                        {
+                            return false;
+                        }
+                        hide(node, registry);
+                        return true;
+                    });
+                    body->settled = body->in_flight == 0 && all_ready;
+                    continue;
+                }
+                hide_impostor(*body, registry);
+            }
+
             auto const displayed_ancestor = [&](NodeKey key) -> optional<NodeKey> {
                 u32 const root = root_lod(terrain);
                 while (key.lod < root)
@@ -1015,22 +1169,11 @@ namespace encke::terrain
             // Off a node the camera no longer wants once what replaces it is
             // ready: its target ancestor when merging, every leaf inside it
             // when splitting.
-            auto const hide = [&](NodeKey const& key, Node& node) {
-                if (node.displayed)
+            auto const hide_node = [&](NodeKey const& key, Node& node) {
+                if (hide(node, registry))
                 {
                     changed.push_back(key);
                 }
-                if (node.entity != entt::null)
-                {
-                    registry.destroy(node.entity);
-                    node.entity = entt::null;
-                }
-                if (node.mesh)
-                {
-                    assets.release_mesh(node.mesh);
-                    node.mesh = MeshHandle{};
-                }
-                node.displayed = false;
             };
 
             vector<NodeKey> retire;
@@ -1060,7 +1203,7 @@ namespace encke::terrain
             }
             for (NodeKey const& key : retire)
             {
-                hide(key, body->nodes.at(key));
+                hide_node(key, body->nodes.at(key));
                 body->nodes.erase(key);
             }
 
@@ -1093,6 +1236,7 @@ namespace encke::terrain
                         glm::abs(corner + f64vec3{0.5 * static_cast<f64>(geomorph.extent)});
                     geomorph.face = centre.x >= centre.y && centre.x >= centre.z ? 0u : (centre.y >= centre.z ? 1u : 2u);
                     registry.emplace<Geomorph>(node.entity, geomorph);
+                    give_map(*body, leaf, node, registry);
                 }
                 node.displayed = true;
                 changed.push_back(leaf);
@@ -1105,7 +1249,7 @@ namespace encke::terrain
                 {
                     return false;
                 }
-                hide(key, node);
+                hide_node(key, node);
                 return true;
             });
 
@@ -1182,7 +1326,15 @@ namespace encke::terrain
 
     bool TerrainOctree::idle() const
     {
-        return !bodies_.empty() &&
-               std::ranges::all_of(bodies_, [](std::shared_ptr<Body> const& body) { return body->settled; });
+        return !bodies_.empty() && std::ranges::all_of(bodies_, [](std::shared_ptr<Body> const& body) {
+                   return body->settled && static_cast<bool>(body->map);
+               });
+    }
+
+    u32 TerrainOctree::impostors_shown() const
+    {
+        return static_cast<u32>(std::ranges::count_if(bodies_, [](std::shared_ptr<Body> const& body) {
+            return body->impostor_shown;
+        }));
     }
 }
