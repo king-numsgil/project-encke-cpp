@@ -75,11 +75,8 @@ namespace encke::terrain
 
     MacroField::~MacroField() = default;
 
-    void MacroField::sample(f64vec3 const& origin, f64 voxel_size,
-                            span<f32 const> x, span<f32 const> y, span<f32 const> z,
-                            MacroValues& out, size_t first, size_t last)
+    bool MacroField::fill_constants(size_t count, MacroValues& out, size_t first, size_t last)
     {
-        size_t const count = x.size();
         for (size_t channel = first; channel < last; ++channel)
         {
             out.channels[channel].resize(count);
@@ -98,7 +95,160 @@ namespace encke::terrain
                           spec_.channels[channel].bias);
             }
         }
-        if (!any_graph || count == 0)
+        return any_graph && count != 0;
+    }
+
+    void MacroField::lay_nodes(i64vec3 const& low, i64vec3 const& dims, f64 spacing)
+    {
+        size_t const nodes = static_cast<size_t>(dims.x * dims.y * dims.z);
+        node_x_.resize(nodes);
+        node_y_.resize(nodes);
+        node_z_.resize(nodes);
+        node_values_.resize(nodes);
+
+        size_t n = 0;
+        for (i64 k = 0; k < dims.z; ++k)
+        {
+            for (i64 j = 0; j < dims.y; ++j)
+            {
+                for (i64 i = 0; i < dims.x; ++i)
+                {
+                    // The same node gets the same f32 position whichever chunk
+                    // or query asks for it, so the same value.
+                    node_x_[n] = static_cast<f32>(static_cast<f64>(low.x + i) * spacing);
+                    node_y_[n] = static_cast<f32>(static_cast<f64>(low.y + j) * spacing);
+                    node_z_[n] = static_cast<f32>(static_cast<f64>(low.z + k) * spacing);
+                    ++n;
+                }
+            }
+        }
+    }
+
+    void MacroField::sample_grid(f64vec3 const& origin, f64 voxel_size,
+                                 span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                                 MacroValues& out, size_t first, size_t last)
+    {
+        size_t const nx    = x.size();
+        size_t const ny    = y.size();
+        size_t const nz    = z.size();
+        size_t const count = nx * ny * nz;
+        if (!fill_constants(count, out, first, last))
+        {
+            return;
+        }
+
+        f64 const spacing = std::max(spec_.lattice_spacing, voxel_size);
+
+        // Per axis, exactly the arithmetic sample() does per component.
+        auto const find_cells = [spacing](f64 corner, span<f32 const> offsets, Axis& axis) {
+            size_t const n = offsets.size();
+            axis.cell.resize(n);
+            axis.weight.resize(n);
+            axis.low  = std::numeric_limits<i64>::max();
+            axis.high = std::numeric_limits<i64>::min();
+            for (size_t i = 0; i < n; ++i)
+            {
+                f64 const q     = (corner + static_cast<f64>(offsets[i])) / spacing;
+                f64 const floor = std::floor(q);
+                axis.cell[i]   = static_cast<i64>(floor);
+                axis.weight[i] = q - floor;
+                axis.low  = std::min(axis.low, axis.cell[i]);
+                axis.high = std::max(axis.high, axis.cell[i] + 1);
+            }
+            // From here, relative to the lowest.
+            for (i64& cell : axis.cell)
+            {
+                cell -= axis.low;
+            }
+        };
+        find_cells(origin.x, x, axes_[0]);
+        find_cells(origin.y, y, axes_[1]);
+        find_cells(origin.z, z, axes_[2]);
+        Axis const& ax = axes_[0];
+        Axis const& ay = axes_[1];
+        Axis const& az = axes_[2];
+
+        i64vec3 const low{ax.low, ay.low, az.low};
+        i64vec3 const dims = i64vec3{ax.high, ay.high, az.high} - low + i64vec3{1};
+        lay_nodes(low, dims, spacing);
+
+        size_t const dx    = static_cast<size_t>(dims.x);
+        size_t const dy    = static_cast<size_t>(dims.y);
+        size_t const dz    = static_cast<size_t>(dims.z);
+        size_t const nodes = dx * dy * dz;
+        along_x_.resize(dz * dy * nx);
+        along_y_.resize(dz * ny * nx);
+
+        for (size_t channel = first; channel < last; ++channel)
+        {
+            FastNoise::SmartNode<> const& graph = nodes_->graphs[channel];
+            if (!graph)
+            {
+                continue;
+            }
+
+            graph->GenPositionArray3D(node_values_.data(), static_cast<int>(nodes),
+                                      node_x_.data(), node_y_.data(), node_z_.data(),
+                                      0.0f, 0.0f, 0.0f, seed_);
+
+            // sample() lerps along x on the four node rows around a point,
+            // then y, then z. Separably: along x on every node row, then
+            // along y between those, then along z. Each value is the same
+            // lerp of the same operands, so the same bits.
+            for (size_t row = 0; row < dz * dy; ++row)
+            {
+                f32 const* const nodes_row = node_values_.data() + row * dx;
+                f64* const       into      = along_x_.data() + row * nx;
+                for (size_t i = 0; i < nx; ++i)
+                {
+                    size_t const c = static_cast<size_t>(ax.cell[i]);
+                    into[i] = glm::mix(static_cast<f64>(nodes_row[c]), static_cast<f64>(nodes_row[c + 1]),
+                                       ax.weight[i]);
+                }
+            }
+
+            for (size_t k = 0; k < dz; ++k)
+            {
+                for (size_t j = 0; j < ny; ++j)
+                {
+                    f64 const* const below = along_x_.data() + (k * dy + static_cast<size_t>(ay.cell[j])) * nx;
+                    f64 const* const above = below + nx;
+                    f64* const       into  = along_y_.data() + (k * ny + j) * nx;
+                    f64 const        t     = ay.weight[j];
+                    for (size_t i = 0; i < nx; ++i)
+                    {
+                        into[i] = glm::mix(below[i], above[i], t);
+                    }
+                }
+            }
+
+            MacroChannelSpec const& mapping = spec_.channels[channel];
+            f64 const               bias    = static_cast<f64>(mapping.bias);
+            f64 const               scale   = static_cast<f64>(mapping.scale);
+            f32* const              values  = out.channels[channel].data();
+            for (size_t k = 0; k < nz; ++k)
+            {
+                for (size_t j = 0; j < ny; ++j)
+                {
+                    f64 const* const below = along_y_.data() + (static_cast<size_t>(az.cell[k]) * ny + j) * nx;
+                    f64 const* const above = below + ny * nx;
+                    f32* const       into  = values + (k * ny + j) * nx;
+                    f64 const        t     = az.weight[k];
+                    for (size_t i = 0; i < nx; ++i)
+                    {
+                        into[i] = static_cast<f32>(bias + scale * glm::mix(below[i], above[i], t));
+                    }
+                }
+            }
+        }
+    }
+
+    void MacroField::sample(f64vec3 const& origin, f64 voxel_size,
+                            span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                            MacroValues& out, size_t first, size_t last)
+    {
+        size_t const count = x.size();
+        if (!fill_constants(count, out, first, last))
         {
             return;
         }
@@ -125,27 +275,7 @@ namespace encke::terrain
 
         i64vec3 const dims  = high - low + i64vec3{1};
         size_t const  nodes = static_cast<size_t>(dims.x * dims.y * dims.z);
-        node_x_.resize(nodes);
-        node_y_.resize(nodes);
-        node_z_.resize(nodes);
-        node_values_.resize(nodes);
-
-        size_t n = 0;
-        for (i64 k = 0; k < dims.z; ++k)
-        {
-            for (i64 j = 0; j < dims.y; ++j)
-            {
-                for (i64 i = 0; i < dims.x; ++i)
-                {
-                    // The same node gets the same f32 position whichever chunk
-                    // or query asks for it, so the same value.
-                    node_x_[n] = static_cast<f32>(static_cast<f64>(low.x + i) * spacing);
-                    node_y_[n] = static_cast<f32>(static_cast<f64>(low.y + j) * spacing);
-                    node_z_[n] = static_cast<f32>(static_cast<f64>(low.z + k) * spacing);
-                    ++n;
-                }
-            }
-        }
+        lay_nodes(low, dims, spacing);
 
         size_t const stride_y = static_cast<size_t>(dims.x);
         size_t const stride_z = static_cast<size_t>(dims.x * dims.y);

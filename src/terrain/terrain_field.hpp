@@ -178,15 +178,27 @@ namespace encke::terrain
         void box_octave(GridBox const& box, u32 octave);
 
         // The macro layer, the detail octaves and the composition, over the
-        // points origin + (x[i], y[i], z[i]). fill_octave(k) leaves octave k's
-        // noise at every point in octave_values_.
-        LayerTiming combine(f64vec3 const& origin, f64 voxel_size,
+        // points origin + (x[i], y[i], z[i]). fill_macro() leaves the field's
+        // macro channels at every point in macro_values_, and fill_octave(k)
+        // octave k's noise in octave_values_.
+        LayerTiming combine(f64vec3 const& origin,
                             span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                            function<void()> const& fill_macro,
                             u32 detail_octaves, function<void(u32)> const& fill_octave,
                             u32 snapshot_octaves, span<f32> snapshot,
                             span<f32> out);
 
         void axis_runs(i64 first, i64 stride, u32 count, i64 block, vector<Run>& runs) const;
+
+        // Each of a box axis's `count` points' offset in metres from
+        // `anchor(block)`, where block is the run holding it: exact, since
+        // each is a whole number of base voxels well inside f32's integers.
+        void axis_offsets(i64 first, i64 stride, span<Run const> runs, i64 block, vector<f32>& out) const;
+
+        // Fills x, y and z for a box from its per-axis offsets, x fastest.
+        static void spread_axes(span<f32 const> ax, span<f32 const> ay, span<f32 const> az,
+                                u32vec3 const& low, u32vec3 const& high,
+                                span<f32> x, span<f32> y, span<f32> z);
 
         BodyTerrain  terrain_;
         DetailNoise  detail_;
@@ -210,7 +222,12 @@ namespace encke::terrain
         vector<f32>    block_y_;
         vector<f32>    block_z_;
         vector<f32>    block_values_;
-        vector<size_t> block_index_;
+        vector<f32>    axis_x_;
+        vector<f32>    axis_y_;
+        vector<f32>    axis_z_;
+        vector<f32>    local_x_;
+        vector<f32>    local_y_;
+        vector<f32>    local_z_;
 
         vector<f32> partial_;
         vector<f32> coarse_grid_;

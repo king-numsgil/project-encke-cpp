@@ -77,8 +77,33 @@ namespace encke::terrain
                     span<f32 const> x, span<f32 const> y, span<f32 const> z,
                     MacroValues& out, size_t first = 0, size_t last = kFieldChannelCount);
 
+        // The same over the grid origin + (x[i], y[j], z[k]), x fastest:
+        // bit for bit what sample() gives at those points. Cells and weights
+        // are found once per axis and the interpolation is separable, so it
+        // costs a few lerps a point, and vectorises.
+        void sample_grid(f64vec3 const& origin, f64 voxel_size,
+                         span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                         MacroValues& out, size_t first = 0, size_t last = kFieldChannelCount);
+
     private:
         struct Nodes;
+
+        // One axis of a grid: each coordinate's lattice cell, relative to
+        // the lowest, and its weight within it.
+        struct Axis
+        {
+            vector<i64> cell;
+            vector<f64> weight;
+            i64         low  = 0;
+            i64         high = 0;
+        };
+
+        // Sizes the channels and fills those without a graph with their
+        // bias. False when there is nothing left to evaluate.
+        bool fill_constants(size_t count, MacroValues& out, size_t first, size_t last);
+
+        // The positions of the lattice nodes from `low`, `dims` a side.
+        void lay_nodes(i64vec3 const& low, i64vec3 const& dims, f64 spacing);
 
         MacroSpec              spec_;
         i32                    seed_ = 0;
@@ -89,6 +114,9 @@ namespace encke::terrain
         vector<f32>            node_values_;
         vector<i64vec3>        cells_;
         vector<f64vec3>        weights_;
+        array<Axis, 3>         axes_;
+        vector<f64>            along_x_;
+        vector<f64>            along_y_;
     };
 
     // An FBm-over-Simplex graph, encoded as the Node Editor would: for

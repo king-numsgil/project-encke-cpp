@@ -130,7 +130,8 @@ src/
     terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
     surface_nets.{hpp,cpp}  a chunk's samples -> vertices and quads, under the ownership rule
     planet.{hpp,cpp}     PlanetTerrain, culling, GroundProbe, TerrainOctree: the chunks the camera wants
-    benchmark.{hpp,cpp}  `encke --headless`: octaves per LOD; samples/s per layer, apron, gradients, LOD 0 and 4
+    benchmark.{hpp,cpp}  `encke --headless`: octaves per LOD; samples/s per layer, apron, gradients, LOD 0 and 4;
+                         `encke --sweep [n]`: every LOD, n random-seed chunks, against FastNoise2's own cost
 shaders/
   shadow_depth.slang     depth only: one shadow map, cascade or spot
   gbuffer.slang          geometry -> G-buffer + emissive into HDR
@@ -1039,6 +1040,16 @@ and floor(o * f * L) is not L * floor(o * f).
   same nodes. **Voxel sizes and the spacing must be powers of two**: then a
   coarse LOD's samples are nodes of the finer lattice too, interpolated with
   weights of exactly zero, and grid positions are exact in both f32 and f64.
+- **Boxes of grid points go through per-axis paths**, since everything
+  about a grid point that is not noise depends on one coordinate at a time.
+  `MacroField::sample_grid` finds lattice cells and weights per axis and
+  interpolates separably (x on every node row, then y, then z), the same
+  lerps on the same operands as `sample` does per point, so the same bits.
+  `box_octave` works out block offsets per axis and copies a block's values
+  back a row segment at a time. Per-sample `i64` arithmetic and index
+  scatters were what kept these loops scalar: AVX2 has no packed `i64`
+  conversion, multiply or min/max, and no scatter. `encke --sweep` prints a
+  hash of every output bit, which a change of this kind must leave alone.
 - **Octaves under two voxels are skipped.** Adjacent LODs therefore carry
   different detail. At a shared face the finer chunk may pass the coarser
   one's `detail_octaves` in its `ChunkRequest`, and then matches it bit for
@@ -1903,9 +1914,18 @@ backend, so it has no equivalent failure mode.
   the tracked `CMakePresets.json`) supplies the sanitizer flags; the user preset
   only pins the clang binaries.
 - Presets set `CMAKE_CXX_FLAGS` wholesale, and inheritance replaces rather than
-  appends. `release` inherits `gcc-debug`'s flag string; `clang-sanitize-base`
-  overwrites it. Adding a flag to `gcc-debug` silently changes `release` too,
-  and silently does *not* reach `clang-sanitize`.
+  appends. `release` and `clang-sanitize-base` each set their own, so a flag
+  added to `gcc-debug` reaches neither.
+- **`release` is `-O3` and has no `_GLIBCXX_ASSERTIONS`.** It once inherited
+  both the define and RelWithDebInfo's `-O2`. The assertions put a bounds
+  check on every `span` and `vector` subscript, which stops GCC vectorising
+  the loop, and `-O2`'s cost model rejects most of the loops that remain; the
+  terrain sampler's own loops compiled to no AVX2 at all. Only the two
+  together vectorise them. `encke --sweep` measures it, and the terrain
+  checksum is unchanged by it. Debug builds still get the assertions from
+  `CMakeLists.txt`.
+- Changing a preset's cache variables needs `-Configure`: CMake re-runs itself
+  when `CMakeLists.txt` changes, but it does not re-read presets.
 - `CMAKE_EXPORT_COMPILE_COMMANDS` is on, so `build/<preset>/compile_commands.json`
   drives clangd.
 

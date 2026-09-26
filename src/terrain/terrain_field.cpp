@@ -250,10 +250,11 @@ namespace encke::terrain
         array<f32, 7>       values{};
 
         // Split about the point itself: it need not be a grid point.
+        auto const fill_macro  = [&] { macro_.sample(p, voxel_size, x, y, z, macro_values_); };
         auto const fill_octave = [&](u32 octave) {
             detail_.octave(octave, p, x, y, z, octave_values_);
         };
-        timing_ = combine(p, voxel_size, x, y, z, detail_octaves, fill_octave, 0, {}, values);
+        timing_ = combine(p, x, y, z, fill_macro, detail_octaves, fill_octave, 0, {}, values);
 
         return PointSample{
             .value    = values[0],
@@ -270,10 +271,11 @@ namespace encke::terrain
         array<f32, 1> const zero{{0.0f}};
         array<f32, 1>       value{};
 
+        auto const fill_macro  = [&] { macro_.sample(p, voxel_size, zero, zero, zero, macro_values_); };
         auto const fill_octave = [&](u32 octave) {
             detail_.octave(octave, p, zero, zero, zero, octave_values_);
         };
-        timing_ = combine(p, voxel_size, zero, zero, zero, detail_octaves, fill_octave, 0, {}, value);
+        timing_ = combine(p, zero, zero, zero, fill_macro, detail_octaves, fill_octave, 0, {}, value);
         return value[0];
     }
 
@@ -310,28 +312,46 @@ namespace encke::terrain
         // a power-of-two voxel, exact in f32, and exact again when added to
         // the f64 corner. So a grid point's f64 position is the same bits
         // whichever box it is reached from.
-        f32 const base = static_cast<f32>(terrain_.base_voxel_size);
-        size_t    n    = 0;
-        for (u32 k = 0; k < box.count.z; ++k)
-        {
-            for (u32 j = 0; j < box.count.y; ++j)
+        f32 const  base         = static_cast<f32>(terrain_.base_voxel_size);
+        auto const axis_offsets = [&](u32 n, vector<f32>& axis) {
+            axis.resize(n);
+            for (u32 i = 0; i < n; ++i)
             {
-                for (u32 i = 0; i < box.count.x; ++i)
-                {
-                    offset_x_[n] = static_cast<f32>(static_cast<i64>(i) * box.stride) * base;
-                    offset_y_[n] = static_cast<f32>(static_cast<i64>(j) * box.stride) * base;
-                    offset_z_[n] = static_cast<f32>(static_cast<i64>(k) * box.stride) * base;
-                    ++n;
-                }
+                axis[i] = static_cast<f32>(static_cast<i64>(i) * box.stride) * base;
             }
-        }
+        };
+        axis_offsets(box.count.x, axis_x_);
+        axis_offsets(box.count.y, axis_y_);
+        axis_offsets(box.count.z, axis_z_);
+        spread_axes(axis_x_, axis_y_, axis_z_, u32vec3{0}, box.count - u32vec3{1}, offset_x_, offset_y_, offset_z_);
 
         f64vec3 const origin = f64vec3{box.first} * terrain_.base_voxel_size;
         f64 const     voxel  = static_cast<f64>(box.stride) * terrain_.base_voxel_size;
 
+        // The macro layer by axis, since the box is a grid.
+        auto const fill_macro  = [&] { macro_.sample_grid(origin, voxel, axis_x_, axis_y_, axis_z_, macro_values_); };
         auto const fill_octave = [&](u32 octave) { box_octave(box, octave); };
-        return combine(origin, voxel, offset_x_, offset_y_, offset_z_,
+        return combine(origin, offset_x_, offset_y_, offset_z_, fill_macro,
                        detail_octaves, fill_octave, snapshot_octaves, snapshot, out);
+    }
+
+    void TerrainSampler::spread_axes(span<f32 const> ax, span<f32 const> ay, span<f32 const> az,
+                                     u32vec3 const& low, u32vec3 const& high,
+                                     span<f32> x, span<f32> y, span<f32> z)
+    {
+        size_t const width = high.x - low.x + 1;
+        f32 const*   row   = ax.data() + low.x;
+        size_t       n     = 0;
+        for (u32 k = low.z; k <= high.z; ++k)
+        {
+            for (u32 j = low.y; j <= high.y; ++j)
+            {
+                std::copy_n(row, width, x.data() + n);
+                std::fill_n(y.data() + n, width, ay[j]);
+                std::fill_n(z.data() + n, width, az[k]);
+                n += width;
+            }
+        }
     }
 
     void TerrainSampler::axis_runs(i64 first, i64 stride, u32 count, i64 block, vector<Run>& runs) const
@@ -363,10 +383,20 @@ namespace encke::terrain
         block_y_.resize(count);
         block_z_.resize(count);
         block_values_.resize(count);
-        block_index_.resize(count);
         octave_values_.resize(count);
 
-        f32 const base = static_cast<f32>(terrain_.base_voxel_size);
+        // Each sample's offset from its block's corner, per axis: an integer
+        // under the block edge, times a power of two, so exact.
+        local_x_.resize(box.count.x);
+        local_y_.resize(box.count.y);
+        local_z_.resize(box.count.z);
+        axis_offsets(box.first.x, box.stride, runs_x_, block, local_x_);
+        axis_offsets(box.first.y, box.stride, runs_y_, block, local_y_);
+        axis_offsets(box.first.z, box.stride, runs_z_, block, local_z_);
+
+        // One block holding the whole box, as it does for the long
+        // wavelengths, is evaluated straight into the octave's values.
+        bool const whole = runs_x_.size() == 1 && runs_y_.size() == 1 && runs_z_.size() == 1;
 
         for (Run const& rz : runs_z_)
         {
@@ -375,45 +405,55 @@ namespace encke::terrain
                 for (Run const& rx : runs_x_)
                 {
                     i64vec3 const anchor = i64vec3{rx.block, ry.block, rz.block} * block;
+                    u32vec3 const low{rx.first, ry.first, rz.first};
+                    u32vec3 const high{rx.last, ry.last, rz.last};
+                    u32vec3 const size = high - low + u32vec3{1};
+                    size_t const  n    = static_cast<size_t>(size.x) * size.y * size.z;
 
-                    // Each sample's offset from its block's corner: an integer
-                    // under the block edge, times a power of two, so exact.
-                    size_t n = 0;
-                    for (u32 k = rz.first; k <= rz.last; ++k)
-                    {
-                        for (u32 j = ry.first; j <= ry.last; ++j)
-                        {
-                            for (u32 i = rx.first; i <= rx.last; ++i)
-                            {
-                                i64vec3 const point = box.first + i64vec3{i, j, k} * box.stride;
-                                i64vec3 const local = point - anchor;
-                                block_x_[n]     = static_cast<f32>(local.x) * base;
-                                block_y_[n]     = static_cast<f32>(local.y) * base;
-                                block_z_[n]     = static_cast<f32>(local.z) * base;
-                                block_index_[n] = flat(box.count, i, j, k);
-                                ++n;
-                            }
-                        }
-                    }
+                    spread_axes(local_x_, local_y_, local_z_, low, high, block_x_, block_y_, block_z_);
 
-                    span<f32> const values = span<f32>{block_values_}.first(n);
+                    span<f32> const values = whole ? span<f32>{octave_values_} : span<f32>{block_values_}.first(n);
                     detail_.octave(octave, f64vec3{anchor} * terrain_.base_voxel_size,
                                    span<f32 const>{block_x_}.first(n),
                                    span<f32 const>{block_y_}.first(n),
                                    span<f32 const>{block_z_}.first(n),
                                    values);
-
-                    for (size_t s = 0; s < n; ++s)
+                    if (whole)
                     {
-                        octave_values_[block_index_[s]] = values[s];
+                        continue;
+                    }
+
+                    // A block's samples are a row segment of the box per (j, k).
+                    size_t s = 0;
+                    for (u32 k = low.z; k <= high.z; ++k)
+                    {
+                        for (u32 j = low.y; j <= high.y; ++j)
+                        {
+                            std::copy_n(values.data() + s, size.x, octave_values_.data() + flat(box.count, low.x, j, k));
+                            s += size.x;
+                        }
                     }
                 }
             }
         }
     }
 
-    LayerTiming TerrainSampler::combine(f64vec3 const& origin, f64 voxel_size,
+    void TerrainSampler::axis_offsets(i64 first, i64 stride, span<Run const> runs, i64 block, vector<f32>& out) const
+    {
+        f32 const base = static_cast<f32>(terrain_.base_voxel_size);
+        for (Run const& run : runs)
+        {
+            for (u32 i = run.first; i <= run.last; ++i)
+            {
+                i64 const point = first + static_cast<i64>(i) * stride;
+                out[i]          = static_cast<f32>(point - run.block * block) * base;
+            }
+        }
+    }
+
+    LayerTiming TerrainSampler::combine(f64vec3 const& origin,
                                         span<f32 const> x, span<f32 const> y, span<f32 const> z,
+                                        function<void()> const& fill_macro,
                                         u32 detail_octaves, function<void(u32)> const& fill_octave,
                                         u32 snapshot_octaves, span<f32> snapshot,
                                         span<f32> out)
@@ -421,7 +461,7 @@ namespace encke::terrain
         size_t const count = out.size();
 
         Clock::time_point const start = Clock::now();
-        macro_.sample(origin, voxel_size, x, y, z, macro_values_);
+        fill_macro();
         Clock::time_point const macro_done = Clock::now();
 
         span<f32 const> const height      = macro_values_[MacroChannel::Height];
