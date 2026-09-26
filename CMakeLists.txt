@@ -38,6 +38,9 @@ find_package(EnTT CONFIG REQUIRED)
 # The overlay port in ports/fastnoise2: patched for a lattice offset, AVX2
 # only, strict floating point.
 find_package(FastNoise2 CONFIG REQUIRED)
+# The overlay port in ports/joltphysics: double precision, cross-platform
+# deterministic. Jolt::Jolt carries its JPH_* defines to whatever links it.
+find_package(Jolt CONFIG REQUIRED)
 
 # Header-only, and the port installs no CMake package: just the header.
 find_path(BS_THREAD_POOL_INCLUDE_DIR BS_thread_pool.hpp REQUIRED)
@@ -323,6 +326,7 @@ target_link_libraries(encke_core PUBLIC
     cpuinfo::cpuinfo
     EnTT::EnTT
     FastNoise2::FastNoise
+    Jolt::Jolt
     encke_imgui
 )
 
@@ -450,6 +454,7 @@ find_package(Catch2 3 CONFIG REQUIRED)
 include(Catch)
 
 add_executable(encke_tests
+    tests/physics/jolt_test.cpp
     tests/render/camera_test.cpp
     tests/terrain/detail_noise_test.cpp
     tests/terrain/fastnoise_allocator_test.cpp
@@ -461,6 +466,14 @@ add_executable(encke_tests
     tests/terrain/terrain_field_test.cpp
     tests/world/bodies_test.cpp
     tests/world/transform_test.cpp
+)
+
+# Jolt is built cross-platform deterministic, which is -ffp-contract=off in
+# the library; its maths is inline in headers, so every source that includes
+# Jolt needs the same flag or clang fuses its multiply-adds here.
+set_source_files_properties(
+    tests/physics/jolt_test.cpp
+    PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>"
 )
 
 # Every flag, define and link option comes through encke_core, so the tests

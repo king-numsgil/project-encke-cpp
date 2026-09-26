@@ -9,6 +9,7 @@
     "fastgltf",
     "fastnoise2",
     "glm",
+    "joltphysics",
     {
       "name": "sdl3",
       "features": [

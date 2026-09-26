@@ -2020,11 +2020,25 @@ backend, so it has no equivalent failure mode.
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
 `sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`,
-`entt`, `catch2`, and `fastnoise2` from the overlay port in `ports/` (see
-*Terrain noise*).
+`entt`, `catch2`, and `fastnoise2` and `joltphysics` from the overlay ports
+in `ports/` (see *Terrain noise* for the first).
 Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
 ImPlot.
 
+- **Jolt Physics is built double-precision and cross-platform
+  deterministic** by `ports/joltphysics` (v5.6.0, unpatched): positions are
+  f64 `RVec3`, the rest f32. `Jolt::Jolt` carries its `JPH_*` defines to
+  encke, and they must match the library's or class layouts disagree;
+  `JPH::VerifyJoltVersionID()` checks. Jolt makes some of those defines
+  depend on the build configuration, and encke's release is
+  RelWithDebInfo, which Jolt's lists leave out, so the port turns every
+  such option off (floating-point exceptions, debug renderer, profiler).
+  **Every source that includes Jolt builds with `-ffp-contract=off`**, as
+  the terrain sources do: Jolt's maths is inline, and clang would fuse its
+  multiply-adds in our objects. Its target also adds `-mbmi -mlzcnt -mf16c`
+  to everything linking it, all Haswell-era like AVX2. `tests/physics`
+  proves the configuration matches and drops a sphere a planet's radius
+  from the origin, twice, bit for bit.
 - **BS::thread_pool is here for its native extensions only.** `WorkerPool`
   lowers its threads' priority and names them through them. Standard C++ has no thread priority, affinity or naming,
   and `native_handle()` does not help: under MinGW it is a winpthreads
