@@ -19,5 +19,9 @@ CMakeUserPresets.json
 # Claude Code scratch/utility scripts (machine-specific toolchain paths)
 /.claude/
 
+# Scenario captures and the reference archive; the scenario files are tracked
+/scenarios/out/
+/scenarios/reference/
+
 # Misc
 *.log

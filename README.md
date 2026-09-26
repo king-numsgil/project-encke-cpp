@@ -150,18 +150,13 @@ motion vectors, shadow cascades), T cycles the tonemap curve.
 
 `encke --headless` runs the terrain benchmark without opening a window.
 
-Some environment variables, mostly for reproducible captures:
-
-| Variable | Effect |
-| --- | --- |
-| `ENCKE_CAPTURE=out.png` | write frame `ENCKE_CAPTURE_FRAME` (default 10) to a PNG, then quit |
-| `ENCKE_NO_UI` | start with the overlay hidden |
-| `ENCKE_FIXED_TIME` | pin animation time |
-| `ENCKE_CAMERA="px py pz tx ty tz [ux uy uz]"` | start at p looking at t, metres from the pole |
-| `ENCKE_TONEMAP` | 0 ACES, 1 AgX, 2 PBR Neutral (default) |
-| `ENCKE_EV100` | pin the exposure |
-| `ENCKE_DEBUG_VIEW` | start with a debug view, numbered from 0 |
-| `ENCKE_UI_SRGB` | force the UI onto the sRGB swapchain view |
+`encke --scenario scenarios/pole.json` runs a scenario: a JSON file of
+settings and steps (settle, move the camera, freeze the terrain, fly,
+capture) that runs, writes its captures to `scenarios/out/<name>/` and
+quits. `--out dir` puts the captures elsewhere. F3 copies the camera's pose
+as a step to paste into one. `scenarios/compare.ps1` compares the captures
+with the reference archive in `scenarios/reference/`, offline;
+`-Accept` makes them the reference.
 
 ## Layout
 
@@ -169,7 +164,8 @@ Some environment variables, mostly for reproducible captures:
 src/        the engine: core, platform, vulkan, ui, world, assets, render, terrain
 shaders/    Slang, compiled to SPIR-V at build time; shared modules in lib/
 tests/      Catch2, mirroring src/
-ports/      the FastNoise2 vcpkg overlay port and its patches
+scenarios/  scripted runs and captures, and the offline comparison script
+ports/      the FastNoise2 and Jolt vcpkg overlay ports, and FastNoise2's patches
 assets/     ambientCG textures and glTF models; CREDITS.md in each says where they came from
 cmake/      CPM.cmake
 ```

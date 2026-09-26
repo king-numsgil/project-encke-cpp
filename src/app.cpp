@@ -10,6 +10,7 @@
 #include "ui/image_window.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 #include <imgui.h>
@@ -23,8 +24,7 @@ namespace encke
         constexpr i32  kHeight  = 720;
 
         // Keys 1 and 2 pick how the frame is shaded; the keys after them
-        // toggle one visualisation window each. ENCKE_DEBUG_VIEW uses the
-        // same numbering from zero.
+        // toggle one visualisation window each.
         constexpr u32 kShadingModeCount = 2;
         constexpr u32 kDebugKeyCount    = kShadingModeCount + kDebugWindowCount;
 
@@ -76,38 +76,6 @@ namespace encke
             return "unknown";
         }
 
-        // ENCKE_FIXED_TIME pins animation to one instant, so two runs render
-        // byte-identical frames. Without it, comparing captures across runs
-        // compares different camera positions rather than what changed.
-        optional<f64> fixed_time()
-        {
-            char const* const value = std::getenv("ENCKE_FIXED_TIME");
-            if (value == nullptr)
-            {
-                return nullopt;
-            }
-            return std::strtod(value, nullptr);
-        }
-
-        // ENCKE_DEBUG_VIEW picks a starting shading mode or opens a window, so
-        // either can be captured without a keypress. Same numbering as the
-        // keys, from zero.
-        optional<u32> initial_debug_key()
-        {
-            char const* const value = std::getenv("ENCKE_DEBUG_VIEW");
-            if (value == nullptr)
-            {
-                return nullopt;
-            }
-
-            long const parsed = std::strtol(value, nullptr, 10);
-            if (parsed < 0 || parsed >= static_cast<long>(kDebugKeyCount))
-            {
-                return nullopt;
-            }
-            return static_cast<u32>(parsed);
-        }
-
         char const* tonemap_name(Tonemap tonemap)
         {
             switch (tonemap)
@@ -119,86 +87,22 @@ namespace encke
             return "unknown";
         }
 
-        // ENCKE_TONEMAP picks the starting curve, numbered as Tonemap; T
-        // cycles it.
-        optional<Tonemap> initial_tonemap()
+        f64vec3 to_vec(array<f64, 3> const& a)
         {
-            char const* const value = std::getenv("ENCKE_TONEMAP");
-            if (value == nullptr)
-            {
-                return nullopt;
-            }
-
-            long const parsed = std::strtol(value, nullptr, 10);
-            if (parsed < 0 || parsed >= static_cast<long>(kTonemapCount))
-            {
-                return nullopt;
-            }
-            return static_cast<Tonemap>(parsed);
+            return f64vec3{a[0], a[1], a[2]};
         }
 
-        // ENCKE_EV100 pins the exposure the frame is tonemapped at, so two
-        // captures differ only in what is being compared.
-        optional<f32> fixed_ev100()
+        // To `places` decimals, so a pose copied with F3 reads as numbers a
+        // person would write, and writes back out as the same digits.
+        array<f64, 3> rounded(f64vec3 const& v, f64 places)
         {
-            char const* const value = std::getenv("ENCKE_EV100");
-            if (value == nullptr)
-            {
-                return nullopt;
-            }
-            return static_cast<f32>(std::strtod(value, nullptr));
+            f64 const scale = std::pow(10.0, places);
+            return {{std::round(v.x * scale) / scale, std::round(v.y * scale) / scale,
+                     std::round(v.z * scale) / scale}};
         }
 
-        // ENCKE_CAMERA="px py pz tx ty tz [ux uy uz]" starts the camera at p
-        // looking at t, its up toward u, all in the test scene's frame: metres
-        // from the pole, +Y up by the transform convention. u defaults to that
-        // +Y. Commas work as separators too.
-        struct CameraPose
-        {
-            f64vec3 eye;
-            f64vec3 target;
-            f64vec3 up;
-        };
-
-        // ENCKE_CAMERA's format, read from `variable`.
-        optional<CameraPose> camera_pose(char const* variable)
-        {
-            char const* const value = std::getenv(variable);
-            if (value == nullptr)
-            {
-                return nullopt;
-            }
-
-            array<f64, 9> numbers{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0}};
-            char const*   cursor = value;
-            for (size_t index = 0; index < numbers.size(); ++index)
-            {
-                while (*cursor == ' ' || *cursor == ',')
-                {
-                    ++cursor;
-                }
-
-                char* end = nullptr;
-                f64 const number = std::strtod(cursor, &end);
-                if (end == cursor)
-                {
-                    // Six is complete, the up is optional; anything else is not.
-                    if (index == 6 && *cursor == '\0')
-                    {
-                        break;
-                    }
-                    log::warn("%s wants \"px py pz tx ty tz\" with an optional \"ux uy uz\"; ignored",
-                              variable);
-                    return nullopt;
-                }
-                numbers[index] = number;
-                cursor         = end;
-            }
-
-            return CameraPose{.eye    = f64vec3{numbers[0], numbers[1], numbers[2]},
-                              .target = f64vec3{numbers[3], numbers[4], numbers[5]},
-                              .up     = f64vec3{numbers[6], numbers[7], numbers[8]}};
-        }
+        // The frame rate a scenario's flying and fixed steps assume.
+        constexpr f64 kScenarioStepHz = 60.0;
     }
 
     App::~App()
@@ -208,10 +112,25 @@ namespace encke
         device_.wait_idle();
     }
 
-    bool App::init()
+    bool App::init(AppOptions const& options)
     {
         log::init();
         log::info("allocator: %s", memory::backend_name());
+
+        // First, so a mistake in the file stops the run before a window opens.
+        if (options.scenario.has_value())
+        {
+            scenario_ = scenario::load(*options.scenario);
+            if (!scenario_.has_value())
+            {
+                return false;
+            }
+            scenario_output_ = options.output.value_or(options.scenario->parent_path() / "out" /
+                                                       scenario_->name);
+            log::info("scenario \"%s\": %zu steps, captures to %s", scenario_->name.c_str(),
+                      scenario_->steps.size(), scenario_output_.string().c_str());
+        }
+        bool const srgb_ui = scenario_.has_value() && scenario_->settings.srgb_ui.value_or(false);
 
         CpuInfo const cpu = query_cpu();
         log::info("cpu: %u physical cores, %u logical processors", cpu.physical_cores,
@@ -228,7 +147,7 @@ namespace encke
             return false;
         }
 
-        if (!vulkan_.init(window_) || !device_.init(vulkan_))
+        if (!vulkan_.init(window_) || !device_.init(vulkan_, srgb_ui))
         {
             return false;
         }
@@ -263,94 +182,23 @@ namespace encke
         pool_.start(workers, "terrain");
         log::info("worker pool: %u threads", pool_.size());
 
-        // The test scene's frame is the world's rotated by nothing, only
-        // moved to the pole, so its directions pass through unchanged.
-        if (optional<CameraPose> const pose = camera_pose("ENCKE_CAMERA"))
-        {
-            place_camera(pose->eye, pose->target, pose->up);
-        }
         log::info("scene: %zu entities, %zu renderables, %zu lights",
                   scene_.registry.view<Transform>().size(),
                   scene_.registry.view<Renderable>().size(), scene_.registry.view<Light>().size());
 
-        fixed_time_ = fixed_time();
-        if (fixed_time_.has_value())
+        // A scenario's baseline, before its own settings: animation pinned so
+        // runs match, no overlay since its numbers change every frame, and no
+        // limiter since nobody is watching at a steady rate.
+        if (scenario_.has_value())
         {
-            log::info("animation pinned to t=%.3f s", *fixed_time_);
-        }
-
-        // Any overlay makes two captures differ, which defeats comparing the
-        // clustered and brute-force views byte for byte.
-        if (std::getenv("ENCKE_NO_UI") != nullptr)
-        {
-            show_ui_ = false;
-        }
-
-        if (optional<u32> const key = initial_debug_key())
-        {
-            on_debug_key(*key);
-        }
-
-        if (optional<Tonemap> const tonemap = initial_tonemap())
-        {
-            renderer_.set_tonemap(*tonemap);
-        }
-        log::info("tonemap: %s (T cycles)", tonemap_name(renderer_.tonemap()));
-
-        // Read back from the renderer rather than grabbed off the desktop, so
-        // other windows and the compositor cannot get into it.
-        if (char const* const path = std::getenv("ENCKE_CAPTURE"))
-        {
-            capture_path_ = string{path};
-
-            // Late enough for pinned exposure to have metered and every
-            // frame in flight to have been through the renderer once.
-            constexpr u32 kDefaultCaptureFrame = 10;
-            char const* const frame = std::getenv("ENCKE_CAPTURE_FRAME");
-            capture_frame_ = frame != nullptr ? static_cast<u32>(std::strtoul(frame, nullptr, 10))
-                                              : kDefaultCaptureFrame;
-            log::info("capturing frame %u to %s, then quitting", capture_frame_, path);
-
-            if (char const* const fly = std::getenv("ENCKE_CAPTURE_FLY"))
-            {
-                f64vec3 velocity{0.0};
-                if (std::sscanf(fly, "%lf %lf %lf", &velocity.x, &velocity.y, &velocity.z) == 3)
-                {
-                    capture_velocity_ = velocity;
-                    log::info("capture: flying at (%.1f, %.1f, %.1f) m/s once settled", velocity.x,
-                              velocity.y, velocity.z);
-                }
-                else
-                {
-                    log::warn("ENCKE_CAPTURE_FLY wants \"vx vy vz\"; ignored");
-                }
-            }
-
-            capture_move_ = camera_pose("ENCKE_CAPTURE_MOVE").has_value();
-            if (capture_move_)
-            {
-                log::info("capture: the terrain freezes once settled, and the camera moves");
-            }
-        }
-
-        if (optional<f32> const ev100 = fixed_ev100())
-        {
-            renderer_.set_fixed_ev100(ev100);
-            log::info("exposure pinned to EV100 %.2f", static_cast<f64>(*ev100));
-        }
-
-        if (std::getenv("ENCKE_NO_TAA") != nullptr)
-        {
-            taa_ = false;
-            log::info("TAA off");
+            fixed_time_   = 0.0;
+            show_ui_      = false;
+            limit_frames_ = false;
+            apply_settings(scenario_->settings);
         }
         renderer_.set_taa(taa_);
 
-        if (std::getenv("ENCKE_NO_GEOMORPH") != nullptr)
-        {
-            renderer_.set_geomorph(false);
-            log::info("geomorph off");
-        }
+        log::info("tonemap: %s (T cycles)", tonemap_name(renderer_.tonemap()));
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
         log::info("camera: hold right mouse to look; WASD move, Space/Ctrl up/down, "
@@ -527,22 +375,208 @@ namespace encke
         fly_.aim(camera, target - eye, up);
     }
 
-    string App::camera_pose_text() const
+    scenario::Camera App::camera_step() const
     {
         // A root, so its local transform is its world one; the scene's frame
-        // is the world's moved to the origin.
+        // is the world's moved to the origin. The target is 10 m ahead.
         Transform const& camera = scene_.registry.get<Transform>(scene_.camera);
         f64vec3 const    eye    = camera.position - scene_.origin();
         f64vec3 const    target = eye + forward(camera.rotation) * 10.0;
         f64vec3 const    up     = camera.rotation * f64vec3{0.0, 1.0, 0.0};
 
-        array<char, 256> text{};
-        std::snprintf(text.data(), text.size(), "%.4f %.4f %.4f %.4f %.4f %.4f %.6f %.6f %.6f", eye.x, eye.y,
-                      eye.z, target.x, target.y, target.z, up.x, up.y, up.z);
-        return string{text.data()};
+        return scenario::Camera{.position = rounded(eye, 4.0), .target = rounded(target, 4.0),
+                                .up = rounded(up, 6.0)};
     }
 
-    void App::save_capture()
+    void App::apply_settings(scenario::Settings const& settings)
+    {
+        if (settings.ui.has_value())
+        {
+            show_ui_ = *settings.ui;
+        }
+        if (settings.taa.has_value())
+        {
+            taa_ = *settings.taa;
+            renderer_.set_taa(taa_);
+            log::info("TAA %s", taa_ ? "on" : "off");
+        }
+        if (settings.geomorph.has_value())
+        {
+            renderer_.set_geomorph(*settings.geomorph);
+            log::info("geomorph %s", *settings.geomorph ? "on" : "off");
+        }
+        if (settings.frame_limit.has_value())
+        {
+            limit_frames_ = *settings.frame_limit;
+        }
+        if (settings.tonemap.has_value())
+        {
+            renderer_.set_tonemap(*settings.tonemap);
+            log::info("tonemap: %s", tonemap_name(*settings.tonemap));
+        }
+        if (settings.ev100.has_value())
+        {
+            renderer_.set_fixed_ev100(settings.ev100);
+            log::info("exposure pinned to EV100 %.2f", static_cast<f64>(*settings.ev100));
+        }
+        if (settings.shading.has_value())
+        {
+            renderer_.set_debug_view(*settings.shading);
+            log::info("debug view: %s", debug_view_name(*settings.shading));
+        }
+        if (settings.windows.has_value())
+        {
+            debug_windows_.fill(false);
+            for (DebugWindow const window : *settings.windows)
+            {
+                debug_windows_[static_cast<u32>(window)] = true;
+            }
+        }
+        if (settings.time.has_value())
+        {
+            fixed_time_ = settings.time;
+            log::info("animation pinned to t=%.3f s", *fixed_time_);
+        }
+    }
+
+    App::StepResult App::run_step(scenario::Step const& step)
+    {
+        return std::visit(
+            [this](auto const& s) -> StepResult {
+                using S = std::decay_t<decltype(s)>;
+
+                if constexpr (std::is_same_v<S, scenario::Settle>)
+                {
+                    // Frozen, the octree is not trying to reach what the
+                    // camera wants, so it never goes idle; the assets still
+                    // must.
+                    bool const idle = (terrain_.frozen() || terrain_.idle()) && assets_.idle() &&
+                                      renderer_.streaming_idle();
+                    if (step_frames_ >= s.min_frames && idle)
+                    {
+                        return StepResult::Done;
+                    }
+                    if (step_frames_ >= s.timeout_frames)
+                    {
+                        log::error("scenario: not settled after %u frames", s.timeout_frames);
+                        return StepResult::Failed;
+                    }
+                    return StepResult::Running;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Capture>)
+                {
+                    // TAA's history holds every frame before, however many
+                    // there were: discard it and wait one jitter cycle, so the
+                    // capture is the same image on every run. The frame is
+                    // taken by tick_scenario, once this says so.
+                    if (step_frames_ == 0)
+                    {
+                        renderer_.reset_taa();
+                    }
+                    return StepResult::Running;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Camera>)
+                {
+                    place_camera(to_vec(s.position), to_vec(s.target), to_vec(s.up));
+                    return StepResult::Done;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Fly>)
+                {
+                    if (step_frames_ >= s.frames)
+                    {
+                        return StepResult::Done;
+                    }
+                    Transform& camera = scene_.registry.get<Transform>(scene_.camera);
+                    camera.position += to_vec(s.velocity) / kScenarioStepHz;
+                    return StepResult::Running;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Wait>)
+                {
+                    return step_frames_ >= s.frames ? StepResult::Done : StepResult::Running;
+                }
+                else if constexpr (std::is_same_v<S, scenario::FreezeTerrain>)
+                {
+                    terrain_.set_frozen(true);
+                    return StepResult::Done;
+                }
+                else if constexpr (std::is_same_v<S, scenario::ThawTerrain>)
+                {
+                    terrain_.set_frozen(false);
+                    return StepResult::Done;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Interactive>)
+                {
+                    return StepResult::Done;
+                }
+                else
+                {
+                    static_assert(std::is_same_v<S, scenario::Settings>);
+                    apply_settings(s);
+                    return StepResult::Done;
+                }
+            },
+            step);
+    }
+
+    bool App::tick_scenario()
+    {
+        while (scenario_.has_value() && step_index_ < scenario_->steps.size())
+        {
+            scenario::Step const& step = scenario_->steps[step_index_];
+            if (!step_started_)
+            {
+                step_started_ = true;
+                step_frames_  = 0;
+                log::info("scenario: step %zu: %s", step_index_, scenario::to_json(step).c_str());
+            }
+
+            if (std::holds_alternative<scenario::Interactive>(step))
+            {
+                log::info("scenario: handing over to the user");
+                scenario_.reset();
+                return false;
+            }
+
+            StepResult const result = run_step(step);
+            if (result == StepResult::Failed)
+            {
+                scenario_failed_ = true;
+                step_index_      = scenario_->steps.size();
+                return false;
+            }
+            if (result == StepResult::Running)
+            {
+                // A capture's frame comes once TAA has had its jitter cycle.
+                u32 const settle = renderer_.taa() ? config::kTaaJitterCount : 0u;
+                return std::holds_alternative<scenario::Capture>(step) && step_frames_ >= settle;
+            }
+
+            ++step_index_;
+            step_started_ = false;
+        }
+        return false;
+    }
+
+    void App::finish_capture()
+    {
+        scenario::Capture const& capture = std::get<scenario::Capture>(scenario_->steps[step_index_]);
+        std::filesystem::path const path = scenario_output_ / capture.file;
+
+        std::error_code error;
+        std::filesystem::create_directories(path.parent_path(), error);
+        if (error || !save_capture(path))
+        {
+            log::error("scenario: could not write %s", path.string().c_str());
+            scenario_failed_ = true;
+            step_index_      = scenario_->steps.size();
+            return;
+        }
+
+        ++step_index_;
+        step_started_ = false;
+    }
+
+    bool App::save_capture(std::filesystem::path const& path)
     {
         // The copy is in the frame just submitted.
         device_.wait_idle();
@@ -551,7 +585,7 @@ namespace encke
         if (!capture.has_value())
         {
             log::error("no capture: the swapchain cannot be copied from");
-            return;
+            return false;
         }
 
         bool const bgra = capture->format == VK_FORMAT_B8G8R8A8_SRGB ||
@@ -562,7 +596,7 @@ namespace encke
         {
             log::error("no capture: swapchain format %d is not 8-bit RGBA or BGRA",
                        static_cast<int>(capture->format));
-            return;
+            return false;
         }
 
         Pixels pixels{.width = capture->width, .height = capture->height,
@@ -576,10 +610,13 @@ namespace encke
             pixels.rgba[at + 3] = 255;   // the swapchain's alpha means nothing
         }
 
-        if (save_png(*capture_path_, pixels))
+        string const file = path.string();
+        if (!save_png(file, pixels))
         {
-            log::info("captured %ux%u to %s", pixels.width, pixels.height, capture_path_->c_str());
+            return false;
         }
+        log::info("captured %ux%u to %s", pixels.width, pixels.height, file.c_str());
+        return true;
     }
 
     f64 App::limit_frame_rate()
@@ -623,7 +660,7 @@ namespace encke
         return std::chrono::duration<f64, std::milli>(woke - start).count();
     }
 
-    void App::run()
+    int App::run()
     {
         bool running = true;
 
@@ -641,34 +678,39 @@ namespace encke
                 continue;
             }
 
-            if (events.toggle_ui)
+            // While a scenario runs, the keyboard and mouse change nothing:
+            // the machine is shared, and a stray key would change a capture.
+            bool const scripted = scenario_.has_value();
+
+            if (events.toggle_ui && !scripted)
             {
                 show_ui_ = !show_ui_;
             }
 
-            if (events.toggle_terrain_freeze)
+            if (events.toggle_terrain_freeze && !scripted)
             {
                 terrain_.set_frozen(!terrain_.frozen());
-                frozen_pose_ = terrain_.frozen() ? optional<string>{camera_pose_text()} : nullopt;
+                frozen_pose_ = terrain_.frozen() ? optional<scenario::Camera>{camera_step()} : nullopt;
                 log::info("terrain: %s", terrain_.frozen() ? "frozen" : "thawed");
             }
 
-            // The pose as the capture variables take it, on the clipboard and
-            // in the log. Frozen, the start pose is where the terrain froze
-            // and the capture moves to the camera, so the octree settles on
-            // what was on screen.
+            // The pose as scenario steps, on the clipboard and in the log.
+            // Frozen, they settle where the terrain froze, freeze it and move
+            // to the camera, so the octree shows what was on screen.
             if (events.copy_camera)
             {
-                string const current = camera_pose_text();
+                string const current = scenario::to_json(camera_step());
                 string const text =
                     frozen_pose_.has_value()
-                        ? "ENCKE_CAMERA=\"" + *frozen_pose_ + "\" ENCKE_CAPTURE_MOVE=\"" + current + "\""
-                        : "ENCKE_CAMERA=\"" + current + "\"";
+                        ? scenario::to_json(*frozen_pose_) + ",\n" +
+                              scenario::to_json(scenario::Settle{}) + ",\n" +
+                              scenario::to_json(scenario::FreezeTerrain{}) + ",\n" + current + ","
+                        : current + ",";
                 SDL_SetClipboardText(text.c_str());
-                log::info("camera: %s", text.c_str());
+                log::info("camera:\n%s", text.c_str());
             }
 
-            if (events.cycle_tonemap && !ui_.wants_text())
+            if (events.cycle_tonemap && !ui_.wants_text() && !scripted)
             {
                 auto const next = static_cast<Tonemap>(
                     (static_cast<u32>(renderer_.tonemap()) + 1u) % kTonemapCount);
@@ -678,7 +720,7 @@ namespace encke
 
             // A digit typed into a UI text field is not a view switch.
             if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugKeyCount &&
-                !ui_.wants_text())
+                !ui_.wants_text() && !scripted)
             {
                 on_debug_key(static_cast<u32>(events.debug_view));
             }
@@ -716,8 +758,8 @@ namespace encke
             // the loop, so it spans exactly one whole frame; measuring from
             // where the previous draw() returned would span only the poll and
             // the UI, a jittering sliver of it. Clamped, so a hitch does not
-            // fling the camera. Not pinned by ENCKE_FIXED_TIME: a pinned
-            // camera still has to move at a real speed when flown.
+            // fling the camera. Not pinned with animation: a pinned camera
+            // still has to move at a real speed when flown.
             auto const tick  = std::chrono::steady_clock::now();
             f64        delta = 0.0;
             if (last_tick_.has_value())
@@ -727,9 +769,23 @@ namespace encke
             }
             last_tick_ = tick;
 
-            // Flown first: the camera is an entity, and Scene::update is what
-            // composes its world transform for this frame.
-            fly(events, delta);
+            // Flown first, by the user or the scenario: the camera is an
+            // entity, and Scene::update is what composes its world transform
+            // for this frame.
+            bool capturing = false;
+            if (scripted)
+            {
+                capturing = tick_scenario();
+                if (scenario_.has_value() && step_index_ >= scenario_->steps.size())
+                {
+                    running = false;
+                    continue;
+                }
+            }
+            else
+            {
+                fly(events, delta);
+            }
             assets_.update();
             // Finished terrain chunks become meshes here, and the octree picks
             // the chunks this camera wants and swaps them in and out, all
@@ -747,49 +803,8 @@ namespace encke
             // start.
             renderer_.set_frame_time(delta, fixed_time_.has_value());
 
-            // Not before streaming has settled: until then which materials
-            // and terrain chunks have landed depends on timing, and captures
-            // would differ.
-            bool const settled = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
-                                 terrain_.idle() && assets_.idle() && renderer_.streaming_idle();
-
-            bool capturing = false;
-            if (capture_velocity_.has_value())
-            {
-                // Settled once, then flown every frame by a fixed step
-                // whatever the octree is doing. Moved after this frame's
-                // Scene::update, so drawn from the next.
-                flying_ = flying_ || settled;
-                if (flying_)
-                {
-                    Transform& camera = scene_.registry.get<Transform>(scene_.camera);
-                    camera.position += *capture_velocity_ / 60.0;
-                    capturing = ++fly_frames_ >= capture_frame_;
-                }
-            }
-            else
-            {
-                // Settled at the start pose: freeze what is meshed and move.
-                // The history is discarded a frame later, from the new pose.
-                if (settled && capture_move_)
-                {
-                    if (optional<CameraPose> const pose = camera_pose("ENCKE_CAPTURE_MOVE"))
-                    {
-                        terrain_.set_frozen(true);
-                        place_camera(pose->eye, pose->target, pose->up);
-                    }
-                    capture_move_ = false;
-                }
-                // TAA's history holds every frame before, however many there
-                // were: once settled, discard it and wait one jitter cycle, so
-                // the capture is the same image on every run.
-                else if (settled && !capture_at_.has_value())
-                {
-                    renderer_.reset_taa();
-                    capture_at_ = frames_drawn_ + (renderer_.taa() ? config::kTaaJitterCount : 0u);
-                }
-                capturing = settled && capture_at_.has_value() && frames_drawn_ >= *capture_at_;
-            }
+            // Read back from the renderer rather than grabbed off the
+            // desktop, so other windows and the compositor cannot get in.
             if (capturing)
             {
                 renderer_.request_capture();
@@ -797,13 +812,17 @@ namespace encke
 
             FrameResult const result = renderer_.draw(swapchain_, scene_, assets_, &ui_);
 
-            if (result == FrameResult::Ok)
+            // A step counts the frames drawn while it runs; one that was not
+            // drawn is retried, a capture included.
+            if (result == FrameResult::Ok && scenario_.has_value() && step_started_)
             {
-                ++frames_drawn_;
                 if (capturing)
                 {
-                    save_capture();
-                    running = false;
+                    finish_capture();
+                }
+                else
+                {
+                    ++step_frames_;
                 }
             }
 
@@ -811,7 +830,7 @@ namespace encke
             {
             case FrameResult::Ok:
             {
-                // Wall clock, not `seconds`: ENCKE_FIXED_TIME pins animation,
+                // Wall clock, not `seconds`: a scenario pins animation,
                 // not the passage of real time the stats are measuring.
                 auto const now = std::chrono::steady_clock::now();
                 if (last_frame_.has_value())
@@ -844,6 +863,12 @@ namespace encke
         // Everything below unwinds through destructors; they must not run
         // while the GPU is still reading the resources they free.
         device_.wait_idle();
+        if (scenario_failed_)
+        {
+            log::error("scenario failed");
+            return EXIT_FAILURE;
+        }
         log::info("shutting down");
+        return EXIT_SUCCESS;
     }
 }

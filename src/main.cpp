@@ -5,10 +5,22 @@
 
 int main(int argc, char** argv)
 {
+    encke::AppOptions options;
+
     // --headless and --sweep run the benchmarks without a window or a
     // Vulkan device.
     for (int i = 1; i < argc; ++i)
     {
+        if (string_view{argv[i]} == "--scenario" && i + 1 < argc)
+        {
+            options.scenario = std::filesystem::path{argv[++i]};
+            continue;
+        }
+        if (string_view{argv[i]} == "--out" && i + 1 < argc)
+        {
+            options.output = std::filesystem::path{argv[++i]};
+            continue;
+        }
         if (string_view{argv[i]} == "--headless")
         {
             return encke::terrain::run_benchmark();
@@ -36,11 +48,10 @@ int main(int argc, char** argv)
     // same path, since every shutdown checks its handle first.
     encke::App app;
 
-    if (!app.init())
+    if (!app.init(options))
     {
         return EXIT_FAILURE;
     }
 
-    app.run();
-    return EXIT_SUCCESS;
+    return app.run();
 }

@@ -1,0 +1,16 @@
+// The correctness checks: clustered and brute-force shading must be
+// byte-identical, and the cluster heat map must vary. The first two
+// captures are compared with each other, not with a reference.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "settle" },
+        { "op": "capture", "file": "clustered.png" },
+
+        { "op": "set", "shading": "brute_force" },
+        { "op": "capture", "file": "brute_force.png" },
+
+        { "op": "set", "shading": "clustered", "ui": true, "windows": ["cluster_heat"] },
+        { "op": "capture", "file": "cluster_heat.png" }
+    ]
+}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 
 #include "assets/asset_manager.hpp"
 #include "platform/window.hpp"
@@ -9,6 +10,7 @@
 #include "render/fly_camera.hpp"
 #include "render/renderer.hpp"
 #include "render/scene.hpp"
+#include "scenario/scenario.hpp"
 #include "terrain/planet.hpp"
 #include "ui/imgui_layer.hpp"
 #include "ui/stats_window.hpp"
@@ -19,6 +21,14 @@
 
 namespace encke
 {
+    struct AppOptions
+    {
+        // `--scenario path`: run that file's steps, then quit.
+        optional<std::filesystem::path> scenario;
+        // `--out dir`: where its captures go; by default out/<name> beside it.
+        optional<std::filesystem::path> output;
+    };
+
     class App
     {
     public:
@@ -30,10 +40,30 @@ namespace encke
         App(App&&)                 = delete;
         App& operator=(App&&)      = delete;
 
-        bool init();
-        void run();
+        bool init(AppOptions const& options);
+
+        // The process's exit code: nonzero if a scenario step failed.
+        int run();
 
     private:
+        enum class StepResult
+        {
+            Running,   // continues next frame
+            Done,
+            Failed,
+        };
+
+        void apply_settings(scenario::Settings const& settings);
+
+        // Runs the scenario's steps until one has to wait for a frame, before
+        // anything this frame is updated. Returns whether this frame is to
+        // be captured.
+        bool tick_scenario();
+        StepResult run_step(scenario::Step const& step);
+
+        // After a frame the scenario asked to capture has been drawn.
+        void finish_capture();
+
         // Returns false if the window has no drawable area, in which case the
         // swapchain is left alone until it does.
         bool rebuild_swapchain();
@@ -50,15 +80,15 @@ namespace encke
         void set_looking(bool looking);
         void fly(FrameEvents const& events, f64 seconds);
 
-        // Writes the frame the renderer just captured to capture_path_.
-        void save_capture();
+        // Writes the frame the renderer just captured to `path` as a PNG.
+        bool save_capture(std::filesystem::path const& path);
 
         // The camera at `eye` looking at `target`, metres from the scene's
         // origin, its up toward `up`.
         void place_camera(f64vec3 const& eye, f64vec3 const& target, f64vec3 const& up);
 
-        // The camera's pose in ENCKE_CAMERA's format.
-        string camera_pose_text() const;
+        // The camera's pose as a scenario step, rounded for reading.
+        scenario::Camera camera_step() const;
 
         // Sleeps until the next frame's deadline while the limiter is on;
         // returns the milliseconds slept.
@@ -103,35 +133,22 @@ namespace encke
         // reach the scene and the assets, and jobs the builder's state.
         WorkerPool pool_;
 
-        // Set from ENCKE_FIXED_TIME; pins animation so captures are comparable.
+        // Pins animation so captures are comparable; a scenario always does.
         optional<f64> fixed_time_;
 
-        // Set from ENCKE_CAPTURE: save frame `capture_frame_` there as a PNG,
-        // then quit.
-        optional<string> capture_path_;
-        u32              capture_frame_ = 0;
-        u32              frames_drawn_  = 0;
-        optional<u32>    capture_at_;   // once settled: the frame to capture
-
-        // Set from ENCKE_CAPTURE_MOVE: once settled, freeze the terrain and
-        // move the camera to that pose before capturing, so seams can be
-        // seen from where the octree did not choose its chunks.
-        bool capture_move_ = false;
+        // The scenario being run, while it runs. Steps run in order; the
+        // current one has seen `step_frames_` frames before this one.
+        optional<scenario::Scenario> scenario_;
+        std::filesystem::path        scenario_output_;
+        size_t                       step_index_   = 0;
+        u32                          step_frames_  = 0;
+        bool                         step_started_ = false;
+        bool                         scenario_failed_ = false;
 
         // The camera's pose when F2 froze the terrain, for F3 to copy.
-        optional<string> frozen_pose_;
+        optional<scenario::Camera> frozen_pose_;
 
-        // Set from ENCKE_CAPTURE_FLY="vx vy vz": once settled, fly at that
-        // velocity, metres per second at a fixed 60 steps a second, with the
-        // octree live, and capture after ENCKE_CAPTURE_FRAME frames of it.
-        // Whatever the octree has swapped by then depends on timing, so two
-        // runs differ; this is for seeing what only shows in motion.
-        optional<f64vec3> capture_velocity_;
-        bool              flying_      = false;
-        u32               fly_frames_  = 0;
-
-        // Temporal antialiasing, toggled in the stats window; ENCKE_NO_TAA
-        // starts with it off.
+        // Temporal antialiasing, toggled in the stats window.
         bool taa_ = true;
 
         // Wall-clock stamp of the previous completed frame, for frame time.

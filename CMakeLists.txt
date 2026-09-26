@@ -41,6 +41,9 @@ find_package(FastNoise2 CONFIG REQUIRED)
 # The overlay port in ports/joltphysics: double precision, cross-platform
 # deterministic. Jolt::Jolt carries its JPH_* defines to whatever links it.
 find_package(Jolt CONFIG REQUIRED)
+# JSON by compile-time reflection: aggregates read and write without
+# per-field glue. Header-only.
+find_package(glaze CONFIG REQUIRED)
 
 # Header-only, and the port installs no CMake package: just the header.
 find_path(BS_THREAD_POOL_INCLUDE_DIR BS_thread_pool.hpp REQUIRED)
@@ -180,6 +183,8 @@ add_library(encke_core OBJECT
     src/render/renderer.cpp
     src/render/scene.cpp
     src/render/shadows.cpp
+
+    src/scenario/scenario.cpp
 
     src/terrain/benchmark.cpp
     src/terrain/detail_noise.cpp
@@ -327,6 +332,7 @@ target_link_libraries(encke_core PUBLIC
     EnTT::EnTT
     FastNoise2::FastNoise
     Jolt::Jolt
+    glaze::glaze
     encke_imgui
 )
 
@@ -454,8 +460,10 @@ find_package(Catch2 3 CONFIG REQUIRED)
 include(Catch)
 
 add_executable(encke_tests
+    tests/core/json_test.cpp
     tests/physics/jolt_test.cpp
     tests/render/camera_test.cpp
+    tests/scenario/scenario_test.cpp
     tests/terrain/detail_noise_test.cpp
     tests/terrain/fastnoise_allocator_test.cpp
     tests/terrain/octree_test.cpp

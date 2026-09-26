@@ -1,0 +1,14 @@
+// The test scene from its start pose, then the table with the helmet.
+// The table pose predates grounding objects on the terrain: it now looks up
+// at the helmet from under the table top. Replace it with one from F3.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "settle" },
+        { "op": "capture", "file": "start.png" },
+
+        { "op": "camera", "position": [-2.55, 1.33, -1.62], "target": [-3, 1.17, -2] },
+        { "op": "settle" },
+        { "op": "capture", "file": "helmet.png" }
+    ]
+}

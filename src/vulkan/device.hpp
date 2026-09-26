@@ -24,7 +24,10 @@ namespace encke
         VulkanDevice(VulkanDevice&&)                 = delete;
         VulkanDevice& operator=(VulkanDevice&&)      = delete;
 
-        bool init(VulkanContext const& context);
+        // `srgb_ui` takes the path a GPU without the swapchain mutable-format
+        // extension would, so the sRGB-target UI stays exercised on hardware
+        // that has it.
+        bool init(VulkanContext const& context, bool srgb_ui);
         void shutdown();
 
         // Blocks until the device is idle. Required before destroying anything

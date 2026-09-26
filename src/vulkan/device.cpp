@@ -250,7 +250,7 @@ namespace encke
         shutdown();
     }
 
-    bool VulkanDevice::init(VulkanContext const& context)
+    bool VulkanDevice::init(VulkanContext const& context, bool srgb_ui)
     {
         u32 count = 0;
         VkResult result = vkEnumeratePhysicalDevices(context.instance(), &count, nullptr);
@@ -327,10 +327,7 @@ namespace encke
         vector<char const*> extensions(std::begin(kRequiredDeviceExtensions),
                                        std::end(kRequiredDeviceExtensions));
 
-        // ENCKE_UI_SRGB takes the path a GPU without the extension would, so
-        // the sRGB-target UI stays exercised on hardware that has it.
-        bool const force_srgb_ui  = std::getenv("ENCKE_UI_SRGB") != nullptr;
-        mutable_swapchain_format_ = !force_srgb_ui && has_extension(physical_, kMutableFormatExtension);
+        mutable_swapchain_format_ = !srgb_ui && has_extension(physical_, kMutableFormatExtension);
         if (mutable_swapchain_format_)
         {
             extensions.push_back(kMutableFormatExtension);
@@ -338,7 +335,7 @@ namespace encke
         else
         {
             log::info("%s -- the UI draws through the sRGB view and blends in linear space",
-                      force_srgb_ui ? "ENCKE_UI_SRGB set" : "no swapchain mutable format");
+                      srgb_ui ? "srgb_ui set" : "no swapchain mutable format");
         }
 
         // Graphics and present are usually the same family; submitting the

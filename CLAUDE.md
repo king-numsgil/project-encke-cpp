@@ -123,6 +123,8 @@ src/
     gpu_types.hpp        structs shared with the shaders
     pipeline.{hpp,cpp}   graphics and compute pipeline construction
     renderer.{hpp,cpp}   the passes, barriers, per-frame upload
+  scenario/
+    scenario.{hpp,cpp}   a scenario file's settings and steps, read with glaze; App runs them
   terrain/
     fastnoise.hpp        FastNoise2 include and the pinned feature set; terrain sources only
     detail_noise.{hpp,cpp} lattice-split Perlin fBm octaves, f64 origin + f32 offsets
@@ -162,7 +164,9 @@ tests/                 Catch2, mirroring src/: camera projection and view, trans
                        which atmosphere a point sees, terrain noise against an f64 oracle
                        (terrain/perlin_reference), meshing and morph targets, octree balance,
                        the impostor's handover, surface map projection and bake, FastNoise2 under mimalloc
+scenarios/             scenario files, tracked; compare.ps1; out/ and reference/ gitignored
 ports/fastnoise2/      vcpkg overlay port: FastNoise2 v1.1.1 plus two patches
+ports/joltphysics/     vcpkg overlay port: Jolt Physics v5.6.0, double precision, deterministic
 assets/
   textures/            one directory per ambientCG set; CREDITS.md says where each came from
   models/              glTF files; CREDITS.md holds their licences
@@ -285,8 +289,8 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   `ui_view()` / `ui_format()` hand out the UNORM twin. The extension
   (`VK_KHR_swapchain_mutable_format`) is optional: without it the UI uses the
   sRGB view and blends in linear space, which lightens translucent elements
-  slightly. `ENCKE_UI_SRGB` forces that path so it stays tested on hardware that
-  has the extension.
+  slightly. A scenario's `srgb_ui` setting forces that path so it stays
+  tested on hardware that has the extension.
 - **The clear colour is linear.** The swapchain is `B8G8R8A8_SRGB`, so the
   hardware encodes on write. Linear `(0.03, 0.12, 0.18)` lands as sRGB
   `(48, 97, 118)` on screen — verified by screen capture, not assumed.
@@ -320,8 +324,8 @@ Keys 1 and 2 choose how the frame is shaded: clustered or brute force
 (`DebugView`). Keys 3 to 6 toggle a UI window each — lights per cluster,
 normals, motion vectors, shadow cascades (`DebugWindow`) — and opening one
 while the UI is hidden brings the UI back. The cascade window tints each pixel
-by the cascade it reads and darkens it where the sun is shadowed. `ENCKE_DEBUG_VIEW` uses the same numbering from
-zero, so `ENCKE_DEBUG_VIEW=2` starts with the heat map open.
+by the cascade it reads and darkens it where the sun is shadowed. A
+scenario sets them with `shading` and `windows`.
 
 The windows do not show render targets directly. `shaders/debug_views.slang`
 runs once per open window after lighting and writes a display-ready linear
@@ -428,45 +432,94 @@ in the fence wait, acquire and present.
   rectangle shows the desktop through the rounded bottom corners, so a few
   corner pixels differ between runs whatever the renderer does. Last verified
   with the debug views split out: identical apart from a 4x4 corner.
-- **`ENCKE_FIXED_TIME` pins animation** so two captures can be compared. The
-  spinning showpiece animates on wall-clock, so without it a comparison across
-  runs compares its rotation, not renderer changes. The camera starts at the
-  same pose every run and only moves when flown, so a capture must not touch
-  the mouse.
-- **`ENCKE_NO_UI` (or F1) hides the overlay**, and a byte comparison needs it:
-  the stats window's numbers change every frame, so two captures with it
-  showing never match.
-- **`ENCKE_CAPTURE=path.png` is the way to capture.** The renderer copies the
-  finished swapchain image (UI included, so pair it with `ENCKE_NO_UI`) into
-  host memory on frame `ENCKE_CAPTURE_FRAME` (default 10), the app writes it
-  as a PNG and quits. Nothing touches the desktop, so other windows, the
+- **Captures are taken by scenarios**; see *Scenarios*. The renderer copies
+  the finished swapchain image, UI included, into host memory and the app
+  writes it as a PNG. Nothing touches the desktop, so other windows, the
   compositor and the user's own use of the machine cannot get into it; a
   desktop grab once captured a browser because Windows refused the
-  foreground switch. Two runs with the same settings are byte-identical.
-  Once the frame count is reached and streaming has settled, the app
-  discards TAA's history and captures `config::kTaaJitterCount` frames later,
-  one jitter cycle, so the history is the same on every run.
-- **`ENCKE_NO_TAA`** (or the stats window's checkbox) turns temporal
-  antialiasing off.
+  foreground switch.
 - **F2 freezes the terrain octree** (`TerrainOctree::set_frozen`): nothing
   is selected, meshed or swapped, so what is on screen stays, masks and
-  all, while the camera flies. `ENCKE_CAPTURE_MOVE`, a pose in
-  `ENCKE_CAMERA`'s format, does the same for a capture: settle at the start
-  pose, freeze, move there, capture. `ENCKE_CAPTURE_FLY="vx vy vz"` instead
-  flies at that velocity once settled, 60 fixed steps a second with the
-  octree live, and captures after `ENCKE_CAPTURE_FRAME` frames of it; what
-  has swapped by then depends on timing, so those runs differ.
-- **F3 copies the camera's pose** to the clipboard and the log, as
-  `ENCKE_CAMERA="..."`; with the terrain frozen, as `ENCKE_CAMERA` at the
-  pose F2 froze it and `ENCKE_CAPTURE_MOVE` at the camera, which replays
-  the view on a settled octree. The pose is metres from the scene's origin
-  with a target 10 m ahead and the camera's up.
-- **`ENCKE_CAMERA="px py pz tx ty tz"`** starts the camera at p looking at t,
-  metres from the pole. The helmet: `"-2.55 1.33 -1.62 -3 1.17 -2"`.
-- **`ENCKE_TONEMAP` (0 ACES, 1 AgX, 2 PBR Neutral, T cycles) and `ENCKE_EV100`**
-  pick the curve and pin the exposure it is applied at. Metering still runs
-  under a pinned EV, so the two separate cleanly. PBR Neutral is the
-  default.
+  all, while the camera flies.
+- **F3 copies the camera's pose** to the clipboard and the log as a
+  scenario `camera` step; with the terrain frozen, as a camera step at the
+  pose F2 froze it, a settle, a freeze and a camera step at the camera,
+  which replays the view on a settled octree. The pose is metres from the
+  scene's origin with a target 10 m ahead and the camera's up.
+- **Pinned exposure and the tonemap curve separate cleanly**: metering still
+  runs under a pinned EV100. PBR Neutral is the default curve; T cycles it.
+
+### Scenarios
+
+`encke --scenario file.json` runs a scenario instead of waiting for input:
+settings, then steps run in order, then quit, with exit code 1 if a step
+failed. `src/scenario` reads it with glaze; `App::tick_scenario` runs it.
+The files live in `scenarios/`, tracked; their captures go to
+`scenarios/out/<name>/` (or `--out dir`), and the reference archive is
+`scenarios/reference/`, both gitignored. Comparison is offline:
+`scenarios/compare.ps1` compares out with reference, byte for byte and then
+pixel by pixel with a diff image, and `-Accept` promotes out to reference;
+`-A x.png -B y.png` compares two files, which is how clustered and brute
+force are checked (`scenarios/debug_views.json`).
+
+How to work with them:
+
+- **Verify visible changes with a scenario, not by eye in a live run.**
+  Before a change that affects the image, run the scenarios that cover it
+  and `-Accept` their captures if no reference exists; after it, run them
+  again and compare. An unexpected diff is a regression until explained; an
+  expected one is shown to the user with its diff image before it is
+  accepted.
+- **Write a scenario for every new feature and every bug found by eye**,
+  from F3 poses, so the view can be checked again, and keep it in
+  `scenarios/`.
+- **Add ops and settings freely.** When a test needs something the
+  scenario language cannot say yet (a new setting, a light moved, the time
+  of day, a body spawned, a wait on some new condition), add the op to
+  `src/scenario` and `App::run_step` as part of the change, with a case in
+  `tests/scenario/scenario_test.cpp`. The language is meant to grow with
+  the engine; do not work around a missing op with a one-off env var,
+  command-line flag or temporary code.
+- **Clustered against brute force (`debug_views.json`) is the check for any
+  lighting or clustering change.**
+
+What they do:
+
+- **A scenario pins animation at t = 0** (a `time` setting moves it), hides
+  the overlay, whose numbers change every frame, and turns the frame limiter
+  off, before its own settings apply. The spinning showpiece animates on
+  the clock, so without the pin a comparison across runs compares its
+  rotation. Exposure jumps straight to the metered value every frame.
+- **The keyboard and mouse change nothing while a scenario runs**, F3
+  aside: the machine is shared, and a stray key would change a capture.
+- **Steps run one after another within a frame until one has to wait**,
+  before anything that frame is updated, so a camera move draws in the frame
+  it is made. A waiting step counts the frames drawn while it runs; a frame
+  that was not drawn (the swapchain out of date) is retried.
+- **`settle` is what makes captures reproducible.** It waits at least
+  `min_frames` (10: a camera move reaches the octree a frame late), then
+  until the octree shows the leaves the camera wants, every asset has
+  landed and streaming is idle. Frozen, the octree is not checked, since it
+  will not chase the camera. It fails after `timeout_frames`.
+- **`capture` does not settle.** It discards TAA's history and captures
+  `config::kTaaJitterCount` frames later, one jitter cycle, so the history
+  is the same on every run. Put a `settle` before it.
+- **`fly` moves at a fixed 60 steps a second** with the octree live, so
+  what has swapped by its end depends on timing and those runs differ.
+- **`interactive` ends the scenario and hands the engine to the user**,
+  the way to start somewhere without capturing.
+- **Settings are `optional` fields**, absent meaning unchanged; `set` takes
+  the same fields as `settings`. `srgb_ui` is startup-only and refused in a
+  `set`: the UI draws through the sRGB swapchain view and blends in linear
+  space, as a GPU without the mutable-format extension would.
+- **Mistakes stop the run before a window opens**: an unknown op, a
+  misspelt field, an enum name that does not exist, an absolute capture
+  path. glaze reports the line and column with a caret under it.
+- **Two runs of a scenario are byte-identical.** Verified at introduction:
+  `pole.json` twice, and clustered against brute force.
+- The table pose in `pole.json`, carried over from the helmet pose the
+  environment variables used, predates grounding: it looks up at the helmet
+  from under the table.
 
 ### Parameters, and why these
 
@@ -517,7 +570,7 @@ the same formula the CPU uses for a fixed EV. Every knob is in
   comes from `READ_ONLY_OPTIMAL`, never `UNDEFINED`. `push.exposure_image` is
   patched per pass: the storage handle for the exposure passes, the sampled
   one for tonemap.
-- **The first frame, and every frame under `ENCKE_FIXED_TIME`, jumps straight
+- **The first frame, and every frame with animation pinned, jumps straight
   to the metered value**, starting from `Scene::ev100` if nothing was metered.
   Pinned-time captures therefore match across runs, and the average is summed
   serially in a fixed order for the same reason.
@@ -840,7 +893,7 @@ alone, by the lowest ground under its footprint's corners, so no edge floats;
 in an assembly (colonnade, gateway, table and helmet, stacked crates), by the
 lowest ground under its supports, one offset for every part, so it stays in
 one piece and its high side sinks a few centimetres. Objects stay upright
-rather than tilting with the ground. `ENCKE_CAMERA` is
+rather than tilting with the ground. A scenario's `camera` step is
 relative to the moved origin; the Moon and the Earth's entity are placed from
 `kWorldOrigin`.
 
@@ -890,8 +943,9 @@ and are then skipped. The sampler is `push.material_sampler`, one for all.
   emission texture has its emission held at zero until then, or its
   emissive factor would light the whole surface. Slots are registered the
   frame the copies are recorded: fresh slots, so no pending command buffer
-  can be reading them. `ENCKE_CAPTURE` waits for `AssetManager::idle()` and
-  `Renderer::streaming_idle()`, so captures stay byte-identical. Only the
+  can be reading them. A scenario's `settle` waits for
+  `AssetManager::idle()` and `Renderer::streaming_idle()`, so captures stay
+  byte-identical. Only the
   1x1 whites use the blocking `Texture::init`.
 - **One asset worker, on purpose.** Decoding is serial on a single thread,
   and that is a decision, not a gap: the cores are meant for the SDF workers,
@@ -1266,7 +1320,7 @@ neighbour changed.
   instance (`instance % counts.z`, the max object count in the Frame) and
   morphs by distance from the camera, not the light, so the terrain casts the
   surface it draws.
-- **`ENCKE_NO_GEOMORPH`** draws every chunk at its own vertices, which is
+- **The `geomorph` setting, off,** draws every chunk at its own vertices, which is
   what the terrain looked like before: the comparison. Captured from 300 m
   looking straight down, off shows the old crack lines outlining each finer
   square and on shows none.
@@ -1279,7 +1333,7 @@ neighbour changed.
   each vertex's normal; the copies keep the same offset from their morph
   targets, so a skirt morphs with its edge. A hole now shows a short
   streak of stretched texture instead of sky. Found with the user's F3
-  poses: the same view with `ENCKE_NO_GEOMORPH` showed the crack whose
+  poses: the same view with geomorph off showed the crack whose
   notches the holes were.
 - **Folded triangles are not holes.** Morphing real chunks near the pole
   flips about one triangle in a thousand by halfway, but a folded
@@ -1531,9 +1585,9 @@ present -- most of a frame -- and made movement slow and violently uneven.
   of whichever `Body` has its surface nearest the camera
   (`surroundings_at`). Flying to the Moon switches to its up and its
   regolith; it switches, rather than blends, halfway.
-- **`ENCKE_CAMERA` takes an optional up**, `"px py pz tx ty tz ux uy uz"`,
-  defaulting to the test scene's +Y. A look-at needs one: keeping the
-  camera's previous up instead turned its starting pitch into roll.
+- **A scenario's `camera` step takes an optional `up`**, defaulting to the
+  test scene's +Y. A look-at needs one: keeping the camera's previous up
+  instead turned its starting pitch into roll.
 - The test scene's own placements are still authored as translations from
   the pole, which only works because the pole's normal is world +Y; the SDF
   scenes will replace it.
@@ -2020,7 +2074,7 @@ backend, so it has no equivalent failure mode.
 Most deps come from vcpkg manifest mode (`vcpkg.json`, pinned via a baseline in
 `vcpkg-configuration.json`): `volk`, `vulkan`, `vulkan-memory-allocator`,
 `sdl3`, `sdl3-image`, `glm`, `fastgltf`, `cpuinfo`, `bshoshany-thread-pool`,
-`entt`, `catch2`, and `fastnoise2` and `joltphysics` from the overlay ports
+`entt`, `glaze`, `catch2`, and `fastnoise2` and `joltphysics` from the overlay ports
 in `ports/` (see *Terrain noise* for the first).
 Three come from CPM instead: mimalloc (see *Allocator*), and Dear ImGui and
 ImPlot.
@@ -2039,6 +2093,13 @@ ImPlot.
   to everything linking it, all Haswell-era like AVX2. `tests/physics`
   proves the configuration matches and drops a sphere a planet's radius
   from the origin, twice, bit for bit.
+- **glaze is the JSON library**: header-only, reading and writing
+  aggregates by compile-time reflection. **A reflected type must not be in
+  an anonymous namespace**: glaze takes field names from an `extern`
+  variable of the type, which a type without linkage cannot have, and
+  clang rejects it. Hand-written files read with `glz::opts{.comments =
+  true}`; unknown keys are an error by default, which catches a misspelt
+  setting. `tests/core/json_test` pins both.
 - **BS::thread_pool is here for its native extensions only.** `WorkerPool`
   lowers its threads' priority and names them through them. Standard C++ has no thread priority, affinity or naming,
   and `native_handle()` does not help: under MinGW it is a winpthreads
