@@ -42,6 +42,10 @@ namespace encke
         array<u32, config::kMaxShadowedSpots> spot_lights{};
     };
 
+    // Whether a view-space sphere reaches into the camera's frustum, given
+    // the projection's focal lengths, [0][0] and [1][1].
+    bool sphere_in_view(f64vec3 const& centre, f64 radius, f64 focal_x, f64 focal_y);
+
     // Fits the sun's cascades to the camera's frustum, texel-snapped so they
     // do not shimmer as the camera moves, and picks which of `lights`, the
     // frame's extracted ones, get a map this frame.

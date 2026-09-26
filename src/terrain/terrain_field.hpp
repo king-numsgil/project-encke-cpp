@@ -129,6 +129,11 @@ namespace encke::terrain
         // coarse output if given.
         void sample_chunk(ChunkRequest const& request, span<f32> out, CoarseSamples const* coarse = nullptr);
 
+        // The field at grid points first + (i, j, k) * stride, `count` a
+        // side, x fastest, with `detail_octaves`: bit for bit what a chunk
+        // sampling the same points with the same octaves gets.
+        void sample_grid(i64vec3 const& first, i64 stride, u32vec3 const& count, u32 detail_octaves, span<f32> out);
+
         // At p, with the voxel size and octave count a chunk there would use.
         PointSample sample_point(f64vec3 const& p, f64 voxel_size, u32 detail_octaves);
 

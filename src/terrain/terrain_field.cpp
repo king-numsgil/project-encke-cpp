@@ -277,6 +277,13 @@ namespace encke::terrain
         return value[0];
     }
 
+    void TerrainSampler::sample_grid(i64vec3 const& first, i64 stride, u32vec3 const& count, u32 detail_octaves,
+                                     span<f32> out)
+    {
+        GridBox const box{.first = first, .stride = stride, .count = count};
+        timing_ = evaluate_box(box, detail_octaves, 0, {}, out.first(box.size()));
+    }
+
     void TerrainSampler::sample_climate(f64vec3 const& origin, f64 voxel_size, span<f32 const> x,
                                         span<f32 const> y, span<f32 const> z, span<f32> temperature,
                                         span<f32> moisture)

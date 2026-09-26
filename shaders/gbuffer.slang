@@ -41,6 +41,11 @@ struct VertexOut
     // is what they leave.
     float4 materials : TEXCOORD3;
 
+    // Terrain only: the morphed position in mesh space plus the chunk's
+    // period offset, and the mesh-space normal, for the triplanar rock.
+    float3 mesh_position : TEXCOORD4;
+    float3 mesh_normal   : TEXCOORD5;
+
     // The object index, which the draw's firstInstance carries. Flat, and
     // the same for every vertex of a draw.
     nointerpolation uint object : OBJECT;
@@ -97,8 +102,10 @@ VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint 
     output.tangent  = float4(mul(object.model_view, float4(input.tangent.xyz, 0.0f)).xyz,
                              input.tangent.w);
     output.uv        = input.uv * stretch;
-    output.materials = materials;
-    output.object    = instance;
+    output.materials     = materials;
+    output.mesh_position = morphed.position + object.period_offset.xyz;
+    output.mesh_normal   = morphed.normal;
+    output.object        = instance;
     return output;
 }
 
@@ -106,18 +113,23 @@ VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint 
 // The tangent frame is re-orthogonalised against the normal; the bitangent
 // is the top of the image, which is where an OpenGL-convention normal map's
 // green points.
-float3 bump(float3 normal, float4 tangent_in, float3 bumped)
+// `perturbed` is decoded, with the strength applied.
+float3 bump_decoded(float3 normal, float4 tangent_in, float3 perturbed)
 {
     float3 tangent   = normalize(tangent_in.xyz - normal * dot(normal, tangent_in.xyz));
     float3 bitangent = cross(normal, tangent) * tangent_in.w;
 
-    // Mips average normals to shorter vectors; normalising after the decode
-    // undoes that.
+    // Mips average normals to shorter vectors; normalising undoes that.
+    return normalize(tangent * perturbed.x + bitangent * perturbed.y + normal * perturbed.z);
+}
+
+float3 bump(float3 normal, float4 tangent_in, float3 bumped)
+{
     float3 perturbed = bumped * 2.0f - 1.0f;
     // Normal strength, glTF's normalTexture.scale. Fixed at 2 for every
     // material by eye; at 1 the maps read too flat under the low sun.
     perturbed.xy *= 2.0f;
-    return normalize(tangent * perturbed.x + bitangent * perturbed.y + normal * perturbed.z);
+    return bump_decoded(normal, tangent_in, perturbed);
 }
 
 struct Ground
@@ -127,13 +139,118 @@ struct Ground
     float3 orm;
 };
 
-// One of the terrain palette's materials at `uv`, metres: its own tile, or
-// its flat colour until its maps have landed. Which material a pixel
-// samples varies across a quad, so implicit derivatives would be undefined:
-// the caller takes the UV's once, in uniform control flow, and they are
-// scaled to this material's tile.
+// The palette's rock, which is projected along the mesh axes instead of
+// the cube projection's UVs: it is what covers cliffs and overhangs, where
+// a projection from the body's centre stretches.
+static const uint kRock = 1u;
+
+// The surface in mesh space, whose axes are the body's, for the triplanar
+// projection. Derivatives are taken once, in uniform control flow.
+struct MeshSurface
+{
+    float3   position;      // plus the chunk's period offset, metres
+    float3   position_dx;
+    float3   position_dy;
+    float3   normal;        // unit
+    float4x4 normal_view;   // mesh -> view, for normals
+};
+
+// One projection of a material: albedo, ORM, and the normal map's decoded
+// tangent-space normal at bump()'s strength of 2, with its length before
+// the strength, for Toksvig.
+struct Projection
+{
+    float3 albedo;
+    float3 orm;
+    float3 normal;
+    float  length;
+};
+
+Projection sample_projection(GpuTerrainMaterial material, float2 at, float2 dx, float2 dy, SamplerState filter)
+{
+    Projection projection;
+    projection.albedo = g_textures[NonUniformResourceIndex(material.textures.x)].SampleGrad(filter, at, dx, dy).rgb;
+    projection.orm    = g_textures[NonUniformResourceIndex(material.textures.z)].SampleGrad(filter, at, dx, dy).rgb;
+    projection.normal = float3(0.0f, 0.0f, 1.0f);
+    projection.length = 1.0f;
+    if (material.textures.y != kNoTexture)
+    {
+        float3 decoded =
+            g_textures[NonUniformResourceIndex(material.textures.y)].SampleGrad(filter, at, dx, dy).xyz * 2.0f -
+            1.0f;
+        projection.length = max(length(decoded), 1e-3f);
+        projection.normal = float3(decoded.xy * 2.0f, decoded.z);
+    }
+    return projection;
+}
+
+// Rock's maps along the three mesh axes, blended by the normal's sharpened
+// weights, with whiteout-blended normals after Ben Golus ("Normal Mapping
+// for a Triplanar Shader", 2017). Each projection's u is mirrored on the
+// negative side so the map's x keeps its sense; v is the image's down, so
+// the map's green, toward the top, is negated.
+Projection sample_triplanar(GpuTerrainMaterial material, MeshSurface surface, float scale, SamplerState filter)
+{
+    float3 n     = surface.normal;
+    float3 sides = float3(n.x < 0.0f ? -1.0f : 1.0f, n.y < 0.0f ? -1.0f : 1.0f, n.z < 0.0f ? -1.0f : 1.0f);
+
+    // Projections carrying little weight are skipped, the rest share it.
+    float3 blend = pow(abs(n), 4.0f);
+    blend       /= dot(blend, 1.0f);
+    blend        = max(blend - 0.05f, 0.0f);
+    blend       /= dot(blend, 1.0f);
+
+    float3 p  = surface.position * scale;
+    float3 dx = surface.position_dx * scale;
+    float3 dy = surface.position_dy * scale;
+
+    Projection result;
+    result.albedo = 0.0f;
+    result.orm    = 0.0f;
+    result.normal = 0.0f;
+    result.length = 0.0f;
+    if (blend.x > 0.0f)
+    {
+        float2     flip = float2(sides.x, 1.0f);
+        Projection x    = sample_projection(material, p.zy * flip, dx.zy * flip, dy.zy * flip, filter);
+        float2     t    = x.normal.xy * float2(sides.x, -1.0f);
+        result.albedo  += x.albedo * blend.x;
+        result.orm     += x.orm * blend.x;
+        result.normal  += float3(t + n.zy, abs(x.normal.z) * n.x).zyx * blend.x;
+        result.length  += x.length * blend.x;
+    }
+    if (blend.y > 0.0f)
+    {
+        float2     flip = float2(sides.y, 1.0f);
+        Projection y    = sample_projection(material, p.xz * flip, dx.xz * flip, dy.xz * flip, filter);
+        float2     t    = y.normal.xy * float2(sides.y, -1.0f);
+        result.albedo  += y.albedo * blend.y;
+        result.orm     += y.orm * blend.y;
+        result.normal  += float3(t + n.xz, abs(y.normal.z) * n.y).xzy * blend.y;
+        result.length  += y.length * blend.y;
+    }
+    if (blend.z > 0.0f)
+    {
+        float2     flip = float2(-sides.z, 1.0f);
+        Projection z    = sample_projection(material, p.xy * flip, dx.xy * flip, dy.xy * flip, filter);
+        float2     t    = z.normal.xy * float2(-sides.z, -1.0f);
+        result.albedo  += z.albedo * blend.z;
+        result.orm     += z.orm * blend.z;
+        result.normal  += float3(t + n.xy, abs(z.normal.z) * n.z) * blend.z;
+        result.length  += z.length * blend.z;
+    }
+    result.normal = normalize(mul(surface.normal_view, float4(result.normal, 0.0f)).xyz);
+    return result;
+}
+
+// One of the terrain palette's materials: its own tile, or its flat colour
+// until its maps have landed. Rock is projected along the mesh axes, the
+// rest at `uv`, metres. Which material a pixel samples varies across a
+// quad, so implicit derivatives would be undefined: the caller takes them
+// once, in uniform control flow, and they are scaled to this material's
+// tile.
 Ground sample_ground(uint palette, uint index, float2 uv, float2 uv_dx, float2 uv_dy, float3 normal, float4 tangent,
-                     SamplerState filter)
+                     MeshSurface surface, SamplerState filter)
 {
     GpuTerrainMaterial material = g_buffers[NonUniformResourceIndex(palette)]
                                       .Load<GpuTerrainMaterial>(index * kTerrainMaterialStride);
@@ -146,25 +263,49 @@ Ground sample_ground(uint palette, uint index, float2 uv, float2 uv_dx, float2 u
         return ground;
     }
 
-    float  scale  = material.params.x;
-    float2 at     = uv * scale;
-    float2 dx     = uv_dx * scale;
-    float2 dy     = uv_dy * scale;
-    ground.albedo = g_textures[NonUniformResourceIndex(material.textures.x)].SampleGrad(filter, at, dx, dy).rgb;
-    ground.orm    = g_textures[NonUniformResourceIndex(material.textures.z)].SampleGrad(filter, at, dx, dy).rgb;
-    if (material.textures.y != kNoTexture)
+    float scale       = material.params.x;
+    float bump_length = 1.0f;
+    if (index == kRock)
     {
-        ground.normal =
-            bump(normal, tangent,
-                 g_textures[NonUniformResourceIndex(material.textures.y)].SampleGrad(filter, at, dx, dy).xyz);
+        Projection rock = sample_triplanar(material, surface, scale, filter);
+        ground.albedo   = rock.albedo;
+        ground.orm      = rock.orm;
+        ground.normal   = rock.normal;
+        bump_length     = rock.length;
     }
+    else
+    {
+        Projection planar = sample_projection(material, uv * scale, uv_dx * scale, uv_dy * scale, filter);
+        ground.albedo     = planar.albedo;
+        ground.orm        = planar.orm;
+        bump_length       = planar.length;
+        if (material.textures.y != kNoTexture)
+        {
+            ground.normal = bump_decoded(normal, tangent, planar.normal);
+        }
+    }
+
+    // The map's roughness into [floor, 1]: its variation kept, its gloss not.
+    float floor     = material.surface.x;
+    float roughness = floor + (1.0f - floor) * ground.orm.g;
+
+    // Toksvig: a mip averages the map's normals to a shorter vector, and
+    // how much shorter is how much bump the distance has blurred away. Put
+    // back as roughness, so far ground does not turn glossy as its relief
+    // flattens.
+    float variance = saturate((1.0f - bump_length) / bump_length);
+    float alpha    = roughness * roughness;
+    ground.orm.g   = min(sqrt(sqrt(alpha * alpha + variance)), 1.0f);
     return ground;
 }
 
 // The terrain palette blended by the vertex's weights. Only the two
 // heaviest materials are sampled, which is where nearly all the weight
-// is: sampling all five would be fifteen texture reads a pixel.
-Ground terrain_ground(float4 materials, float2 uv, float3 normal, float4 tangent, SamplerState filter)
+// is: sampling all five would be fifteen texture reads a pixel. The second
+// is dropped where its share is small, remapped so the blend stays
+// continuous.
+Ground terrain_ground(float4 materials, float2 uv, float3 normal, float4 tangent, MeshSurface surface,
+                      SamplerState filter)
 {
     float weights[kTerrainMaterialCount] = {
         saturate(1.0f - materials.x - materials.y - materials.z - materials.w),
@@ -193,13 +334,17 @@ Ground terrain_ground(float4 materials, float2 uv, float3 normal, float4 tangent
     float2 uv_dx   = ddx(uv);
     float2 uv_dy   = ddy(uv);
     uint   palette = load_frame().terrain.x;
-    Ground a       = sample_ground(palette, first, uv, uv_dx, uv_dy, normal, tangent, filter);
-    float  share   = weights[second] / max(weights[first] + weights[second], 1e-4f);
+    Ground a       = sample_ground(palette, first, uv, uv_dx, uv_dy, normal, tangent, surface, filter);
+
+    // Between 0 and a half; below kMinShare the second is not sampled.
+    static const float kMinShare = 0.05f;
+    float share = weights[second] / max(weights[first] + weights[second], 1e-4f);
+    share       = saturate((share - kMinShare) / (0.5f - kMinShare)) * 0.5f;
     if (share <= 0.0f)
     {
         return a;
     }
-    Ground b = sample_ground(palette, second, uv, uv_dx, uv_dy, normal, tangent, filter);
+    Ground b = sample_ground(palette, second, uv, uv_dx, uv_dy, normal, tangent, surface, filter);
 
     Ground blended;
     blended.albedo = lerp(a.albedo, b.albedo, share);
@@ -232,7 +377,13 @@ GBuffer fragment_main(VertexOut input)
         // Terrain: the palette's materials, their maps as they are. The
         // chunk's own factors are all 1.
         SamplerState filter = g_samplers[NonUniformResourceIndex(push.material_sampler)];
-        Ground       ground = terrain_ground(input.materials, input.uv, normal, input.tangent, filter);
+        MeshSurface  surface;
+        surface.position    = input.mesh_position;
+        surface.position_dx = ddx(input.mesh_position);
+        surface.position_dy = ddy(input.mesh_position);
+        surface.normal      = normalize(input.mesh_normal);
+        surface.normal_view = object.normal_view;
+        Ground ground = terrain_ground(input.materials, input.uv, normal, input.tangent, surface, filter);
 
         albedo    *= ground.albedo;
         ao         = ground.orm.r;

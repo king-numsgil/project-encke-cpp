@@ -46,6 +46,12 @@ namespace encke
         f32 voxel  = 0.0f;   // metres
         u32 coarser = 0;
         u32 finer   = 0;
+
+        // The chunk's corner, body-relative, less whole texture periods:
+        // mesh space plus this is continuous across chunks and repeats
+        // every material's tile, for projecting textures along the mesh
+        // axes. Small, since it is taken in f64.
+        f32vec3 period_offset{0.0f};
     };
 
     // What terrain chunks are drawn with: gravel, rock, grass, snow and sand,
@@ -53,10 +59,15 @@ namespace encke
     // a flat linear colour drawn until its maps have landed. Every tile must
     // divide the period terrain UVs are offset by, or chunks' textures would
     // not meet.
+    //
+    // `roughness` is each material's floor: its map's roughness is remapped
+    // into [floor, 1], which keeps the map's variation and loses the gloss
+    // photo-scanned ground reads as when it lies under a low sun.
     struct TerrainPalette
     {
         array<MaterialHandle, 5> materials;
         array<f32vec3, 5>        albedo;
+        array<f32, 5>            roughness;
     };
 
     // A point light at the entity's world position, or a spot facing the

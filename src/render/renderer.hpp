@@ -349,6 +349,11 @@ namespace encke
         // wrote for the G-buffer and for each view's casters. Read by record().
         ShadowPlan                               shadow_plan_;
         u32                                      gbuffer_draws_ = 0;
+
+        // The G-buffer's draws in view, each with its nearest distance, sorted
+        // front to back before they are written, so the depth test rejects
+        // hidden terrain before it is shaded.
+        vector<std::pair<f64, VkDrawIndexedIndirectCommand>> gbuffer_order_;
         array<u32, config::kShadowViewCount>     shadow_draws_{};
 
         // Auto-exposure. The histogram is GPU-only and zeroed by the adapt
@@ -402,8 +407,8 @@ namespace encke
         // `jitter_index_` counts frames since the history was last discarded,
         // so the jitter sequence restarts with it.
         array<Image, 2> history_;
-        array<u32, 2>   history_storage_handles_{BindlessSet::kInvalid, BindlessSet::kInvalid};
-        array<u32, 2>   history_sampled_handles_{BindlessSet::kInvalid, BindlessSet::kInvalid};
+        array<u32, 2>   history_storage_handles_{{BindlessSet::kInvalid, BindlessSet::kInvalid}};
+        array<u32, 2>   history_sampled_handles_{{BindlessSet::kInvalid, BindlessSet::kInvalid}};
         u32             history_write_ = 0;
         bool            history_valid_ = false;
         u32             jitter_index_  = 0;

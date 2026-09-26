@@ -75,20 +75,24 @@ namespace encke::terrain
         }
 
         // The ground's ambientCG sets, in the palette's order, with the
-        // metres one repeat covers and the flat linear colour each draws in
-        // until its maps land. Every tile divides kUvPeriod.
+        // metres one repeat covers, the flat linear colour each draws in
+        // until its maps land, and its roughness floor. Every tile divides
+        // kUvPeriod. The maps' own roughness averages 0.26 for Grass004 and
+        // 0.55 to 0.7 for the rest, which under a low sun read as wet stone
+        // and plastic grass; snow keeps the lowest floor, for its sheen.
         struct GroundSet
         {
             char const* name;
             f32         tile;
             f32vec3     albedo;
+            f32         roughness;
         };
         array<GroundSet, 5> const kGroundSets{{
-            {"Ground110", 2.0f, {0.20f, 0.17f, 0.14f}},    // gravel
-            {"Rock051", 4.0f, {0.25f, 0.25f, 0.23f}},      // rock
-            {"Grass004", 2.0f, {0.07f, 0.13f, 0.03f}},     // grass
-            {"Snow010A", 4.0f, {0.80f, 0.85f, 0.90f}},     // snow
-            {"Ground093C", 2.0f, {0.45f, 0.35f, 0.22f}},   // sand
+            {"Ground110", 2.0f, {0.20f, 0.17f, 0.14f}, 0.75f},    // gravel
+            {"Rock051", 4.0f, {0.25f, 0.25f, 0.23f}, 0.65f},      // rock
+            {"Grass004", 2.0f, {0.07f, 0.13f, 0.03f}, 0.80f},     // grass
+            {"Snow010A", 4.0f, {0.80f, 0.85f, 0.90f}, 0.55f},     // snow
+            {"Ground093C", 2.0f, {0.45f, 0.35f, 0.22f}, 0.75f},   // sand
         }};
 
         // UVs are offset by whole multiples of this, which every material's
@@ -235,6 +239,38 @@ namespace encke::terrain
                                                        temperature[i], moisture[i]),
                 };
             }
+        }
+
+        // Most chunks the cull keeps have no surface: near it, but whole.
+        // Sampled in full and meshed, they cost as much as the ones that
+        // have. This proves many of them empty first, from a lattice every
+        // kProbeStep voxels over the chunk's sample box: every sample lies
+        // within half a lattice cell's diagonal of a lattice point, so where
+        // every lattice value has the same sign and is further from zero than
+        // the field can change over that distance, no sample can cross it.
+        // The field's slope is taken as kProbeSlope, over the steepest
+        // planet_test has measured at any scale, 4.6 at LOD 0 across a
+        // quarter-metre voxel.
+        constexpr i64 kProbeStep  = 4;
+        constexpr f64 kProbeSlope = 5.0;
+
+        bool certainly_empty(TerrainSampler& sampler, ChunkRequest const& request, vector<f32>& probe)
+        {
+            i64 const stride = i64{1} << request.lod;
+
+            // Samples run from corner -2 to cells + 1; the lattice from -2
+            // past cells + 1, in whole steps.
+            u32 const width  = request.samples_per_axis() - 1;
+            u32 const points = (width + static_cast<u32>(kProbeStep) - 1) / static_cast<u32>(kProbeStep) + 1;
+            probe.resize(static_cast<size_t>(points) * points * points);
+            sampler.sample_grid(request.origin - i64vec3{2 * stride}, kProbeStep * stride, u32vec3{points},
+                                request.detail_octaves, probe);
+
+            f64 const voxel = sampler.terrain().voxel_size(request.lod);
+            auto const reach =
+                static_cast<f32>(kProbeSlope * 0.5 * std::sqrt(3.0) * static_cast<f64>(kProbeStep) * voxel);
+            bool const outside = probe.front() > 0.0f;
+            return std::ranges::all_of(probe, [&](f32 value) { return outside ? value > reach : value < -reach; });
         }
 
         // The bit for the neighbour at `offset`, each component -1 to 1, as
@@ -588,6 +624,12 @@ namespace encke::terrain
             TerrainSampler&    sampler = body->sampler(worker);
             ChunkRequest const request = sampler.chunk(key.origin, key.lod);
 
+            vector<f32> probe;
+            if (certainly_empty(sampler, request, probe))
+            {
+                return [this, body, key] { complete(body, key, std::make_shared<MeshData>(), false); };
+            }
+
             // The parent LOD's field too, for the morph targets.
             vector<f32>         samples(request.sample_count());
             vector<f32>         coarse_values(request.coarse_count());
@@ -790,6 +832,7 @@ namespace encke::terrain
             {
                 palette.materials[index] = assets.load_ambientcg(kGroundSets[index].name, f32vec2{kGroundSets[index].tile});
                 palette.albedo[index]    = kGroundSets[index].albedo;
+                palette.roughness[index] = kGroundSets[index].roughness;
             }
             palette_ = palette;
         }
@@ -974,7 +1017,10 @@ namespace encke::terrain
                                                                   .roughness = 1.0f,
                                                                   .metallic  = 1.0f,
                                                               });
-                    registry.emplace<Geomorph>(node.entity, geomorph_for(terrain, leaf.lod, settings_));
+                    Geomorph geomorph = geomorph_for(terrain, leaf.lod, settings_);
+                    f64vec3 const corner = f64vec3{leaf.origin} * terrain.base_voxel_size;
+                    geomorph.period_offset = f32vec3{corner - glm::floor(corner / kUvPeriod) * kUvPeriod};
+                    registry.emplace<Geomorph>(node.entity, geomorph);
                 }
                 node.displayed = true;
                 changed.push_back(leaf);

@@ -1206,6 +1206,7 @@ namespace encke
                 gpu::TerrainMaterial const entry{
                     .textures = textures,
                     .params   = f32vec4{inverse_tile, terrain_palette_->albedo[index]},
+                    .surface  = f32vec4{terrain_palette_->roughness[index], 0.0f, 0.0f, 0.0f},
                 };
                 std::memcpy(&palette[index], &entry, sizeof(entry));
             }
@@ -1351,6 +1352,7 @@ namespace encke
             // metres, left for each material's own tile.
             f32vec4 morph{0.0f};
             u32vec4 morph_masks{0u};
+            f32vec4 period_offset{0.0f};
             if (object.geomorph.has_value())
             {
                 Geomorph const& geomorph = *object.geomorph;
@@ -1358,6 +1360,7 @@ namespace encke
                 morph       = f32vec4{geomorph.start, 1.0f / std::max(geomorph.end - geomorph.start, 1e-3f),
                                       geomorph.extent, geomorph.voxel};
                 morph_masks = u32vec4{geomorph.coarser, geomorph.finer, flags, terrain_vertices_handle_};
+                period_offset = f32vec4{geomorph.period_offset, 0.0f};
                 if (terrain_palette_.has_value())
                 {
                     texture_scale = f32vec4{1.0f};
@@ -1376,17 +1379,33 @@ namespace encke
                 .texture_scale     = texture_scale,
                 .morph             = morph,
                 .morph_masks       = morph_masks,
+                .period_offset     = period_offset,
             };
             std::memcpy(&objects[index], &gpu_object, sizeof(gpu_object));
 
             // A mesh still waiting for its upload is left out, not drawn
-            // from memory that holds nothing yet.
+            // from memory that holds nothing yet; so is one out of view.
             GeometryPool::Range const* range = mesh_range(renderable.mesh);
-            if (range != nullptr && range->resident)
+            // A morph target lies in the parent's cell, which can reach a
+            // parent voxel past the chunk's own box.
+            f64vec3 const centre{view * f64vec4{object.bounds_centre, 1.0}};
+            f64 const     radius = object.bounds_radius +
+                               (object.geomorph.has_value() ? 2.0 * static_cast<f64>(object.geomorph->voxel) : 0.0);
+            if (range != nullptr && range->resident &&
+                sphere_in_view(centre, radius, projection[0][0], projection[1][1]))
             {
-                draws[gbuffer_draws_++] = draw_command(*range, index);
+                f64 const nearest = std::max(glm::length(centre) - radius, 0.0);
+                gbuffer_order_.emplace_back(nearest, draw_command(*range, index));
             }
         }
+
+        // Ties, every chunk the camera stands in, keep object order.
+        std::ranges::stable_sort(gbuffer_order_, {}, [](auto const& entry) { return entry.first; });
+        for (auto const& [distance, command] : gbuffer_order_)
+        {
+            draws[gbuffer_draws_++] = command;
+        }
+        gbuffer_order_.clear();
 
         // Only this frame's objects carry over, so a destroyed entity's entry
         // goes with it, and a recycled entity id never meets a stale one.

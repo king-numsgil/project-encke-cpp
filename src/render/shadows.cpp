@@ -11,6 +11,26 @@
 
 namespace encke
 {
+    // The projection is symmetric, so each side plane passes through the eye
+    // with a slope of 1 / focal.
+    bool sphere_in_view(f64vec3 const& centre, f64 radius, f64 focal_x, f64 focal_y)
+    {
+        if (centre.z - radius > 0.0)
+        {
+            return false;
+        }
+
+        f64 const tx = 1.0 / focal_x;
+        f64 const ty = 1.0 / focal_y;
+        f64 const nx = std::sqrt(1.0 + tx * tx);
+        f64 const ny = std::sqrt(1.0 + ty * ty);
+
+        return (centre.x + centre.z * tx) / nx <= radius &&
+               (-centre.x + centre.z * tx) / nx <= radius &&
+               (centre.y + centre.z * ty) / ny <= radius &&
+               (-centre.y + centre.z * ty) / ny <= radius;
+    }
+
     namespace
     {
         constexpr f64 kPi = 3.14159265358979323846;
@@ -29,27 +49,6 @@ namespace encke
                                                             : f64vec3{1.0, 0.0, 0.0};
             right = glm::normalize(glm::cross(forward, hint));
             up    = glm::cross(right, forward);
-        }
-
-        // Whether a view-space sphere reaches into the camera's frustum. The
-        // projection is symmetric, so each side plane passes through the eye
-        // with a slope of 1 / focal.
-        bool sphere_in_view(f64vec3 const& centre, f64 radius, f64 focal_x, f64 focal_y)
-        {
-            if (centre.z - radius > 0.0)
-            {
-                return false;
-            }
-
-            f64 const tx = 1.0 / focal_x;
-            f64 const ty = 1.0 / focal_y;
-            f64 const nx = std::sqrt(1.0 + tx * tx);
-            f64 const ny = std::sqrt(1.0 + ty * ty);
-
-            return (centre.x + centre.z * tx) / nx <= radius &&
-                   (-centre.x + centre.z * tx) / nx <= radius &&
-                   (centre.y + centre.z * ty) / ny <= radius &&
-                   (-centre.y + centre.z * ty) / ny <= radius;
         }
 
         void plan_cascades(CameraView const& camera, f64vec3 const& to_sun, f64 aspect,

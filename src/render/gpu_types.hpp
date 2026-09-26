@@ -73,6 +73,8 @@ namespace encke::gpu
         u32vec4 textures;            // x albedo, y normal, z ORM, sampled; x kNoTexture until
                                      // all three have landed, and then none is read
         f32vec4 params;              // x 1 / tile width (m); yzw linear albedo when untextured
+        f32vec4 surface;             // x roughness floor: the map's roughness is remapped into
+                                     // [x, 1]; yzw unused
     };
 
     inline constexpr u32 kTerrainMaterialCount = 5;
@@ -159,6 +161,9 @@ namespace encke::gpu
         // morph, 2 to blend the terrain palette, 0 for anything not terrain;
         // w the bindless TerrainVertex buffer.
         u32vec4 morph_masks;
+        // Terrain: xyz Geomorph::period_offset, added to mesh positions for
+        // the triplanar rock.
+        f32vec4 period_offset;
     };
 
     inline constexpr u32 kNoTexture = ~0u;
@@ -218,10 +223,10 @@ namespace encke::gpu
     };
 
     static_assert(sizeof(Frame) == 416);
-    static_assert(sizeof(TerrainMaterial) == 32);
+    static_assert(sizeof(TerrainMaterial) == 48);
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
-    static_assert(sizeof(Object) == 352);
+    static_assert(sizeof(Object) == 368);
     static_assert(sizeof(Push) == 124,"must fit the 128-byte guaranteed minimum");
 }

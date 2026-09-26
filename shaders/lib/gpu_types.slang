@@ -42,10 +42,11 @@ public struct GpuTerrainMaterial
 {
     public uint4  textures;          // x albedo, y normal, z ORM; x kNoTexture until all have landed
     public float4 params;            // x 1 / tile width (m), yzw linear albedo when untextured
+    public float4 surface;           // x roughness floor: the map's is remapped into [x, 1]
 };
 
 public static const uint kTerrainMaterialCount  = 5;
-public static const uint kTerrainMaterialStride = 32;
+public static const uint kTerrainMaterialStride = 48;
 
 public static const uint kNoAtmosphere = 0xFFFFFFFFu;
 
@@ -102,6 +103,7 @@ public struct GpuObject
     public float4   morph;             // x start distance, y 1 / (end - start), z extent, w voxel (m)
     public uint4    morph_masks;       // terrain: x coarser neighbours, y finer, z flags (1 morph,
                                        // 2 terrain palette, 0 not terrain), w TerrainVertex buffer
+    public float4   period_offset;     // terrain: xyz added to mesh positions for triplanar
 };
 
 // See TerrainVertex in render/mesh.hpp.
@@ -162,6 +164,6 @@ public struct Push
 public static const uint kFrameStride      = 416;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
-public static const uint kObjectStride     = 352;
+public static const uint kObjectStride     = 368;
 public static const uint kTerrainVertexStride = 20;
 public static const uint kMatrixStride     = 64;

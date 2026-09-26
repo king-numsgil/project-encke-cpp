@@ -240,6 +240,12 @@ that runs. Every `shutdown()` checks its handle, so a partially constructed
   `drawIndirectFirstInstance` are required at device selection. The draw
   lists are still built on the CPU and still capped at `kMaxObjects`, which
   is 4096 so a planet's terrain chunks fit beside the scene.
+- **The G-buffer's draws are frustum-culled and sorted front to back** on
+  the CPU, by each object's bounding sphere in f64 (`sphere_in_view` in
+  `render/shadows`), terrain spheres grown by a parent voxel for the morph.
+  Before this every chunk around the camera, most of them behind it, was
+  vertex-shaded and morphed, and hills were shaded before the hills in
+  front of them.
 - **The Y flip lives in the viewport**, via `flipped_viewport()` — negative
   height, set per frame. Projection matrices stay conventional.
 - **Back-face culling is on with `frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE`,
@@ -1138,7 +1144,13 @@ and a grid corner (`NodeKey`), and its children are found by arithmetic.
   next, however long ago it was queued; the ground under the camera comes
   first and the horizon last. A node the camera leaves before its job starts
   is skipped by a flag the job reads, its priority dropped below every
-  distance so the skip clears the queue at once. A job samples its chunk with
+  distance so the skip clears the queue at once. A job first probes its
+  chunk on a grid four voxels apart (`certainly_empty`, through
+  `TerrainSampler::sample_grid`): if every probe is on one side of the
+  surface by more than 5 times the half-diagonal between probes, the
+  field's slope bound with room to spare, the chunk has no surface and is
+  finished empty. Most jobs mesh nothing, and the probe is about a
+  sixtieth of the samples. Otherwise it samples its chunk with
   its worker's own `TerrainSampler`, runs `surface_nets` and converts to
   `Vertex`; its completion, run by `WorkerPool::drain()` on the main thread,
   adds the mesh asset. `TerrainOctree::update` runs after the drain and before
@@ -1314,7 +1326,27 @@ grass (Grass004), snow (Snow010A), sand (Ground093C).
   explicit UV gradients: which two varies across a quad, and implicit
   derivatives in that divergent flow are undefined. Each material has its
   own tile; the object's UVs arrive in metres (the renderer sends a texture
-  scale of 1 for palette objects) and each sample divides by its tile.
+  scale of 1 for palette objects) and each sample divides by its tile. The
+  second is skipped where its share of the two is under 5%, the share
+  remapped so the blend stays continuous.
+- **Rock is triplanar**, projected along the mesh axes, which are the
+  body's, and blended by the mesh normal to the fourth power; a projection
+  under 5% is skipped. Normals are whiteout-blended with the sign fixes
+  from Ben Golus's triplanar article, plus a negated green because v runs
+  down the image. The positions are mesh space plus
+  `Geomorph::period_offset`, the chunk's corner less whole `kUvPeriod`s in
+  f64, carried as `Object::period_offset`: continuous across chunks and
+  small, like the UVs. The other four materials keep the cube projection;
+  they lie on gentle slopes by construction. Checked by forcing every
+  material through it at the pole, where the Y projection must and does
+  match the cube projection's features and lighting.
+- **Roughness is floored per material and grows with distance.** Each map's
+  roughness is remapped into [floor, 1] (`TerrainPalette::roughness`,
+  0.55 for snow to 0.8 for grass): Grass004's map averages 0.26, and under
+  the low sun the ground glared like wet stone and foil. Then Toksvig: a
+  mipped normal-map sample is shorter the more bump the distance has
+  averaged away, and that variance is added to the GGX alpha, so far ground
+  does not turn glossy as its relief flattens.
 - **The palette is per frame** (`Frame::terrain`, a buffer of
   `gpu::TerrainMaterial`), each material resolved as an object's is: its
   maps once all have landed, its flat colour until then. `morph_masks.z` is
@@ -1325,7 +1357,10 @@ Known gaps:
 
 - Blending is linear between the two heaviest materials, over the distance
   between vertices; no height-based blend, so transitions are soft washes.
-- Cube-projected UVs stretch rock along steep slopes; triplanar would not.
+- Only rock is triplanar. Snow, sand, grass or gravel on an overhang,
+  which only a blend near rock produces, still stretches.
+- The X and Z projections have not been seen on a real cliff; the pole
+  has none near it.
 - One palette for every body.
 
 ## Camera control
