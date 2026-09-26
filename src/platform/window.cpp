@@ -158,6 +158,14 @@ namespace encke
                 {
                     events.toggle_ui = true;
                 }
+                else if (event.key.key == SDLK_F2 && !event.key.repeat)
+                {
+                    events.toggle_terrain_freeze = true;
+                }
+                else if (event.key.key == SDLK_F3 && !event.key.repeat)
+                {
+                    events.copy_camera = true;
+                }
                 else if (event.key.key == SDLK_T && !event.key.repeat)
                 {
                     events.cycle_tonemap = true;

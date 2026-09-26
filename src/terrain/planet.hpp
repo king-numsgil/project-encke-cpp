@@ -177,6 +177,13 @@ namespace encke::terrain
         // Every body shows exactly the leaves the camera wants, all meshed.
         bool idle() const;
 
+        // Frozen, update() selects, submits and swaps nothing: what is on
+        // screen stays, with its neighbour masks, however the camera moves.
+        // For looking at seams from where the octree did not choose them.
+        // Jobs already queued still finish and wait.
+        void set_frozen(bool frozen) { frozen_ = frozen; }
+        bool frozen() const { return frozen_; }
+
         // What its chunks are drawn with, once the first update has loaded
         // it: for the renderer. A chunk's own Renderable names only the
         // first, gravel.
@@ -202,6 +209,7 @@ namespace encke::terrain
         OctreeSettings                settings_;
         vector<std::shared_ptr<Body>> bodies_;
         optional<TerrainPalette>      palette_;
+        bool                          frozen_ = false;
 
         // Set by update(), for completions and resubmissions; main thread.
         AssetManager* assets_ = nullptr;

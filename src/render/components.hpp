@@ -52,6 +52,11 @@ namespace encke
         // every material's tile, for projecting textures along the mesh
         // axes. Small, since it is taken in f64.
         f32vec3 period_offset{0.0f};
+
+        // The cube face the chunk's centre points through, 0 to 2 for x, y
+        // and z: which two coordinates its UVs are, when the vertex shader
+        // takes them from the morphed position.
+        u32 face = 1;
     };
 
     // What terrain chunks are drawn with: gravel, rock, grass, snow and sand,

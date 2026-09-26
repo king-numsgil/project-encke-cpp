@@ -444,6 +444,19 @@ in the fence wait, acquire and present.
   one jitter cycle, so the history is the same on every run.
 - **`ENCKE_NO_TAA`** (or the stats window's checkbox) turns temporal
   antialiasing off.
+- **F2 freezes the terrain octree** (`TerrainOctree::set_frozen`): nothing
+  is selected, meshed or swapped, so what is on screen stays, masks and
+  all, while the camera flies. `ENCKE_CAPTURE_MOVE`, a pose in
+  `ENCKE_CAMERA`'s format, does the same for a capture: settle at the start
+  pose, freeze, move there, capture. `ENCKE_CAPTURE_FLY="vx vy vz"` instead
+  flies at that velocity once settled, 60 fixed steps a second with the
+  octree live, and captures after `ENCKE_CAPTURE_FRAME` frames of it; what
+  has swapped by then depends on timing, so those runs differ.
+- **F3 copies the camera's pose** to the clipboard and the log, as
+  `ENCKE_CAMERA="..."`; with the terrain frozen, as `ENCKE_CAMERA` at the
+  pose F2 froze it and `ENCKE_CAPTURE_MOVE` at the camera, which replays
+  the view on a settled octree. The pose is metres from the scene's origin
+  with a target 10 m ahead and the camera's up.
 - **`ENCKE_CAMERA="px py pz tx ty tz"`** starts the camera at p looking at t,
   metres from the pole. The helmet: `"-2.55 1.33 -1.62 -3 1.17 -2"`.
 - **`ENCKE_TONEMAP` (0 ACES, 1 AgX, 2 PBR Neutral, T cycles) and `ENCKE_EV100`**
@@ -1243,6 +1256,29 @@ neighbour changed.
   what the terrain looked like before: the comparison. Captured from 300 m
   looking straight down, off shows the old crack lines outlining each finer
   square and on shows none.
+- **Skirts cover what the morph cannot close.** Where fine and coarse
+  disagree on which parent cells the surface crosses, a fine boundary
+  vertex has no coarse vertex to land on, and the seam kept holes a
+  triangle wide that opened to the sky. `add_skirts` in
+  `terrain/planet.cpp` hangs a strip from every edge only one of a
+  chunk's triangles uses, `kSkirtVoxels` (4) of its voxels inward along
+  each vertex's normal; the copies keep the same offset from their morph
+  targets, so a skirt morphs with its edge. A hole now shows a short
+  streak of stretched texture instead of sky. Found with the user's F3
+  poses: the same view with `ENCKE_NO_GEOMORPH` showed the crack whose
+  notches the holes were.
+- **Folded triangles are not holes.** Morphing real chunks near the pole
+  flips about one triangle in a thousand by halfway, but a folded
+  triangle is always overlapped by its neighbours, so culling it leaves
+  the ground covered twice there, never uncovered. Drawing terrain
+  two-sided was tried and changed nothing but pixels.
+- **Palette UVs come from the morphed position**, in the vertex shader:
+  the chunk's cube face (`Geomorph::face`, from its centre) picks the two
+  coordinates of mesh space plus `period_offset`, which are the mesh's own
+  UVs up to whole periods. Baked per vertex, a vertex pulled toward its
+  target dragged its texture with it, which showed as a mangled band along
+  faces next to a coarser neighbour. A chunk straddling a cube edge now
+  projects all of it on one face, where each vertex used to pick its own.
 - **Detail follows the split factor now.** A chunk's box can reach much
   closer to the camera than the surface inside it, most of all from above,
   and before geomorph that slack showed as extra detail. Now a vertex past
@@ -1257,10 +1293,10 @@ Known gaps:
 
 - Where fine and coarse disagree on which parent cells the surface crosses,
   collapse is not exact: a feature smaller than a coarse voxel folds onto
-  the parent's vertices, and at a seam there a hairline can remain.
+  the parent's vertices, and at a seam there the skirt shows through as a
+  streak.
 - Motion vectors ignore the morph: the previous frame's position is this
   frame's morphed vertex through last frame's matrices.
-- UVs are the fine vertex's, so a morphing vertex drags its texture slightly.
 - The objects stood on the ground were placed on the finest LOD's surface;
   morphed ground more than 16 m away can sit a little above or below them.
 - While meshing lags the camera, a node kept on screen past its time is

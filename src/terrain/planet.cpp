@@ -241,6 +241,69 @@ namespace encke::terrain
             }
         }
 
+        // How far a skirt hangs below its chunk's edge, in the chunk's voxels.
+        constexpr f32 kSkirtVoxels = 4.0f;
+
+        // Hangs a skirt from every edge of the mesh that only one of its
+        // triangles uses, which are the edges where it meets its
+        // neighbours: a strip from the edge to a copy of it `depth` inward
+        // along each vertex's normal, into the ground. Next to a coarser
+        // neighbour, where fine and coarse disagree on which parent cells
+        // the surface crosses, the morph cannot close the seam, and a view
+        // through the gap would otherwise reach the sky. The copies keep the
+        // same offset from their morph targets, so a skirt morphs with its
+        // edge.
+        void add_skirts(SurfaceMesh& mesh, f32 depth)
+        {
+            auto const key = [](u32 from, u32 to) { return (u64{from} << 32) | u64{to}; };
+
+            std::unordered_set<u64> edges;
+            edges.reserve(mesh.indices.size());
+            for (size_t i = 0; i < mesh.indices.size(); i += 3)
+            {
+                for (size_t corner = 0; corner < 3; ++corner)
+                {
+                    edges.insert(key(mesh.indices[i + corner], mesh.indices[i + (corner + 1) % 3]));
+                }
+            }
+
+            std::unordered_map<u32, u32> skirt;
+            auto const lowered = [&](u32 vertex) {
+                auto const [found, added] = skirt.try_emplace(vertex, static_cast<u32>(mesh.positions.size()));
+                if (added)
+                {
+                    f32vec3 const normal = mesh.normals[vertex];
+                    mesh.positions.push_back(mesh.positions[vertex] - normal * depth);
+                    mesh.normals.push_back(normal);
+                    mesh.cells.push_back(mesh.cells[vertex]);
+                    if (!mesh.coarse_positions.empty())
+                    {
+                        mesh.coarse_positions.push_back(mesh.coarse_positions[vertex] - normal * depth);
+                        mesh.coarse_normals.push_back(mesh.coarse_normals[vertex]);
+                    }
+                }
+                return found->second;
+            };
+
+            size_t const triangles = mesh.indices.size();
+            for (size_t i = 0; i < triangles; i += 3)
+            {
+                for (size_t corner = 0; corner < 3; ++corner)
+                {
+                    u32 const from = mesh.indices[i + corner];
+                    u32 const to   = mesh.indices[i + (corner + 1) % 3];
+                    if (edges.contains(key(to, from)))
+                    {
+                        continue;
+                    }
+                    // Wound as the missing neighbour's triangle would be.
+                    u32 const from_low = lowered(from);
+                    u32 const to_low   = lowered(to);
+                    mesh.indices.insert(mesh.indices.end(), {to, from, from_low, to, from_low, to_low});
+                }
+            }
+        }
+
         // Most chunks the cull keeps have no surface: near it, but whole.
         // Sampled in full and meshed, they cost as much as the ones that
         // have. This proves many of them empty first, from a lattice every
@@ -639,6 +702,7 @@ namespace encke::terrain
 
             SurfaceMesh mesh;
             surface_nets(samples, request.cells, body->terrain->voxel_size(key.lod), mesh, &coarse);
+            add_skirts(mesh, kSkirtVoxels * static_cast<f32>(body->terrain->voxel_size(key.lod)));
 
             f64vec3 const corner = f64vec3{key.origin} * body->terrain->base_voxel_size;
 
@@ -837,6 +901,11 @@ namespace encke::terrain
             palette_ = palette;
         }
 
+        if (frozen_)
+        {
+            return;
+        }
+
         for (auto const [entity, planet] : registry.view<PlanetTerrain const>().each())
         {
             if (std::ranges::none_of(bodies_, [entity](std::shared_ptr<Body> const& body) { return body->entity == entity; }))
@@ -1020,6 +1089,9 @@ namespace encke::terrain
                     Geomorph geomorph = geomorph_for(terrain, leaf.lod, settings_);
                     f64vec3 const corner = f64vec3{leaf.origin} * terrain.base_voxel_size;
                     geomorph.period_offset = f32vec3{corner - glm::floor(corner / kUvPeriod) * kUvPeriod};
+                    f64vec3 const centre =
+                        glm::abs(corner + f64vec3{0.5 * static_cast<f64>(geomorph.extent)});
+                    geomorph.face = centre.x >= centre.y && centre.x >= centre.z ? 0u : (centre.y >= centre.z ? 1u : 2u);
                     registry.emplace<Geomorph>(node.entity, geomorph);
                 }
                 node.displayed = true;

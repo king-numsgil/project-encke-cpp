@@ -104,6 +104,7 @@ public struct GpuObject
     public uint4    morph_masks;       // terrain: x coarser neighbours, y finer, z flags (1 morph,
                                        // 2 terrain palette, 0 not terrain), w TerrainVertex buffer
     public float4   period_offset;     // terrain: xyz added to mesh positions for triplanar
+                                       // and cube-projected UVs, w the cube face (0 x, 1 y, 2 z)
 };
 
 // See TerrainVertex in render/mesh.hpp.

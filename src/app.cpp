@@ -160,9 +160,10 @@ namespace encke
             f64vec3 up;
         };
 
-        optional<CameraPose> initial_camera()
+        // ENCKE_CAMERA's format, read from `variable`.
+        optional<CameraPose> camera_pose(char const* variable)
         {
-            char const* const value = std::getenv("ENCKE_CAMERA");
+            char const* const value = std::getenv(variable);
             if (value == nullptr)
             {
                 return nullopt;
@@ -186,8 +187,8 @@ namespace encke
                     {
                         break;
                     }
-                    log::warn("ENCKE_CAMERA wants \"px py pz tx ty tz\" with an optional "
-                              "\"ux uy uz\"; ignored");
+                    log::warn("%s wants \"px py pz tx ty tz\" with an optional \"ux uy uz\"; ignored",
+                              variable);
                     return nullopt;
                 }
                 numbers[index] = number;
@@ -264,13 +265,9 @@ namespace encke
 
         // The test scene's frame is the world's rotated by nothing, only
         // moved to the pole, so its directions pass through unchanged.
-        if (optional<CameraPose> const pose = initial_camera())
+        if (optional<CameraPose> const pose = camera_pose("ENCKE_CAMERA"))
         {
-            // The test scene's camera is a root, so its local transform is
-            // its world one.
-            Transform& camera = scene_.registry.get<Transform>(scene_.camera);
-            camera.position   = scene_.origin() + pose->eye;
-            fly_.aim(camera, pose->target - pose->eye, pose->up);
+            place_camera(pose->eye, pose->target, pose->up);
         }
         log::info("scene: %zu entities, %zu renderables, %zu lights",
                   scene_.registry.view<Transform>().size(),
@@ -313,6 +310,27 @@ namespace encke
             capture_frame_ = frame != nullptr ? static_cast<u32>(std::strtoul(frame, nullptr, 10))
                                               : kDefaultCaptureFrame;
             log::info("capturing frame %u to %s, then quitting", capture_frame_, path);
+
+            if (char const* const fly = std::getenv("ENCKE_CAPTURE_FLY"))
+            {
+                f64vec3 velocity{0.0};
+                if (std::sscanf(fly, "%lf %lf %lf", &velocity.x, &velocity.y, &velocity.z) == 3)
+                {
+                    capture_velocity_ = velocity;
+                    log::info("capture: flying at (%.1f, %.1f, %.1f) m/s once settled", velocity.x,
+                              velocity.y, velocity.z);
+                }
+                else
+                {
+                    log::warn("ENCKE_CAPTURE_FLY wants \"vx vy vz\"; ignored");
+                }
+            }
+
+            capture_move_ = camera_pose("ENCKE_CAPTURE_MOVE").has_value();
+            if (capture_move_)
+            {
+                log::info("capture: the terrain freezes once settled, and the camera moves");
+            }
         }
 
         if (optional<f32> const ev100 = fixed_ev100())
@@ -500,6 +518,30 @@ namespace encke
         renderer_.set_motion_gain(motion_gain_);
     }
 
+    void App::place_camera(f64vec3 const& eye, f64vec3 const& target, f64vec3 const& up)
+    {
+        // The test scene's camera is a root, so its local transform is its
+        // world one.
+        Transform& camera = scene_.registry.get<Transform>(scene_.camera);
+        camera.position   = scene_.origin() + eye;
+        fly_.aim(camera, target - eye, up);
+    }
+
+    string App::camera_pose_text() const
+    {
+        // A root, so its local transform is its world one; the scene's frame
+        // is the world's moved to the origin.
+        Transform const& camera = scene_.registry.get<Transform>(scene_.camera);
+        f64vec3 const    eye    = camera.position - scene_.origin();
+        f64vec3 const    target = eye + forward(camera.rotation) * 10.0;
+        f64vec3 const    up     = camera.rotation * f64vec3{0.0, 1.0, 0.0};
+
+        array<char, 256> text{};
+        std::snprintf(text.data(), text.size(), "%.4f %.4f %.4f %.4f %.4f %.4f %.6f %.6f %.6f", eye.x, eye.y,
+                      eye.z, target.x, target.y, target.z, up.x, up.y, up.z);
+        return string{text.data()};
+    }
+
     void App::save_capture()
     {
         // The copy is in the frame just submitted.
@@ -604,6 +646,28 @@ namespace encke
                 show_ui_ = !show_ui_;
             }
 
+            if (events.toggle_terrain_freeze)
+            {
+                terrain_.set_frozen(!terrain_.frozen());
+                frozen_pose_ = terrain_.frozen() ? optional<string>{camera_pose_text()} : nullopt;
+                log::info("terrain: %s", terrain_.frozen() ? "frozen" : "thawed");
+            }
+
+            // The pose as the capture variables take it, on the clipboard and
+            // in the log. Frozen, the start pose is where the terrain froze
+            // and the capture moves to the camera, so the octree settles on
+            // what was on screen.
+            if (events.copy_camera)
+            {
+                string const current = camera_pose_text();
+                string const text =
+                    frozen_pose_.has_value()
+                        ? "ENCKE_CAMERA=\"" + *frozen_pose_ + "\" ENCKE_CAPTURE_MOVE=\"" + current + "\""
+                        : "ENCKE_CAMERA=\"" + current + "\"";
+                SDL_SetClipboardText(text.c_str());
+                log::info("camera: %s", text.c_str());
+            }
+
             if (events.cycle_tonemap && !ui_.wants_text())
             {
                 auto const next = static_cast<Tonemap>(
@@ -689,15 +753,43 @@ namespace encke
             bool const settled = capture_path_.has_value() && frames_drawn_ >= capture_frame_ &&
                                  terrain_.idle() && assets_.idle() && renderer_.streaming_idle();
 
-            // TAA's history holds every frame before, however many there
-            // were: once settled, discard it and wait one jitter cycle, so
-            // the capture is the same image on every run.
-            if (settled && !capture_at_.has_value())
+            bool capturing = false;
+            if (capture_velocity_.has_value())
             {
-                renderer_.reset_taa();
-                capture_at_ = frames_drawn_ + (renderer_.taa() ? config::kTaaJitterCount : 0u);
+                // Settled once, then flown every frame by a fixed step
+                // whatever the octree is doing. Moved after this frame's
+                // Scene::update, so drawn from the next.
+                flying_ = flying_ || settled;
+                if (flying_)
+                {
+                    Transform& camera = scene_.registry.get<Transform>(scene_.camera);
+                    camera.position += *capture_velocity_ / 60.0;
+                    capturing = ++fly_frames_ >= capture_frame_;
+                }
             }
-            bool const capturing = settled && frames_drawn_ >= *capture_at_;
+            else
+            {
+                // Settled at the start pose: freeze what is meshed and move.
+                // The history is discarded a frame later, from the new pose.
+                if (settled && capture_move_)
+                {
+                    if (optional<CameraPose> const pose = camera_pose("ENCKE_CAPTURE_MOVE"))
+                    {
+                        terrain_.set_frozen(true);
+                        place_camera(pose->eye, pose->target, pose->up);
+                    }
+                    capture_move_ = false;
+                }
+                // TAA's history holds every frame before, however many there
+                // were: once settled, discard it and wait one jitter cycle, so
+                // the capture is the same image on every run.
+                else if (settled && !capture_at_.has_value())
+                {
+                    renderer_.reset_taa();
+                    capture_at_ = frames_drawn_ + (renderer_.taa() ? config::kTaaJitterCount : 0u);
+                }
+                capturing = settled && capture_at_.has_value() && frames_drawn_ >= *capture_at_;
+            }
             if (capturing)
             {
                 renderer_.request_capture();

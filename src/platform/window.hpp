@@ -18,6 +18,12 @@ namespace encke
         // F1 pressed this frame: show or hide the UI overlay.
         bool toggle_ui = false;
 
+        // F2 pressed this frame: freeze or thaw the terrain octree.
+        bool toggle_terrain_freeze = false;
+
+        // F3 pressed this frame: copy the camera's pose.
+        bool copy_camera = false;
+
         // T pressed this frame: step to the next tonemap curve.
         bool cycle_tonemap = false;
 

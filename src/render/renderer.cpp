@@ -1360,7 +1360,7 @@ namespace encke
                 morph       = f32vec4{geomorph.start, 1.0f / std::max(geomorph.end - geomorph.start, 1e-3f),
                                       geomorph.extent, geomorph.voxel};
                 morph_masks = u32vec4{geomorph.coarser, geomorph.finer, flags, terrain_vertices_handle_};
-                period_offset = f32vec4{geomorph.period_offset, 0.0f};
+                period_offset = f32vec4{geomorph.period_offset, static_cast<f32>(geomorph.face)};
                 if (terrain_palette_.has_value())
                 {
                     texture_scale = f32vec4{1.0f};

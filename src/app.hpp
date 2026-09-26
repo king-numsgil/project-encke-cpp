@@ -53,6 +53,13 @@ namespace encke
         // Writes the frame the renderer just captured to capture_path_.
         void save_capture();
 
+        // The camera at `eye` looking at `target`, metres from the scene's
+        // origin, its up toward `up`.
+        void place_camera(f64vec3 const& eye, f64vec3 const& target, f64vec3 const& up);
+
+        // The camera's pose in ENCKE_CAMERA's format.
+        string camera_pose_text() const;
+
         // Sleeps until the next frame's deadline while the limiter is on;
         // returns the milliseconds slept.
         f64 limit_frame_rate();
@@ -102,6 +109,23 @@ namespace encke
         u32              capture_frame_ = 0;
         u32              frames_drawn_  = 0;
         optional<u32>    capture_at_;   // once settled: the frame to capture
+
+        // Set from ENCKE_CAPTURE_MOVE: once settled, freeze the terrain and
+        // move the camera to that pose before capturing, so seams can be
+        // seen from where the octree did not choose its chunks.
+        bool capture_move_ = false;
+
+        // The camera's pose when F2 froze the terrain, for F3 to copy.
+        optional<string> frozen_pose_;
+
+        // Set from ENCKE_CAPTURE_FLY="vx vy vz": once settled, fly at that
+        // velocity, metres per second at a fixed 60 steps a second, with the
+        // octree live, and capture after ENCKE_CAPTURE_FRAME frames of it.
+        // Whatever the octree has swapped by then depends on timing, so two
+        // runs differ; this is for seeing what only shows in motion.
+        optional<f64vec3> capture_velocity_;
+        bool              flying_      = false;
+        u32               fly_frames_  = 0;
 
         // Temporal antialiasing, toggled in the stats window; ENCKE_NO_TAA
         // starts with it off.

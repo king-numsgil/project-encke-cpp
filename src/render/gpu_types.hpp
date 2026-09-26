@@ -162,7 +162,7 @@ namespace encke::gpu
         // w the bindless TerrainVertex buffer.
         u32vec4 morph_masks;
         // Terrain: xyz Geomorph::period_offset, added to mesh positions for
-        // the triplanar rock.
+        // the triplanar rock and the cube-projected UVs; w Geomorph::face.
         f32vec4 period_offset;
     };
 

@@ -102,6 +102,17 @@ VertexOut vertex_main(VertexIn input, uint instance : SV_VulkanInstanceID, uint 
     output.tangent  = float4(mul(object.model_view, float4(input.tangent.xyz, 0.0f)).xyz,
                              input.tangent.w);
     output.uv        = input.uv * stretch;
+
+    // Palette terrain takes its cube-projected UVs from the morphed position,
+    // as to_vertices lays them out, so a vertex pulled toward its target
+    // does not drag its texture along. They differ from the mesh's own by
+    // whole periods.
+    if ((object.morph_masks.z & 2u) != 0u)
+    {
+        float3 p    = morphed.position + object.period_offset.xyz;
+        uint   face = uint(object.period_offset.w);
+        output.uv   = face == 0u ? p.zy : (face == 1u ? p.xz : p.xy);
+    }
     output.materials     = materials;
     output.mesh_position = morphed.position + object.period_offset.xyz;
     output.mesh_normal   = morphed.normal;
