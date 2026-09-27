@@ -41,6 +41,13 @@ struct glz::meta<encke::Wireframe>
 };
 
 template<>
+struct glz::meta<encke::Movement>
+{
+    using enum encke::Movement;
+    static constexpr auto value = enumerate("walk", Walk, "jetpack", Jetpack);
+};
+
+template<>
 struct glz::meta<encke::scenario::Shape>
 {
     using enum encke::scenario::Shape;
@@ -53,7 +60,7 @@ struct glz::meta<encke::scenario::Step>
     static constexpr std::string_view tag = "op";
     static constexpr auto ids = std::array{"settle", "capture", "camera", "fly", "wait",
                                            "freeze_terrain", "thaw_terrain", "interactive", "set",
-                                           "spawn"};
+                                           "spawn", "walk"};
 };
 
 namespace encke::scenario

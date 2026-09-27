@@ -26,4 +26,18 @@ namespace encke::physics
         // so nothing falls through ground that is not there yet.
         bool added = false;
     };
+
+    // On a root entity the physics world holds still as a collider, from
+    // PhysicsWorld::add_static_colliders: the unit cube or sphere its
+    // Transform's scale stretches, as its mesh is, at its Transform's pose.
+    struct StaticCollider
+    {
+        enum class Shape : u8
+        {
+            Box,
+            Sphere,   // uniform scale; the diameter is the scale's x
+        };
+
+        Shape shape = Shape::Box;
+    };
 }

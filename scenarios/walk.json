@@ -1,0 +1,35 @@
+// On foot: the character standing at the start pose, walked toward the
+// field, caught at the top of a jump, walked from the floor's north edge up
+// the slope the floor cut into the hill, and walked into the tower, where
+// its collider stops it a capsule's radius short of the concrete.
+{
+    "settings": { "ev100": 13, "movement": "walk" },
+    "steps": [
+        { "op": "settle" },
+        { "op": "capture", "file": "standing.png" },
+
+        { "op": "walk", "move": [0, 1], "frames": 90 },
+        { "op": "settle" },
+        { "op": "capture", "file": "walked.png" },
+
+        // Up at 4.9 m/s under 9.81: the top is half a second in, and the
+        // capture waits a jitter cycle after these frames.
+        { "op": "walk", "jump": true, "frames": 1 },
+        { "op": "wait", "frames": 20 },
+        { "op": "capture", "file": "jumping.png" },
+        { "op": "settle" },
+
+        { "op": "camera", "position": [0, 1.7, -40], "target": [0, 1.7, -50] },
+        { "op": "settle" },
+        { "op": "walk", "move": [0, 1], "frames": 480, "sprint": true },
+        { "op": "settle" },
+        { "op": "capture", "file": "uphill.png" },
+
+        { "op": "camera", "position": [-9, 1.7, 2], "target": [-9, 1.2, -7] },
+        { "op": "settle" },
+        { "op": "walk", "move": [0, 1], "frames": 180 },
+        { "op": "settle" },
+        { "op": "set", "collision": true },
+        { "op": "capture", "file": "tower.png" }
+    ]
+}

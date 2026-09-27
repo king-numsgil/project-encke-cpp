@@ -4,6 +4,7 @@
 
 #include "assets/asset_manager.hpp"
 #include "core/log.hpp"
+#include "physics/components.hpp"
 #include "render/mesh.hpp"
 #include "render/pixels.hpp"
 #include "terrain/planet.hpp"
@@ -213,6 +214,18 @@ namespace encke
                                                  .emissive  = emissive,
                                                  .metallic  = metallic,
                                              });
+
+        // What the scene builds from the unit cube and sphere stands still
+        // and collides as the shape it draws.
+        if (mesh == cube_mesh)
+        {
+            registry.emplace<physics::StaticCollider>(entity, physics::StaticCollider{.shape = physics::StaticCollider::Shape::Box});
+        }
+        else if (mesh == sphere_mesh)
+        {
+            registry.emplace<physics::StaticCollider>(entity,
+                                                      physics::StaticCollider{.shape = physics::StaticCollider::Shape::Sphere});
+        }
         return entity;
     }
 
@@ -467,6 +480,8 @@ namespace encke
             entt::entity const moon = add(sphere, f64vec3{0.0}, f64vec3{2.0 * kMoonRadius}, regolith, 0.95f, 0.0f);
             assembly_lift_.reset();
             registry.get<Transform>(moon).position = at;
+            // A body, not a prop: nothing walks on it from here.
+            registry.remove<physics::StaticCollider>(moon);
             log::info("scene: over the floor the Sun stands %.1f degrees up and the Moon %.1f",
                       elevation_degrees(sun_direction, up), elevation_degrees(at - origin_, up));
 
@@ -573,6 +588,8 @@ namespace encke
             entt::entity const spinner = add(cube, {-4.0, 2.2, -9.0}, f64vec3{1.2},
                                              {0.92f, 0.78f, 0.52f}, 0.25f, 1.0f);
             registry.emplace<Spin>(spinner, Spin{.rate = 0.5, .axis = f64vec3{0.35, 1.0, 0.15}, .base = rotation_});
+            // It turns, and a static collider would not.
+            registry.remove<physics::StaticCollider>(spinner);
         }
 
         // Spot masts: four in the field, each aimed at something, and two far

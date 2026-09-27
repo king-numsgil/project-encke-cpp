@@ -185,6 +185,7 @@ add_library(encke_core OBJECT
     src/render/debug_lines.cpp
     src/render/renderer.cpp
     src/render/scene.cpp
+    src/render/walk_camera.cpp
     src/render/shadows.cpp
 
     src/scenario/scenario.cpp
@@ -471,6 +472,7 @@ add_executable(encke_tests
     tests/physics/jolt_test.cpp
     tests/physics/physics_world_test.cpp
     tests/render/camera_test.cpp
+    tests/render/walk_camera_test.cpp
     tests/scenario/scenario_test.cpp
     tests/terrain/detail_noise_test.cpp
     tests/terrain/fastnoise_allocator_test.cpp

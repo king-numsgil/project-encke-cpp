@@ -78,6 +78,34 @@ namespace encke::scenario
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "spawn", "shape": "cone" }] })", "test"));
     }
 
+    TEST_CASE("a walk step reads its input, and movement is a setting", "[scenario]")
+    {
+        optional<Scenario> const scenario = parse(R"({
+            "settings": { "movement": "walk" },
+            "steps": [
+                { "op": "walk", "move": [0, 1], "frames": 90, "sprint": true },
+                { "op": "walk", "jump": true, "frames": 1 },
+                { "op": "set", "movement": "jetpack" }
+            ]
+        })", "test");
+        REQUIRE(scenario.has_value());
+
+        CHECK(scenario->settings.movement == Movement::Walk);
+
+        Walk const& forward = std::get<Walk>(scenario->steps[0]);
+        CHECK(forward.move == array<f64, 2>{{0.0, 1.0}});
+        CHECK(forward.frames == 90);
+        CHECK(forward.sprint);
+        CHECK_FALSE(forward.jump);
+
+        Walk const& jump = std::get<Walk>(scenario->steps[1]);
+        CHECK(jump.jump);
+        CHECK(jump.move == array<f64, 2>{{0.0, 0.0}});
+
+        CHECK(std::get<Settings>(scenario->steps[2]).movement == Movement::Jetpack);
+        CHECK_FALSE(parse(R"({ "settings": { "movement": "fly" } })", "test"));
+    }
+
     TEST_CASE("a scenario with a mistake in it is refused", "[scenario]")
     {
         // An unknown op, a misspelt field, a bad enum name, a path out of the

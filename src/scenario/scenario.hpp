@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/renderer.hpp"
+#include "render/walk_camera.hpp"
 
 #include <filesystem>
 #include <variant>
@@ -34,6 +35,10 @@ namespace encke::scenario
         optional<Wireframe> wireframe;
         optional<bool>      collision;
         optional<bool>      octree;
+
+        // On foot, a character standing where the camera is, or flying. A
+        // scenario starts flying, the engine on foot.
+        optional<Movement> movement;
 
         // Startup only; refused in a `set` step. The UI draws through the
         // sRGB swapchain view as a GPU without the mutable-format extension
@@ -89,6 +94,20 @@ namespace encke::scenario
         u32 frames = 1;
     };
 
+    // Walks the character for `frames` physics steps, one a frame, as the
+    // keys would: `move` is right and forward, each -1 to 1, relative to
+    // where it faces; `jump` and `sprint` held throughout. A frame waiting
+    // for new ground takes no step and does not count, so the walk goes as
+    // far on every run. Fails unless the movement is walk. Put a `settle`
+    // after it to wait for the character to stand still.
+    struct Walk
+    {
+        array<f64, 2> move{};
+        u32           frames = 60;
+        bool          jump   = false;
+        bool          sprint = false;
+    };
+
     enum class Shape
     {
         Box,
@@ -123,7 +142,7 @@ namespace encke::scenario
     struct Interactive {};
 
     using Step = std::variant<Settle, Capture, Camera, Fly, Wait, FreezeTerrain, ThawTerrain,
-                              Interactive, Settings, Spawn>;
+                              Interactive, Settings, Spawn, Walk>;
 
     struct Scenario
     {

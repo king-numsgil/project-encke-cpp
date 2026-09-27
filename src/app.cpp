@@ -98,14 +98,16 @@ namespace encke
             return "unknown";
         }
 
-        // Collision shapes by what they belong to: ground chunks, bodies
-        // waiting for their ground, awake bodies, sleeping ones.
+        // Collision shapes by what they belong to: ground chunks, the
+        // scene's props, bodies waiting for their ground, awake bodies,
+        // sleeping ones.
         u32 collision_colour(physics::PhysicsWorld::ShapeKind kind)
         {
             using Kind = physics::PhysicsWorld::ShapeKind;
             switch (kind)
             {
             case Kind::Ground: return rgb(f32vec3{1.0f, 0.55f, 0.1f});
+            case Kind::Static: return rgb(f32vec3{0.9f, 0.9f, 0.9f});
             case Kind::Held:   return rgb(f32vec3{1.0f, 0.15f, 0.15f});
             case Kind::Awake:  return rgb(f32vec3{0.3f, 1.0f, 0.3f});
             case Kind::Asleep: return rgb(f32vec3{0.3f, 0.6f, 1.0f});
@@ -219,6 +221,7 @@ namespace encke
                           ? cpu.logical_processors - cpu.physical_cores
                           : 0u,
                       collision_lod);
+        physics_.add_static_colliders(scene_.registry);
 
         log::info("scene: %zu entities, %zu renderables, %zu lights",
                   scene_.registry.view<Transform>().size(),
@@ -240,8 +243,14 @@ namespace encke
         log::info("tonemap: %s (T cycles)", tonemap_name(renderer_.tonemap()));
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
-        log::info("camera: hold right mouse to look; WASD move, Space/Ctrl up/down, "
-                  "Q/E roll, Shift fast, Alt slow, wheel scales speed");
+        log::info("mouse: held for looking; hold Alt to free it for the UI");
+        log::info("jetpack: WASD move, Space/Ctrl up/down, Q/E roll, Shift fast, C slow, wheel scales speed");
+
+        // On foot from the start pose, unless a scenario chose already.
+        if (!scenario_.has_value())
+        {
+            set_movement(Movement::Walk);
+        }
 
         return true;
     }
@@ -305,18 +314,16 @@ namespace encke
         ui_.set_input_blocked(looking);
     }
 
+    void App::capture_mouse()
+    {
+        // Held in either movement, as in any first-person game; Alt lets go
+        // of it for the UI, and so does losing focus.
+        bool const alt = window_.key_down(SDL_SCANCODE_LALT) || window_.key_down(SDL_SCANCODE_RALT);
+        set_looking(focused_ && !alt);
+    }
+
     void App::fly(FrameEvents const& events, f64 seconds)
     {
-        // A right click on a UI window belongs to the UI.
-        if (events.look_pressed && !ui_.wants_mouse())
-        {
-            set_looking(true);
-        }
-        if (events.look_released)
-        {
-            set_looking(false);
-        }
-
         if (!looking_)
         {
             return;
@@ -340,13 +347,54 @@ namespace encke
             .roll  = axis(SDL_SCANCODE_Q, SDL_SCANCODE_E),
             .wheel = events.wheel,
             .fast  = either(SDL_SCANCODE_LSHIFT, SDL_SCANCODE_RSHIFT),
-            .slow  = either(SDL_SCANCODE_LALT, SDL_SCANCODE_RALT),
+            // Alt frees the mouse, so slow is C.
+            .slow  = window_.key_down(SDL_SCANCODE_C),
         };
 
         if (Transform* const camera = scene_.registry.try_get<Transform>(scene_.camera))
         {
             fly_.update(*camera, input, seconds);
         }
+    }
+
+    void App::set_movement(Movement movement)
+    {
+        movement_ = movement;
+        if (movement == Movement::Jetpack)
+        {
+            physics_.remove_character();
+            log::info("movement: jetpack (X walks)");
+            return;
+        }
+
+        // Standing where the camera is, eyes at its height: the character's
+        // up, gravity's, needs the bodies' world transforms, which the first
+        // frame has not composed yet.
+        propagate_transforms(scene_.registry);
+        Transform const& camera = scene_.registry.get<Transform>(scene_.camera);
+        f64vec3 const    up     = physics_.up_at(scene_.registry, camera.position);
+        physics_.add_character(scene_.registry, camera.position - up * config::kEyeHeight);
+        walk_.begin(camera, up);
+        log::info("movement: walking (X takes the jetpack); WASD, Shift sprints, Space jumps");
+    }
+
+    void App::read_walk_input(FrameEvents const& events)
+    {
+        if (!looking_)
+        {
+            return;
+        }
+
+        auto axis = [this](SDL_Scancode positive, SDL_Scancode negative) {
+            return (window_.key_down(positive) ? 1.0 : 0.0) - (window_.key_down(negative) ? 1.0 : 0.0);
+        };
+
+        walk_input_ = WalkInput{
+            .look   = events.mouse_delta,
+            .move   = f64vec2{axis(SDL_SCANCODE_D, SDL_SCANCODE_A), axis(SDL_SCANCODE_W, SDL_SCANCODE_S)},
+            .sprint = window_.key_down(SDL_SCANCODE_LSHIFT) || window_.key_down(SDL_SCANCODE_RSHIFT),
+            .jump   = window_.key_down(SDL_SCANCODE_SPACE),
+        };
     }
 
     void App::draw_ui()
@@ -430,6 +478,15 @@ namespace encke
         Transform& camera = scene_.registry.get<Transform>(scene_.camera);
         camera.position   = scene_.to_world(eye);
         fly_.aim(camera, scene_.rotation() * (target - eye), scene_.rotation() * up);
+
+        // Walking, the character is moved under the new eye, still, and
+        // looks where the camera was aimed.
+        if (movement_ == Movement::Walk)
+        {
+            f64vec3 const ground_up = physics_.up_at(scene_.registry, camera.position);
+            physics_.teleport_character(camera.position - ground_up * config::kEyeHeight);
+            walk_.begin(camera, ground_up);
+        }
     }
 
     scenario::Camera App::camera_step() const
@@ -507,6 +564,10 @@ namespace encke
         if (settings.octree.has_value())
         {
             show_octree_ = *settings.octree;
+        }
+        if (settings.movement.has_value() && *settings.movement != movement_)
+        {
+            set_movement(*settings.movement);
         }
     }
 
@@ -670,6 +731,29 @@ namespace encke
                 {
                     spawn(s);
                     return StepResult::Done;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Walk>)
+                {
+                    if (movement_ != Movement::Walk)
+                    {
+                        log::error("scenario: walk needs \"movement\": \"walk\"");
+                        return StepResult::Failed;
+                    }
+                    // Counted in steps, not frames: a frame waiting on new
+                    // ground takes none, and counting it would walk a
+                    // different distance whenever the pool ran slower.
+                    if (step_frames_ == 0)
+                    {
+                        walk_until_ = physics_.steps() + s.frames;
+                    }
+                    if (physics_.steps() >= walk_until_)
+                    {
+                        return StepResult::Done;
+                    }
+                    walk_input_ = WalkInput{.move   = f64vec2{s.move[0], s.move[1]},
+                                            .sprint = s.sprint,
+                                            .jump   = s.jump};
+                    return StepResult::Running;
                 }
                 else
                 {
@@ -873,6 +957,13 @@ namespace encke
                 log::info("camera:\n%s", text.c_str());
             }
 
+            focused_ = events.focus_gained || (focused_ && !events.focus_lost);
+
+            if (events.toggle_jetpack && !ui_.wants_text() && !scripted)
+            {
+                set_movement(movement_ == Movement::Walk ? Movement::Jetpack : Movement::Walk);
+            }
+
             if (events.cycle_wireframe && !scripted)
             {
                 auto const next = static_cast<Wireframe>((static_cast<u32>(renderer_.wireframe()) + 1u) %
@@ -952,6 +1043,7 @@ namespace encke
             // entity, and Scene::update is what composes its world transform
             // for this frame.
             bool capturing = false;
+            walk_input_    = {};
             if (scripted)
             {
                 capturing = tick_scenario();
@@ -963,7 +1055,15 @@ namespace encke
             }
             else
             {
-                fly(events, delta);
+                capture_mouse();
+                if (movement_ == Movement::Jetpack)
+                {
+                    fly(events, delta);
+                }
+                else
+                {
+                    read_walk_input(events);
+                }
             }
             assets_.update();
             // Finished terrain chunks become meshes here, and the octree picks
@@ -972,10 +1072,32 @@ namespace encke
             // camera's world transform from the last update, a frame behind.
             pool_.drain();
             terrain_.update(scene_, assets_, pool_);
+
+            // Walking, the mouse turns the character and the keys ask it for
+            // a velocity, which the steps below walk.
+            if (movement_ == Movement::Walk)
+            {
+                if (optional<physics::CharacterState> const character = physics_.character())
+                {
+                    f64vec3 const move = walk_.steer(walk_input_, character->up);
+                    physics_.set_character_input(physics::CharacterInput{.move = move, .jump = walk_input_.jump});
+                }
+            }
+
             // After the drain, which adds finished collision chunks; before
             // Scene::update, which composes the Transforms it writes. A
             // scenario steps once a frame, so its runs match.
             physics_.update(scene_.registry, pool_, delta, scripted);
+
+            // The eye over where the character's feet are now, between the
+            // last two steps like every body.
+            if (movement_ == Movement::Walk)
+            {
+                if (optional<physics::CharacterState> const character = physics_.character())
+                {
+                    walk_.place(scene_.registry.get<Transform>(scene_.camera), character->feet, character->up);
+                }
+            }
             renderer_.set_terrain_palette(terrain_.palette());
             scene_.update(seconds, assets_);
 

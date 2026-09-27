@@ -11,6 +11,7 @@
 #include "render/fly_camera.hpp"
 #include "render/renderer.hpp"
 #include "render/scene.hpp"
+#include "render/walk_camera.hpp"
 #include "scenario/scenario.hpp"
 #include "terrain/planet.hpp"
 #include "ui/imgui_layer.hpp"
@@ -83,10 +84,22 @@ namespace encke
         // A digit key, 0-based: a shading mode, or a debug window toggle.
         void on_debug_key(u32 key);
 
-        // Right mouse button: while held, the mouse and movement keys fly
-        // the camera and the UI ignores them.
+        // While looking, the mouse and movement keys drive the camera and the
+        // UI ignores them: the mouse is held, hidden, reporting raw motion.
         void set_looking(bool looking);
+
+        // Looking unless Alt is down or the window lost focus, in either
+        // movement. Never under a scenario.
+        void capture_mouse();
+
         void fly(FrameEvents const& events, f64 seconds);
+
+        // On foot, a character standing where the camera is, or the jetpack,
+        // flying from where the character's eyes were.
+        void set_movement(Movement movement);
+
+        // While looking, the keys and the mouse fill walk_input_.
+        void read_walk_input(FrameEvents const& events);
 
         // Writes the frame the renderer just captured to `path` as a PNG.
         bool save_capture(std::filesystem::path const& path);
@@ -128,6 +141,13 @@ namespace encke
         FlyCamera fly_;
         bool      looking_ = false;
 
+        // Walking unless a scenario says otherwise; X takes the jetpack.
+        // walk_input_ is this frame's, from the keys or a walk step.
+        Movement   movement_ = Movement::Jetpack;
+        WalkCamera walk_;
+        WalkInput  walk_input_;
+        bool       focused_ = true;
+
         terrain::TerrainOctree terrain_{terrain::OctreeSettings{
             .finest_lod   = config::kTerrainFinestLod,
             .split_factor = config::kTerrainSplitFactor,
@@ -156,6 +176,9 @@ namespace encke
         u32                          step_frames_  = 0;
         bool                         step_started_ = false;
         bool                         scenario_failed_ = false;
+
+        // The physics step a walk step ends at.
+        u64 walk_until_ = 0;
 
         // The camera's pose when F2 froze the terrain, for F3 to copy.
         optional<scenario::Camera> frozen_pose_;

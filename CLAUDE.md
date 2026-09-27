@@ -110,7 +110,8 @@ src/
     model.hpp            a loaded model: node tree over mesh and material handles
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
-    fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
+    fly_camera.{hpp,cpp} the jetpack: six-degrees-of-freedom flight, mouse look, WASD, speed on the wheel
+    walk_camera.{hpp,cpp} first-person look for the walking character, level to its up
     scene.{hpp,cpp}      the EnTT registry and active camera; builds the test planet and its floor
     components.hpp       Renderable and Light, the components the renderer reads
     extract.{hpp,cpp}    registry -> RenderList once a frame: the renderer's only view of it
@@ -127,7 +128,8 @@ src/
     renderer.{hpp,cpp}   the passes, barriers, per-frame upload
   physics/
     components.hpp       RigidBody: a Jolt body's id and its last two poses
-    physics_world.{hpp,cpp} Jolt at a fixed 60 Hz, gravity per body, terrain collision chunks, kept and freed
+    physics_world.{hpp,cpp} Jolt at a fixed 60 Hz, gravity per body, terrain collision chunks, kept and freed;
+                         the walking character (CharacterVirtual)
   scenario/
     scenario.{hpp,cpp}   a scenario file's settings and steps, read with glaze; App runs them
   terrain/
@@ -389,8 +391,8 @@ them with `wireframe`, `collision` and `octree` (`scenarios/debug_draw.json`).
   left out with a warning, once.
 - **Collision shapes come from Jolt's own triangulation**
   (`Shape::GetTrianglesStart`, which needs no debug renderer), about each
-  body's centre of mass in f32 and placed in f64: orange ground chunks, red
-  held bodies, green awake, blue asleep. Boxes show their faces' diagonals,
+  body's centre of mass in f32 and placed in f64: orange ground chunks,
+  pale static props, red held bodies, green awake, blue asleep. Boxes show their faces' diagonals,
   spheres their facets.
 - **Octree boxes** are each drawn chunk's box in its body's frame, shrunk
   1% so neighbours' edges stay apart, in the wireframe's LOD colours.
@@ -1708,10 +1710,19 @@ draws the latest step. `update` runs after the pool's drain and before
   its `Impl` after setting them: built in the constructor, the first run
   crashed in `BroadPhaseLayerInterfaceTable`.
 
+- **The scene's props are static colliders.** `Scene::add` tags every
+  cube and sphere it places with a `StaticCollider` (`physics/components`,
+  Jolt-free), and `PhysicsWorld::add_static_colliders` makes each a static
+  box or sphere of its Transform's size and pose once, after the scene, in
+  registry order. The Moon is untagged, a body rather than a prop, and so
+  is the spinning cube, which a static collider would not follow; the
+  helmet has none. Their bodies carry `kStaticProp` as user data, which
+  tells them from ground chunks in the collision view.
+
 Known gaps:
 
-- The scene's own objects are not colliders: crates fall through the
-  masts, pillars and lamp posts.
+- The props are static: the spinner and anything moved later keep no
+  collider, and nothing makes one from a glTF model.
 - LOD 1 collision still lacks the octaves under 1 m that the drawn LOD 0
   ground has; a resting body can sink or hover by the centimetres they add.
   Not yet checked on the mountain belts' steeper rock, where those octaves
@@ -1729,12 +1740,77 @@ Known gaps:
 
 ## Camera control
 
+Two movements, X toggling between them (`Movement`): on foot, the default
+outside scenarios, and the jetpack, which is the fly camera below. A
+scenario starts on the jetpack and walks with `"movement": "walk"`.
+
+### On foot
+
+A character is a capsule of `config::kCharacterHeight` standing on its
+feet, walked by Jolt's `CharacterVirtual` in `PhysicsWorld`
+(`add_character`), and `render/walk_camera` puts the camera at
+`kEyeHeight` above its feet. Every tuning number is in `render/config.hpp`.
+
+- **Kinematic, stepped with the bodies.** Once per physics step, before
+  Jolt's, `step_character` follows Jolt's CharacterVirtual sample with the
+  up generalised: on walkable ground it takes the ground's velocity plus
+  its own, easing toward what is asked at `kGroundResponse`, and jumps at
+  `kJumpSpeed`; in the air it keeps its fall and eases across at
+  `kAirResponse`. `ExtendedUpdate` climbs `kStepUp` and keeps to the ground
+  `kStepDown` going down; slopes over `kMaxSlopeDegrees` stop it. The
+  camera goes between the last two steps' feet, as bodies' Transforms do.
+- **No gravity while standing on walkable ground.** With it, a stopped
+  character slid down any slope; with only its part along the ground's
+  normal it still crept, a centimetre in two seconds, from what the contact
+  solver left of the sideways part. Without it, it holds to a tenth of a
+  millimetre (`physics_world_test`), and the step-down keeps it on the
+  ground going downhill.
+- **Its up is gravity's**: away from the centre of the nearest pulling
+  body, per step, set as Jolt's up and the capsule's rotation. The walk
+  camera carries its heading onto each new up by the least turn, so it
+  stays level walking round a planet; pitch stops short of straight up and
+  down, and there is no roll.
+- **Its ground is built like a body's**, around its feet out to
+  `kCollisionMargin`, and it is held until that is built; a character
+  walking onto unbuilt ground halts the world like any moving body.
+- **Bodies bump into it** through a kinematic inner capsule
+  (`mInnerBodyShape`), and it pushes them by its `kCharacterMass`. The
+  inner body is left out of the gravity loop (Jolt asserts on a kinematic
+  body's inverse mass) and of the awake count, since Jolt keeps it active;
+  `idle()` instead asks that the character stand on the ground, asked
+  nothing, with its velocity across eased to rest.
+- WASD walk, Shift sprints, Space jumps while held; the mouse as below.
+- **A `camera` step, walking, teleports the character** under the new eye,
+  still, facing where the camera was aimed. The `walk` step feeds it input
+  for a number of physics steps, not frames: a frame waiting on new ground
+  takes no step, and counting frames made `scenarios/walk.json`'s long walk
+  end in a different place when the pool ran slower. Two runs of it are
+  byte-identical.
+- `physics_world_test` drops a character 2 m onto the pole, walks it two
+  seconds, stops it on the slope, jumps it to v²/2g within 15 cm, and walks
+  it into a static wall, where it stops a radius short of the face.
+
+Known gap: switching to the jetpack removes the character rather than
+leaving it standing.
+
+### The mouse
+
+**Held in both movements**, as in any first-person game
+(`App::capture_mouse`, every frame outside a scenario): relative mouse mode
+hides the cursor and the UI gets `ImGuiConfigFlags_NoMouse | NoKeyboard`.
+Holding Alt lets go of it for the UI, and so does losing focus, until the
+window has it back. Space is safe only because the UI is blocked while the
+mouse is held: ImGui's keyboard navigation activates the focused widget on
+Space. Under a scenario it is never held.
+
+### The jetpack
+
 `render/fly_camera` flies the camera entity's local `Transform`, so a
-camera parented to a ship flies relative to it, editor-style: everything happens while
-the right mouse button is held. It is six-degrees-of-freedom: mouse yaws and
-pitches about the camera's own axes, Q/E roll, WASD moves along the view,
-Space/Ctrl strafe along the camera's up, Shift is 5x, Alt is 0.2x, and the
-wheel scales the base speed by 1.25 per notch between 2 m/s and 10,000 km/s.
+camera parented to a ship flies relative to it, while the mouse is held. It
+is six-degrees-of-freedom: mouse yaws and pitches about the camera's own
+axes, Q/E roll, WASD moves along the view, Space/Ctrl strafe along the
+camera's up, Shift is 5x, C is 0.2x (Alt frees the mouse), and the wheel
+scales the base speed by 1.25 per notch between 2 m/s and 10,000 km/s.
 Position is f64 like the rest of the world.
 
 The time step is wall clock from one fixed point in the loop to the same
@@ -1742,14 +1818,6 @@ point next iteration, clamped to 0.1 s. It was once measured from where the
 previous `draw()` returned, which leaves out the fence wait, acquire and
 present -- most of a frame -- and made movement slow and violently uneven.
 
-- **Holding the button hands mouse and keyboard to the camera**: relative
-  mouse mode hides the cursor, and the UI gets `ImGuiConfigFlags_NoMouse |
-  NoKeyboard` until release. A right click that lands on a UI window stays
-  with the UI.
-- **Space is safe only because the UI is blocked while flying.** ImGui's
-  keyboard navigation activates the focused widget on Space; with
-  `NoKeyboard` set for as long as the button is held, it never sees it.
-- **Losing focus counts as release**, since the button-up may never arrive.
 - **The camera is flown before `Scene::update`**, which composes its world
   transform for the frame; flown after, it would draw a frame late. Last
   frame's view belongs to the renderer, recorded when a frame's buffers are

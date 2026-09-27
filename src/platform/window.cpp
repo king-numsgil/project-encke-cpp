@@ -124,21 +124,11 @@ namespace encke
                 break;
 
             case SDL_EVENT_WINDOW_FOCUS_LOST:
-                events.look_released = true;
+                events.focus_lost = true;
                 break;
 
-            case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                if (event.button.button == SDL_BUTTON_RIGHT)
-                {
-                    events.look_pressed = true;
-                }
-                break;
-
-            case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (event.button.button == SDL_BUTTON_RIGHT)
-                {
-                    events.look_released = true;
-                }
+            case SDL_EVENT_WINDOW_FOCUS_GAINED:
+                events.focus_gained = true;
                 break;
 
             case SDL_EVENT_MOUSE_MOTION:
@@ -181,6 +171,10 @@ namespace encke
                 else if (event.key.key == SDLK_T && !event.key.repeat)
                 {
                     events.cycle_tonemap = true;
+                }
+                else if (event.key.key == SDLK_X && !event.key.repeat)
+                {
+                    events.toggle_jetpack = true;
                 }
                 else if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9 && !event.key.repeat)
                 {

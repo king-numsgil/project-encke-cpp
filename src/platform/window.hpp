@@ -33,10 +33,13 @@ namespace encke
         // T pressed this frame: step to the next tonemap curve.
         bool cycle_tonemap = false;
 
-        // Right mouse button went down or up this frame; losing focus counts
-        // as up, since the release would otherwise never arrive.
-        bool look_pressed  = false;
-        bool look_released = false;
+        // X pressed this frame: walk, or take the jetpack.
+        bool toggle_jetpack = false;
+
+        // The window gained or lost keyboard focus this frame. Losing it
+        // lets go of the mouse.
+        bool focus_gained = false;
+        bool focus_lost   = false;
 
         // Mouse motion this frame, in pixels, +x right and +y down. Raw deltas
         // while relative mode is on.

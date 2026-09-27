@@ -86,6 +86,34 @@ namespace encke::config
     // A collision chunk no body has kept for this many steps is freed.
     inline constexpr u64 kCollisionKeepSteps = 300;
 
+    // -- the walking character ---------------------------------------------------------
+    // A capsule standing on its feet: full height and radius, metres, and the
+    // eye below its top.
+    inline constexpr f64 kCharacterHeight = 1.8;
+    inline constexpr f64 kCharacterRadius = 0.3;
+    inline constexpr f64 kEyeHeight       = 1.7;
+
+    // Metres a second along the ground; Shift sprints.
+    inline constexpr f64 kWalkSpeed   = 4.5;
+    inline constexpr f64 kSprintSpeed = 9.0;
+
+    // Straight up off the ground, m/s: about 1.2 m high under 9.81.
+    inline constexpr f64 kJumpSpeed = 4.9;
+
+    // How fast the velocity along the ground meets what is asked, per
+    // second: quick on the ground, slow in the air, which keeps most of what
+    // the jump took off with.
+    inline constexpr f64 kGroundResponse = 12.0;
+    inline constexpr f64 kAirResponse    = 1.0;
+
+    // Steepest ground it walks up, and the steps it climbs and snaps down.
+    inline constexpr f64 kMaxSlopeDegrees = 50.0;
+    inline constexpr f64 kStepUp          = 0.4;
+    inline constexpr f64 kStepDown        = 0.5;
+
+    // Kilograms, for what it pushes and what pushes it.
+    inline constexpr f64 kCharacterMass = 80.0;
+
     // -- material textures ---------------------------------------------------------
     // Capped further by the device's maxSamplerAnisotropy.
     inline constexpr f32 kMaxAnisotropy = 16.0f;

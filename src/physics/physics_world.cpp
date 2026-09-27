@@ -19,12 +19,16 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
 #include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.h>
 #include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h>
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
@@ -32,6 +36,8 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+
+#include <glm/gtx/quaternion.hpp>
 
 #if ENCKE_USE_MIMALLOC
 #   include <mimalloc.h>
@@ -44,6 +50,9 @@ namespace encke::physics
         constexpr JPH::ObjectLayer kStatic     = 0;   // terrain
         constexpr JPH::ObjectLayer kMoving     = 1;
         constexpr u32              kLayerCount = 2;
+
+        // A static body's user data when it is a StaticCollider, not ground.
+        constexpr u64 kStaticProp = 1;
 
         constexpr u32 kMaxBodies     = 65'536;
         constexpr u32 kMaxBodyPairs  = 65'536;
@@ -69,6 +78,34 @@ namespace encke::physics
         f64quat from_jolt(JPH::QuatArg q)
         {
             return glm::normalize(f64quat{q.GetW(), q.GetX(), q.GetY(), q.GetZ()});
+        }
+
+        JPH::Vec3 to_jolt_vector(f64vec3 const& v)
+        {
+            return JPH::Vec3{static_cast<f32>(v.x), static_cast<f32>(v.y), static_cast<f32>(v.z)};
+        }
+
+        f64vec3 from_jolt_vector(JPH::Vec3Arg v)
+        {
+            return f64vec3{v.GetX(), v.GetY(), v.GetZ()};
+        }
+
+        // The capsule standing on its feet: Jolt's capsule is centred and
+        // along +Y, so it is lifted half its height, which puts the
+        // character's position at its feet.
+        JPH::ShapeRefC character_shape()
+        {
+            auto const radius = static_cast<f32>(config::kCharacterRadius);
+            auto const half   = static_cast<f32>(0.5 * config::kCharacterHeight);
+            JPH::RotatedTranslatedShapeSettings const settings{
+                JPH::Vec3{0.0f, half, 0.0f}, JPH::Quat::sIdentity(), new JPH::CapsuleShape{half - radius, radius}};
+            return settings.Create().Get();
+        }
+
+        // A turn taking +Y to `up`, for the capsule to stand along it.
+        f64quat upright(f64vec3 const& up)
+        {
+            return glm::rotation(f64vec3{0.0, 1.0, 0.0}, up);
         }
 
         JPH::BodyID body_id(RigidBody const& body)
@@ -207,12 +244,107 @@ namespace encke::physics
         u32 dynamic     = 0;
         u64 steps       = 0;
 
+        // The walking character, if there is one: its feet at the last two
+        // steps, for the camera to go between as bodies' Transforms do, and
+        // its velocity along the ground, which eases toward what is asked.
+        JPH::Ref<JPH::CharacterVirtual> character;
+        bool                            character_held = true;
+        CharacterInput                  character_input;
+        f64vec3                         character_previous{0.0};
+        f64vec3                         character_feet{0.0};
+        f64vec3                         character_up{0.0, 1.0, 0.0};
+        JPH::Vec3                       character_across = JPH::Vec3::sZero();
+        f64                             alpha = 1.0;
+
+        // The character's feet.
+        f64vec3 feet() const { return character ? from_jolt(character->GetPosition()) : f64vec3{0.0}; }
+
+        // Awake bodies, the character's inner body left out: it is
+        // kinematic, moved every step, and Jolt keeps it active.
+        u32 awake_bodies() const
+        {
+            u32 awake = system->GetNumActiveBodies(JPH::EBodyType::RigidBody);
+            if (character && system->GetBodyInterfaceNoLock().IsActive(character->GetInnerBodyID()))
+            {
+                --awake;
+            }
+            return awake;
+        }
+
+        // One step of the character, before the bodies': Jolt's
+        // CharacterVirtual sample, generalised to an up that turns with the
+        // ground's body. On walkable ground it takes the ground's velocity
+        // plus its own, easing toward what is asked, and a jump; in the air
+        // it keeps its fall and most of what it had across.
+        void step_character(entt::registry const& registry, f32 dt)
+        {
+            f64vec3 const g  = gravity_at(registry, feet());
+            f64vec3 const up = glm::length(g) > 0.0 ? -glm::normalize(g) : character_up;
+            character_up     = up;
+
+            JPH::Vec3 const up_j = to_jolt_vector(up);
+            character->SetUp(up_j);
+            character->SetRotation(to_jolt(upright(up)));
+            character->UpdateGroundVelocity();
+
+            JPH::Vec3 const velocity = character->GetLinearVelocity();
+            JPH::Vec3 const vertical = up_j * velocity.Dot(up_j);
+            JPH::Vec3 const ground   = character->GetGroundVelocity();
+
+            f64vec3 const   move   = character_input.move - up * glm::dot(character_input.move, up);
+            JPH::Vec3 const wanted = to_jolt_vector(move);
+
+            bool const toward_ground = velocity.Dot(up_j) - ground.Dot(up_j) < 0.1f;
+            bool const standing      = character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround &&
+                                  !character->IsSlopeTooSteep(character->GetGroundNormal()) && toward_ground;
+
+            JPH::Vec3 next;
+            if (standing)
+            {
+                f32 const ease = std::min(1.0f, dt * static_cast<f32>(config::kGroundResponse));
+                character_across += (wanted - character_across) * ease;
+                next = ground + character_across;
+                if (character_input.jump)
+                {
+                    next += up_j * static_cast<f32>(config::kJumpSpeed);
+                }
+            }
+            else
+            {
+                f32 const ease   = std::min(1.0f, dt * static_cast<f32>(config::kAirResponse));
+                character_across = velocity - vertical;
+                character_across += (wanted - character_across) * ease;
+                next = vertical + character_across;
+            }
+
+            // Standing on walkable ground, no gravity: along a slope it slid
+            // the character downhill whenever it stopped, and even pulled
+            // along the ground's normal it crept, by the few millimetres a
+            // second the contact solver left of the sideways part. The
+            // step-down in ExtendedUpdate keeps it on the ground instead.
+            JPH::Vec3 const gravity = to_jolt_vector(g);
+            character->SetLinearVelocity(standing ? next : next + gravity * dt);
+
+            JPH::CharacterVirtual::ExtendedUpdateSettings update;
+            update.mStickToFloorStepDown = -up_j * static_cast<f32>(config::kStepDown);
+            update.mWalkStairsStepUp     = up_j * static_cast<f32>(config::kStepUp);
+
+            JPH::IgnoreSingleBodyFilter const self{character->GetInnerBodyID()};
+            character->ExtendedUpdate(dt, gravity, update, system->GetDefaultBroadPhaseLayerFilter(kMoving),
+                                      system->GetDefaultLayerFilter(kMoving), self, {}, *temp);
+
+            character_previous = character_feet;
+            character_feet     = feet();
+        }
+
         ~Impl()
         {
             if (!live)
             {
                 return;
             }
+            // It removes its inner body from the system as it goes.
+            character = nullptr;
             system.reset();
             jobs.reset();
             temp.reset();
@@ -495,8 +627,13 @@ namespace encke::physics
                 {
                     continue;
                 }
+                // The character's inner body is kinematic: moved, not pulled.
                 JPH::Body& body = lock.GetBody();
-                f32 const  inverse_mass = body.GetMotionProperties()->GetInverseMass();
+                if (!body.IsDynamic())
+                {
+                    continue;
+                }
+                f32 const inverse_mass = body.GetMotionProperties()->GetInverseMass();
                 if (inverse_mass <= 0.0f)
                 {
                     continue;
@@ -504,6 +641,11 @@ namespace encke::physics
                 f64vec3 const g = gravity_at(registry, from_jolt(body.GetCenterOfMassPosition()));
                 body.AddForce(JPH::Vec3{static_cast<f32>(g.x), static_cast<f32>(g.y), static_cast<f32>(g.z)} /
                               inverse_mass);
+            }
+
+            if (character && !character_held)
+            {
+                step_character(registry, dt);
             }
 
             system->Update(dt, 1, temp.get(), jobs.get());
@@ -584,6 +726,34 @@ namespace encke::physics
         impl_->add(registry, entity, new JPH::SphereShape{radius}, static_cast<f64>(radius));
     }
 
+    void PhysicsWorld::add_static_colliders(entt::registry const& registry)
+    {
+        JPH::BodyInterface& bodies = impl_->system->GetBodyInterface();
+        u32                 count  = 0;
+        for (auto const [entity, collider, transform] :
+             registry.view<StaticCollider const, Transform const>().each())
+        {
+            f32vec3 const  half = transform.scale * 0.5f;
+            JPH::ShapeRefC shape;
+            if (collider.shape == StaticCollider::Shape::Sphere)
+            {
+                shape = new JPH::SphereShape{half.x};
+            }
+            else
+            {
+                f32 const radius = std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({half.x, half.y, half.z}));
+                shape            = new JPH::BoxShape{JPH::Vec3{half.x, half.y, half.z}, radius};
+            }
+
+            JPH::BodyCreationSettings settings{shape, to_jolt(transform.position), to_jolt(transform.rotation),
+                                               JPH::EMotionType::Static, kStatic};
+            settings.mUserData = kStaticProp;
+            bodies.CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+            ++count;
+        }
+        log::info("physics: %u static colliders", count);
+    }
+
     void PhysicsWorld::update(entt::registry& registry, WorkerPool& pool, f64 seconds, bool fixed_frame)
     {
         if (!impl_)
@@ -615,9 +785,29 @@ namespace encke::physics
             impl_->keep(*ground, rigid.position, rigid.bound + 2.0 * config::kCollisionMargin);
         }
 
+        // The character's ground, as a moving body's: always, since what it
+        // is asked can move it at any step.
+        if (impl_->character)
+        {
+            f64vec3 const       feet   = impl_->feet();
+            f64 const           bound  = config::kCharacterHeight;
+            if (Ground const* const ground = impl_->nearest(all, feet))
+            {
+                waiting |= !impl_->ensure(*ground, feet, bound + config::kCollisionMargin, pool);
+                impl_->keep(*ground, feet, bound + 2.0 * config::kCollisionMargin);
+            }
+        }
+
         f64 alpha = 1.0;
         if (!waiting)
         {
+            if (impl_->character && impl_->character_held)
+            {
+                impl_->character_held     = false;
+                impl_->character_feet     = impl_->feet();
+                impl_->character_previous = impl_->character_feet;
+            }
+
             for (auto const [entity, rigid] : registry.view<RigidBody>().each())
             {
                 if (!rigid.added)
@@ -655,6 +845,7 @@ namespace encke::physics
             // Time spent waiting for ground is not simulated later.
             impl_->accumulator = 0.0;
         }
+        impl_->alpha = alpha;
 
         for (auto const [entity, rigid, transform] : registry.view<RigidBody, Transform>().each())
         {
@@ -667,15 +858,112 @@ namespace encke::physics
         }
     }
 
+    void PhysicsWorld::add_character(entt::registry const& registry, f64vec3 const& feet)
+    {
+        remove_character();
+        impl_->character_up = up_at(registry, feet);
+
+        JPH::CharacterVirtualSettings settings;
+        settings.mShape                     = character_shape();
+        settings.mInnerBodyShape            = settings.mShape;
+        settings.mInnerBodyLayer            = kMoving;
+        settings.mMaxSlopeAngle             = JPH::DegreesToRadians(static_cast<f32>(config::kMaxSlopeDegrees));
+        settings.mMass                      = static_cast<f32>(config::kCharacterMass);
+        settings.mUp                        = to_jolt_vector(impl_->character_up);
+        // Contacts count as ground only on the bottom hemisphere, not the
+        // capsule's side.
+        settings.mSupportingVolume = JPH::Plane{JPH::Vec3::sAxisY(), -static_cast<f32>(config::kCharacterRadius)};
+
+        impl_->character = new JPH::CharacterVirtual{&settings, to_jolt(feet), to_jolt(upright(impl_->character_up)),
+                                                     0, impl_->system.get()};
+        impl_->character_held     = true;
+        impl_->character_input    = {};
+        impl_->character_across   = JPH::Vec3::sZero();
+        impl_->character_feet     = feet;
+        impl_->character_previous = feet;
+    }
+
+    void PhysicsWorld::remove_character()
+    {
+        impl_->character = nullptr;
+    }
+
+    bool PhysicsWorld::has_character() const
+    {
+        return impl_ && impl_->character;
+    }
+
+    void PhysicsWorld::teleport_character(f64vec3 const& feet)
+    {
+        if (!impl_->character)
+        {
+            return;
+        }
+        impl_->character->SetPosition(to_jolt(feet));
+        impl_->character->SetLinearVelocity(JPH::Vec3::sZero());
+        impl_->character_across   = JPH::Vec3::sZero();
+        impl_->character_feet     = feet;
+        impl_->character_previous = feet;
+    }
+
+    void PhysicsWorld::set_character_input(CharacterInput const& input)
+    {
+        impl_->character_input = input;
+    }
+
+    optional<CharacterState> PhysicsWorld::character() const
+    {
+        if (!impl_ || !impl_->character)
+        {
+            return nullopt;
+        }
+        JPH::CharacterVirtual const& character = *impl_->character;
+        return CharacterState{
+            .feet      = glm::mix(impl_->character_previous, impl_->character_feet, impl_->alpha),
+            .up        = impl_->character_up,
+            .velocity  = from_jolt_vector(character.GetLinearVelocity()),
+            .on_ground = character.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround,
+            .held      = impl_->character_held,
+        };
+    }
+
+    f64vec3 PhysicsWorld::up_at(entt::registry const& registry, f64vec3 const& point) const
+    {
+        f64vec3 const g = gravity_at(registry, point);
+        return glm::length(g) > 0.0 ? -glm::normalize(g) : f64vec3{0.0, 1.0, 0.0};
+    }
+
     bool PhysicsWorld::idle() const
     {
-        return !impl_ || (impl_->held == 0 && impl_->building == 0 &&
-                          impl_->system->GetNumActiveBodies(JPH::EBodyType::RigidBody) == 0);
+        if (!impl_)
+        {
+            return true;
+        }
+
+        // Standing: on the ground, asked nothing, and no longer sliding
+        // along it. Its velocity across is what eases, so that is what
+        // settles; the fall into the ground each step is not motion.
+        bool standing = true;
+        if (impl_->character)
+        {
+            f32 const across = impl_->character_across.Length();
+            standing = !impl_->character_held &&
+                       impl_->character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround &&
+                       glm::length(impl_->character_input.move) == 0.0 && !impl_->character_input.jump &&
+                       across < 1.0e-3f;
+        }
+
+        return standing && impl_->held == 0 && impl_->building == 0 && impl_->awake_bodies() == 0;
     }
 
     u32 PhysicsWorld::bodies() const
     {
         return impl_ ? impl_->dynamic + impl_->held : 0;
+    }
+
+    u64 PhysicsWorld::steps() const
+    {
+        return impl_ ? impl_->steps : 0;
     }
 
     u32 PhysicsWorld::collision_chunks() const
@@ -705,7 +993,8 @@ namespace encke::physics
             }
             JPH::Body const& body = lock.GetBody();
 
-            ShapeKind const kind = body.IsStatic()           ? ShapeKind::Ground
+            ShapeKind const kind = body.IsStatic()           ? (body.GetUserData() == kStaticProp ? ShapeKind::Static
+                                                                                                  : ShapeKind::Ground)
                                    : !body.IsInBroadPhase() ? ShapeKind::Held
                                    : body.IsActive()        ? ShapeKind::Awake
                                                             : ShapeKind::Asleep;
@@ -738,6 +1027,6 @@ namespace encke::physics
 
     u32 PhysicsWorld::awake() const
     {
-        return impl_ ? impl_->system->GetNumActiveBodies(JPH::EBodyType::RigidBody) : 0;
+        return impl_ ? impl_->awake_bodies() : 0;
     }
 }
