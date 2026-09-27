@@ -34,6 +34,13 @@ struct glz::meta<encke::DebugWindow>
 };
 
 template<>
+struct glz::meta<encke::Wireframe>
+{
+    using enum encke::Wireframe;
+    static constexpr auto value = enumerate("off", Off, "overlay", Overlay, "only", Only);
+};
+
+template<>
 struct glz::meta<encke::scenario::Shape>
 {
     using enum encke::scenario::Shape;

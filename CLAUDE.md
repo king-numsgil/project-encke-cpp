@@ -114,6 +114,7 @@ src/
     scene.{hpp,cpp}      the EnTT registry and active camera; builds the test planet and its floor
     components.hpp       Renderable and Light, the components the renderer reads
     extract.{hpp,cpp}    registry -> RenderList once a frame: the renderer's only view of it
+    debug_lines.{hpp,cpp} f64 world-space line segments for debug drawing; the LOD palette
     material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
     gltf.{hpp,cpp}       glTF -> CPU meshes, nodes, materials; image decoding, via fastgltf
     pixels.{hpp,cpp}     SDL3_image decode to RGBA8, from a file or bytes; asset paths
@@ -151,6 +152,7 @@ shaders/
   taa.slang              compute: temporal antialiasing resolve into the history
   exposure.slang         compute: luminance histogram, then metered and adapted EV100
   tonemap.slang          HDR -> swapchain, at the adapted exposure, CAS-sharpened with TAA on
+  debug_draw.slang       wireframe and debug lines over the swapchain, unjittered, depth-tested
   imgui.slang            ImGui draw lists; decodes sRGB vertex colour, optionally re-encodes
   lib/
     bindless.slang       the descriptor arrays; mirrors vulkan/bindless.hpp
@@ -321,6 +323,7 @@ The passes per frame, orchestrated in `render/renderer.cpp`, then the UI:
 | exposure | compute | luminance histogram of HDR, then one group meters and adapts EV100 |
 | debug views | compute | one visualisation image per open debug window; skipped when none is open |
 | tonemap | raster | full-screen triangle, exposure + ACES, AgX or PBR Neutral, into the sRGB swapchain |
+| debug draw | raster | when on: wireframe and debug lines over the swapchain, tested against the G-buffer's depth |
 | overlay | raster | caller-recorded UI, its own rendering scope on the UI view, `LOAD` |
 
 ### Debug views
@@ -350,6 +353,47 @@ Digit keys are ignored only while ImGui has a text field active
 (`WantTextInput`). `WantCaptureKeyboard` is the wrong test: with keyboard
 navigation on, it is true whenever an ImGui window has focus, which the first
 window gets on appearing, and it silently ate every digit key.
+
+### Debug drawing
+
+F4 cycles the wireframe (`Wireframe`: off, over the image, alone on a dark
+ground), F5 shows every collision shape, F6 the box of every terrain chunk
+drawn; the "Debug draw" window has the same controls, and a scenario sets
+them with `wireframe`, `collision` and `octree` (`scenarios/debug_draw.json`).
+
+- **One raster pass after tonemap, into the swapchain**, so what it draws
+  goes through none of TAA, exposure, the air or the tonemap curve: its
+  colours are display sRGB. It is skipped when nothing is on, and those
+  frames are byte-identical to before it existed. Its timestamp is written
+  every frame, like the debug views'.
+- **Depth-tested against the G-buffer's depth, never written.** Depth stays
+  in `READ_ONLY_OPTIMAL`, where compute already reads it, bound as a
+  read-only attachment; the barrier after the G-buffer names the fragment
+  tests as well as compute, and the next frame's entry waits on them.
+- **Unjittered.** Drawn after TAA's resolve, jittered vertices would crawl
+  half a pixel a frame, so both vertex stages take `Frame::taa.xy` back out,
+  and pull depth 0.4% toward the camera to win against the surface they lie
+  on. The depth they test against is jittered, so an edge can lose a
+  sub-pixel sliver at a silhouette.
+- **The wireframe is the G-buffer's own draws** (impostors aside, whose
+  mesh is a proxy) in `VK_POLYGON_MODE_LINE`, morphed by the same
+  `morph_vertex`, so the wires lie on the surface shown. `fillModeNonSolid`
+  is required at device selection. Terrain is coloured by LOD from its
+  voxel size, `2^n` metres taking palette entry `n mod 8`; everything else
+  is pale.
+- **Debug lines are f64 world-space segments** (`DebugLines`), refilled by
+  `App::collect_debug_lines` every frame after `Scene::update`, taken to
+  view space in f64 by `Renderer::upload` into a per-frame host buffer of
+  `gpu::DebugVertex`, and drawn as one line list pulled through
+  `Frame::debug`. At most `config::kMaxDebugLines`; past that the rest are
+  left out with a warning, once.
+- **Collision shapes come from Jolt's own triangulation**
+  (`Shape::GetTrianglesStart`, which needs no debug renderer), about each
+  body's centre of mass in f32 and placed in f64: orange ground chunks, red
+  held bodies, green awake, blue asleep. Boxes show their faces' diagonals,
+  spheres their facets.
+- **Octree boxes** are each drawn chunk's box in its body's frame, shrunk
+  1% so neighbours' edges stay apart, in the wireframe's LOD colours.
 
 The overlay is an interface (`Renderer::Overlay`) so the renderer never includes
 ImGui. It has two phases: `prepare(command, slot)` outside any rendering scope,

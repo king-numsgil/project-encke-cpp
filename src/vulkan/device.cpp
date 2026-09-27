@@ -136,6 +136,7 @@ namespace encke
         //  multiDrawIndirect, drawIndirectFirstInstance -- each pass is one
         //      indirect draw of many meshes, and firstInstance carries the
         //      object index to the shader.
+        //  fillModeNonSolid -- the debug wireframe draws triangles as lines.
         bool require_features(FeatureChain const& have, FeatureChain& want, char const*& missing)
         {
             bool ok = true;
@@ -160,6 +161,7 @@ namespace encke
             ENCKE_REQUIRE(core.features.samplerAnisotropy);
             ENCKE_REQUIRE(core.features.multiDrawIndirect);
             ENCKE_REQUIRE(core.features.drawIndirectFirstInstance);
+            ENCKE_REQUIRE(core.features.fillModeNonSolid);
 
             ENCKE_REQUIRE(v11.shaderDrawParameters);
 

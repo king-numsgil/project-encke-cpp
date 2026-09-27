@@ -228,6 +228,11 @@ namespace encke::terrain
         vector<NodeKey>    displayed() const;
         vector<MeshHandle> meshes() const;
 
+        // Every chunk on screen with surface drawn, with its body's entity
+        // and terrain: for the debug view.
+        void each_drawn(function<void(entt::entity body, BodyTerrain const& terrain, NodeKey const& key)> const& visit)
+            const;
+
         // How many bodies are drawn as their impostor: for tests.
         u32 impostors_shown() const;
 

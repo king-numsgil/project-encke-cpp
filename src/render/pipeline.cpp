@@ -184,7 +184,7 @@ namespace encke
             .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .pNext                  = nullptr,
             .flags                  = 0,
-            .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .topology               = config.topology,
             .primitiveRestartEnable = VK_FALSE,
         };
 
@@ -205,7 +205,7 @@ namespace encke
             .flags                   = 0,
             .depthClampEnable        = config.depth_clamp ? VK_TRUE : VK_FALSE,
             .rasterizerDiscardEnable = VK_FALSE,
-            .polygonMode             = VK_POLYGON_MODE_FILL,
+            .polygonMode             = config.polygon_mode,
             .cullMode                = config.cull_mode,
             // Facing is decided from the signed area in framebuffer
             // coordinates, i.e. after the viewport transform, and the

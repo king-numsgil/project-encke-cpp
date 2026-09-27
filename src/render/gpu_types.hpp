@@ -64,6 +64,18 @@ namespace encke::gpu
         // ~0 with none; y a surface map's face size in texels, z its
         // border (terrain/surface_map); w unused.
         u32vec4 terrain;
+
+        // x the DebugVertex buffer, two per line, or ~0 with none. yzw
+        // unused.
+        u32vec4 debug;
+    };
+
+    // One end of a debug line, in view space like everything else. The
+    // colour is sRGB bytes, red in the lowest.
+    struct DebugVertex
+    {
+        f32vec3 position;
+        u32     colour;
     };
 
     // One of the ground's materials, which the G-buffer blends by each
@@ -231,7 +243,8 @@ namespace encke::gpu
         u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 416);
+    static_assert(sizeof(Frame) == 432);
+    static_assert(sizeof(DebugVertex) == 16);
     static_assert(sizeof(TerrainMaterial) == 48);
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);

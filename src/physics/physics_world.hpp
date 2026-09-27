@@ -67,6 +67,21 @@ namespace encke::physics
         // Collision chunks built or building, surface or not.
         u32 collision_chunks() const;
 
+        // What a collision shape belongs to, for the debug view.
+        enum class ShapeKind
+        {
+            Ground,   // a terrain collision chunk
+            Held,     // a body waiting for its ground
+            Awake,
+            Asleep,
+        };
+
+        // Every body's collision shape as world-space triangles, three
+        // points each, one call per body. Shapes come from Jolt's own
+        // triangulation, so a sphere is a faceted one, and a box shows its
+        // faces' diagonals.
+        void collision_triangles(function<void(ShapeKind kind, span<f64vec3 const> triangles)> const& visit) const;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> impl_;

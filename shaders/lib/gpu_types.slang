@@ -35,7 +35,18 @@ public struct GpuFrame
     public float4x4 sky_reprojection; // view direction now -> last frame's clip, rotation only
     public float4   post;            // x CAS sharpness in tonemap, 0 skips it
     public uint4    terrain;         // x GpuTerrainMaterial buffer or ~0; y surface map face size, z border
+    public uint4    debug;           // x GpuDebugVertex buffer, two per line, or ~0 with none
 };
+
+// One end of a debug line: view-space position, colour as sRGB bytes, red
+// lowest. See DebugVertex in render/gpu_types.hpp.
+public struct GpuDebugVertex
+{
+    public float3 position;
+    public uint   colour;
+};
+
+public static const uint kDebugVertexStride = 16;
 
 // Gravel, rock, grass, snow, sand. See TerrainMaterial in render/gpu_types.hpp.
 public struct GpuTerrainMaterial
@@ -166,7 +177,7 @@ public struct Push
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 416;
+public static const uint kFrameStride      = 432;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
 public static const uint kObjectStride     = 384;

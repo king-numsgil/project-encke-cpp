@@ -2,6 +2,7 @@
 
 #include "assets/asset_manager.hpp"
 #include "render/config.hpp"
+#include "render/debug_lines.hpp"
 #include "render/extract.hpp"
 #include "render/geometry_pool.hpp"
 #include "render/gpu_types.hpp"
@@ -61,6 +62,18 @@ namespace encke
 
     inline constexpr u32 kTonemapCount = 3;
 
+    // The scene's triangle edges, drawn after tonemap: over the image, or
+    // alone on a dark ground. Hidden edges stay hidden either way, since
+    // they are tested against the G-buffer's depth.
+    enum class Wireframe : u32
+    {
+        Off     = 0,
+        Overlay = 1,
+        Only    = 2,
+    };
+
+    inline constexpr u32 kWireframeCount = 3;
+
     inline constexpr u32 kDebugWindowCount      = 4;
     inline constexpr u32 kFirstDebugWindowView  = 2;
 
@@ -76,7 +89,8 @@ namespace encke
     //   5. exposure   compute luminance histogram, then meter and adapt EV100
     //   6. debug      compute one visualisation image per open debug window
     //   7. tonemap    raster  HDR -> swapchain, at the adapted exposure
-    //   8. overlay    raster  caller-recorded UI, through the swapchain's UI view
+    //   8. debug draw raster  wireframe and debug lines, depth-tested, when on
+    //   9. overlay    raster  caller-recorded UI, through the swapchain's UI view
     class Renderer
     {
     public:
@@ -182,6 +196,14 @@ namespace encke
         // compare against, since off is what terrain looked like before.
         void set_geomorph(bool on) { geomorph_ = on; }
 
+        void      set_wireframe(Wireframe wireframe) { wireframe_ = wireframe; }
+        Wireframe wireframe() const { return wireframe_; }
+
+        // Lines to draw over the next frames, until changed; null or empty
+        // draws none. Read by draw(), so they must outlive it. Past
+        // config::kMaxDebugLines the rest are left out.
+        void set_debug_lines(DebugLines const* lines) { debug_lines_ = lines; }
+
         // Temporal antialiasing. Turning it on starts from an empty history.
         void set_taa(bool on)
         {
@@ -225,6 +247,7 @@ namespace encke
             Buffer shadow_matrices;
             Buffer atmosphere;   // gpu::Atmosphere
             Buffer terrain;      // gpu::TerrainMaterial, kTerrainMaterialCount
+            Buffer debug_lines;  // gpu::DebugVertex, two per line, kMaxDebugLines
 
             // VkDrawIndexedIndirectCommand: the G-buffer's at 0, then shadow
             // view v's at (1 + v) * kMaxObjects.
@@ -237,6 +260,7 @@ namespace encke
             u32 shadow_matrices_handle = BindlessSet::kInvalid;
             u32 atmosphere_handle      = BindlessSet::kInvalid;
             u32 terrain_handle         = BindlessSet::kInvalid;
+            u32 debug_lines_handle     = BindlessSet::kInvalid;
         };
 
         // A texture asset on the GPU, streamed in once and read-only after,
@@ -455,6 +479,8 @@ namespace encke
         GraphicsPipeline impostor_pipeline_;
         GraphicsPipeline shadow_pipeline_;
         GraphicsPipeline tonemap_pipeline_;
+        GraphicsPipeline wire_pipeline_;
+        GraphicsPipeline line_pipeline_;
         ComputePipeline  cluster_pipeline_;
         ComputePipeline  lighting_pipeline_;
         ComputePipeline  debug_pipeline_;
@@ -509,5 +535,12 @@ namespace encke
 
         u32       frame_      = 0;
         DebugView debug_view_ = DebugView::Lit;
+
+        // Debug drawing. upload() writes the lines' ends and counts them;
+        // record() draws them and the wireframe.
+        Wireframe         wireframe_       = Wireframe::Off;
+        DebugLines const* debug_lines_     = nullptr;
+        u32               debug_vertices_  = 0;
+        bool              debug_overflowed_ = false;   // warned once
     };
 }

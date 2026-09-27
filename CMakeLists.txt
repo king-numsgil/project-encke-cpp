@@ -182,6 +182,7 @@ add_library(encke_core OBJECT
     src/render/mesh.cpp
     src/render/pipeline.cpp
     src/render/pixels.cpp
+    src/render/debug_lines.cpp
     src/render/renderer.cpp
     src/render/scene.cpp
     src/render/shadows.cpp
@@ -302,6 +303,7 @@ encke_add_shader(ENCKE_SHADOW_DEPTH_SPV shaders/shadow_depth.slang)
 encke_add_shader(ENCKE_EXPOSURE_SPV shaders/exposure.slang)
 encke_add_shader(ENCKE_ATMOSPHERE_SPV shaders/atmosphere.slang)
 encke_add_shader(ENCKE_TAA_SPV shaders/taa.slang)
+encke_add_shader(ENCKE_DEBUG_DRAW_SPV shaders/debug_draw.slang)
 
 add_custom_target(encke_shaders DEPENDS
     "${ENCKE_GBUFFER_SPV}" "${ENCKE_CLUSTER_SPV}"
@@ -309,6 +311,7 @@ add_custom_target(encke_shaders DEPENDS
     "${ENCKE_DEBUG_VIEWS_SPV}" "${ENCKE_IMGUI_SPV}"
     "${ENCKE_SHADOW_DEPTH_SPV}" "${ENCKE_EXPOSURE_SPV}"
     "${ENCKE_ATMOSPHERE_SPV}" "${ENCKE_TAA_SPV}"
+    "${ENCKE_DEBUG_DRAW_SPV}"
 )
 add_dependencies(encke encke_shaders)
 

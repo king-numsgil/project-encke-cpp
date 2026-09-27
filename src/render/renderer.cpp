@@ -320,6 +320,14 @@ namespace encke
                 bindless_.add_storage_buffer(resources.atmosphere.handle(), resources.atmosphere.size());
             resources.terrain_handle =
                 bindless_.add_storage_buffer(resources.terrain.handle(), resources.terrain.size());
+
+            if (!resources.debug_lines.init_mapped(
+                    allocator, u64{config::kMaxDebugLines} * 2 * sizeof(gpu::DebugVertex), storage))
+            {
+                return false;
+            }
+            resources.debug_lines_handle =
+                bindless_.add_storage_buffer(resources.debug_lines.handle(), resources.debug_lines.size());
         }
 
         if (!create_shadow_maps())
@@ -463,8 +471,45 @@ namespace encke
         GraphicsPipeline::Config impostor_config = gbuffer_config;
         impostor_config.fragment_entry           = "impostor_main";
 
+        // Over the finished frame: tested against the G-buffer's depth,
+        // which neither writes.
+        GraphicsPipeline::Config const wire_config{
+            .spirv_name         = "debug_draw.spv",
+            .vertex_entry       = "wire_vertex",
+            .fragment_entry     = "wire_fragment",
+            .colour_formats     = span<VkFormat const>{&swapchain_format, 1},
+            .depth_format       = kDepthFormat,
+            .depth_write        = false,
+            .bindings           = kVertexBindings,
+            .attributes         = kShadowAttributes,
+            .cull_mode          = VK_CULL_MODE_BACK_BIT,
+            .polygon_mode       = VK_POLYGON_MODE_LINE,
+            .alpha_blend        = false,
+            .set_layout         = bindless_.layout(),
+            .push_constant_size = sizeof(gpu::Push),
+        };
+
+        GraphicsPipeline::Config const line_config{
+            .spirv_name         = "debug_draw.spv",
+            .vertex_entry       = "line_vertex",
+            .fragment_entry     = "line_fragment",
+            .colour_formats     = span<VkFormat const>{&swapchain_format, 1},
+            .depth_format       = kDepthFormat,
+            .depth_write        = false,
+            // Ends pulled from the frame's DebugVertex buffer.
+            .bindings           = {},
+            .attributes         = {},
+            .cull_mode          = VK_CULL_MODE_NONE,
+            .topology           = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+            .alpha_blend        = false,
+            .set_layout         = bindless_.layout(),
+            .push_constant_size = sizeof(gpu::Push),
+        };
+
         if (!gbuffer_pipeline_.init(device, gbuffer_config) ||
             !impostor_pipeline_.init(device, impostor_config) ||
+            !wire_pipeline_.init(device, wire_config) ||
+            !line_pipeline_.init(device, line_config) ||
             !shadow_pipeline_.init(device, shadow_config) ||
             !tonemap_pipeline_.init(device, tonemap_config) ||
             !cluster_pipeline_.init(device, cluster_config) ||
@@ -1217,6 +1262,37 @@ namespace encke
             terrain_handle = resources.terrain_handle;
         }
 
+        // Debug lines, each end through the view in f64 before it narrows.
+        debug_vertices_   = 0;
+        u32 debug_handle = BindlessSet::kInvalid;
+        if (debug_lines_ != nullptr && !debug_lines_->empty())
+        {
+            span<DebugLines::Line const> lines = debug_lines_->lines();
+            if (lines.size() > config::kMaxDebugLines)
+            {
+                if (!debug_overflowed_)
+                {
+                    log::warn("renderer: %zu debug lines, past the %u a frame holds; the rest are left out",
+                              lines.size(), config::kMaxDebugLines);
+                    debug_overflowed_ = true;
+                }
+                lines = lines.first(config::kMaxDebugLines);
+            }
+
+            auto* const out = static_cast<gpu::DebugVertex*>(resources.debug_lines.mapped());
+            auto const  end = [&](f64vec3 const& p, u32 colour) {
+                return gpu::DebugVertex{.position = f32vec3{f64vec3{view * f64vec4{p, 1.0}}}, .colour = colour};
+            };
+            for (size_t index = 0; index < lines.size(); ++index)
+            {
+                gpu::DebugVertex const ends[2]{end(lines[index].a, lines[index].colour),
+                                               end(lines[index].b, lines[index].colour)};
+                std::memcpy(&out[2 * index], ends, sizeof(ends));
+            }
+            debug_vertices_ = static_cast<u32>(2 * lines.size());
+            debug_handle    = resources.debug_lines_handle;
+        }
+
         gpu::Frame const frame{
             .projection    = f32mat4{jittered},
             .screen        = f32vec4{static_cast<f32>(extent.width), static_cast<f32>(extent.height),
@@ -1256,6 +1332,7 @@ namespace encke
             .sky_reprojection = f32mat4{sky_reprojection},
             .post             = f32vec4{taa_ ? config::kCasSharpness : 0.0f, 0.0f, 0.0f, 0.0f},
             .terrain          = u32vec4{terrain_handle, config::kSurfaceMapFace, config::kSurfaceMapBorder, 0u},
+            .debug            = u32vec4{debug_handle, 0u, 0u, 0u},
         };
         std::memcpy(resources.frame.mapped(), &frame, sizeof(frame));
 
@@ -1590,8 +1667,9 @@ namespace encke
             entry[4] = {hdr_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, 0, kWrite, kWriteAccess};
+            // Depth was also tested against by last frame's debug draw.
             entry[5] = {depth_.handle(), VK_IMAGE_LAYOUT_UNDEFINED,
-                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kCompute, 0, kDepthTests,
+                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kCompute | kDepthTests, 0, kDepthTests,
                         kDepthWrite, VK_IMAGE_ASPECT_DEPTH_BIT};
             size_t count = 6;
 
@@ -1735,8 +1813,12 @@ namespace encke
             reads[4] = {hdr_.handle(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_IMAGE_LAYOUT_GENERAL, kWrite, kWriteAccess, kCompute,
                         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT};
+            // The debug draw after tonemap tests against it too, read-only.
             reads[5] = {depth_.handle(), VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, kReadOnly,
-                        kDepthStored, kDepthWrite, kCompute, kSampled, VK_IMAGE_ASPECT_DEPTH_BIT};
+                        kDepthStored, kDepthWrite,
+                        kCompute | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        kSampled | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT, VK_IMAGE_ASPECT_DEPTH_BIT};
             size_t count = 6;
 
             for (u32 index = 0; index < shadow_view_count; ++index)
@@ -2111,6 +2193,73 @@ namespace encke
 
         timestamps_.mark(command, "tonemap");
 
+        // -- 10b. debug draw -------------------------------------------------
+        // Over what tonemap stored, or over a dark ground for the wireframe
+        // alone; depth-tested against the G-buffer's depth, read-only in
+        // READ_ONLY_OPTIMAL, where compute already reads it. Marked every
+        // frame, like the debug views, so the stats keep their history.
+        if (wireframe_ != Wireframe::Off || debug_vertices_ > 0)
+        {
+            constexpr VkPipelineStageFlags2 kOutput = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+            Transition const reload[]{
+                {swapchain.image(image_index), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, kOutput,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, kOutput,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT},
+            };
+            barrier(command, reload);
+
+            // Dark blue-grey, linear: the wires read against it where the
+            // sky would be.
+            VkRenderingAttachmentInfo colour =
+                colour_attachment(swapchain.view(image_index), {{0.004f, 0.005f, 0.008f, 1.0f}});
+            colour.loadOp = wireframe_ == Wireframe::Only ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+            VkRenderingAttachmentInfo depth = depth_attachment(depth_.view());
+            depth.imageLayout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+            depth.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+            depth.storeOp     = VK_ATTACHMENT_STORE_OP_NONE;
+
+            VkRenderingInfo const rendering{
+                .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                .pNext                = nullptr,
+                .flags                = 0,
+                .renderArea           = {.offset = {0, 0}, .extent = extent},
+                .layerCount           = 1,
+                .viewMask             = 0,
+                .colorAttachmentCount = 1,
+                .pColorAttachments    = &colour,
+                .pDepthAttachment     = &depth,
+                .pStencilAttachment   = nullptr,
+            };
+
+            vkCmdBeginRendering(command, &rendering);
+            set_viewport(command, extent);
+
+            // The G-buffer's own draws, impostors left out: their mesh is a
+            // proxy sphere, not the surface they trace.
+            if (wireframe_ != Wireframe::Off && gbuffer_draws_ > 0)
+            {
+                geometry_.bind(command);
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, wire_pipeline_.handle());
+                vkCmdPushConstants(command, wire_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0, sizeof(push), &push);
+                vkCmdDrawIndexedIndirect(command, resources.draws.handle(), 0, gbuffer_draws_,
+                                         static_cast<u32>(kDrawStride));
+            }
+
+            if (debug_vertices_ > 0)
+            {
+                vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, line_pipeline_.handle());
+                vkCmdPushConstants(command, line_pipeline_.layout(), VK_SHADER_STAGE_ALL, 0, sizeof(push), &push);
+                vkCmdDraw(command, debug_vertices_, 1, 0, 0);
+            }
+
+            vkCmdEndRendering(command);
+        }
+
+        timestamps_.mark(command, "debug draw");
+
         // -- 11. overlay -----------------------------------------------------
         // A separate rendering scope because it may write through a different
         // view: UNORM over the same sRGB image, so the UI can blend in the
@@ -2452,6 +2601,8 @@ namespace encke
         impostor_pipeline_.shutdown();
         shadow_pipeline_.shutdown();
         tonemap_pipeline_.shutdown();
+        wire_pipeline_.shutdown();
+        line_pipeline_.shutdown();
         cluster_pipeline_.shutdown();
         lighting_pipeline_.shutdown();
         debug_pipeline_.shutdown();
@@ -2499,6 +2650,7 @@ namespace encke
             resources.shadow_matrices.shutdown();
             resources.atmosphere.shutdown();
             resources.terrain.shutdown();
+            resources.debug_lines.shutdown();
         }
 
         for (Image& map : shadow_maps_)

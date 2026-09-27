@@ -24,6 +24,11 @@ namespace encke::config
     inline constexpr u32 kMaxObjects = 4096;
     inline constexpr u32 kMaxLights  = 1024;
 
+    // Debug lines a frame draws, 32 bytes each in a host-mapped buffer per
+    // frame in flight. A few dozen LOD 1 collision chunks, triangle by
+    // triangle, take a few hundred thousand.
+    inline constexpr u32 kMaxDebugLines = 1u << 19;
+
     // -- terrain -------------------------------------------------------------------
     // An implicit octree per body (terrain/planet). LOD n's voxels are
     // 0.25 m * 2^n and its chunks 32 voxels on an edge; the finest LOD is the

@@ -683,6 +683,59 @@ namespace encke::physics
         return impl_ ? static_cast<u32>(impl_->chunks.size()) : 0;
     }
 
+    void PhysicsWorld::collision_triangles(
+        function<void(ShapeKind kind, span<f64vec3 const> triangles)> const& visit) const
+    {
+        if (!impl_)
+        {
+            return;
+        }
+
+        JPH::BodyIDVector ids;
+        impl_->system->GetBodies(ids);
+
+        JPH::BodyLockInterfaceNoLock const& locks = impl_->system->GetBodyLockInterfaceNoLock();
+        vector<f64vec3>                     points;
+        for (JPH::BodyID const id : ids)
+        {
+            JPH::BodyLockRead lock{locks, id};
+            if (!lock.Succeeded())
+            {
+                continue;
+            }
+            JPH::Body const& body = lock.GetBody();
+
+            ShapeKind const kind = body.IsStatic()           ? ShapeKind::Ground
+                                   : !body.IsInBroadPhase() ? ShapeKind::Held
+                                   : body.IsActive()        ? ShapeKind::Awake
+                                                            : ShapeKind::Asleep;
+
+            // Triangulated about the centre of mass at the origin, in f32,
+            // then placed in f64: a chunk's corner is millions of metres out.
+            f64vec3 const centre = from_jolt(body.GetCenterOfMassPosition());
+            points.clear();
+
+            JPH::Shape::GetTrianglesContext context;
+            body.GetShape()->GetTrianglesStart(context, JPH::AABox::sBiggest(), JPH::Vec3::sZero(),
+                                               body.GetRotation(), JPH::Vec3::sReplicate(1.0f));
+            constexpr int         kBatch = 256;
+            array<JPH::Float3, 3 * kBatch> batch{};
+            for (;;)
+            {
+                int const count = body.GetShape()->GetTrianglesNext(context, kBatch, batch.data());
+                if (count <= 0)
+                {
+                    break;
+                }
+                for (size_t index = 0; index < static_cast<size_t>(3 * count); ++index)
+                {
+                    points.push_back(centre + f64vec3{batch[index].x, batch[index].y, batch[index].z});
+                }
+            }
+            visit(kind, points);
+        }
+    }
+
     u32 PhysicsWorld::awake() const
     {
         return impl_ ? impl_->system->GetNumActiveBodies(JPH::EBodyType::RigidBody) : 0;

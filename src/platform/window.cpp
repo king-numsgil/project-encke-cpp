@@ -166,6 +166,18 @@ namespace encke
                 {
                     events.copy_camera = true;
                 }
+                else if (event.key.key == SDLK_F4 && !event.key.repeat)
+                {
+                    events.cycle_wireframe = true;
+                }
+                else if (event.key.key == SDLK_F5 && !event.key.repeat)
+                {
+                    events.toggle_collision = true;
+                }
+                else if (event.key.key == SDLK_F6 && !event.key.repeat)
+                {
+                    events.toggle_octree = true;
+                }
                 else if (event.key.key == SDLK_T && !event.key.repeat)
                 {
                     events.cycle_tonemap = true;

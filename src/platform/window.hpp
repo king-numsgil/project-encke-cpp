@@ -24,6 +24,12 @@ namespace encke
         // F3 pressed this frame: copy the camera's pose.
         bool copy_camera = false;
 
+        // F4: step the wireframe (off, over the image, alone). F5: show or
+        // hide collision shapes. F6: show or hide the octree's chunks.
+        bool cycle_wireframe  = false;
+        bool toggle_collision = false;
+        bool toggle_octree    = false;
+
         // T pressed this frame: step to the next tonemap curve.
         bool cycle_tonemap = false;
 

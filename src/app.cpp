@@ -87,6 +87,32 @@ namespace encke
             return "unknown";
         }
 
+        char const* wireframe_name(Wireframe wireframe)
+        {
+            switch (wireframe)
+            {
+            case Wireframe::Off:     return "off";
+            case Wireframe::Overlay: return "over the image";
+            case Wireframe::Only:    return "alone";
+            }
+            return "unknown";
+        }
+
+        // Collision shapes by what they belong to: ground chunks, bodies
+        // waiting for their ground, awake bodies, sleeping ones.
+        u32 collision_colour(physics::PhysicsWorld::ShapeKind kind)
+        {
+            using Kind = physics::PhysicsWorld::ShapeKind;
+            switch (kind)
+            {
+            case Kind::Ground: return rgb(f32vec3{1.0f, 0.55f, 0.1f});
+            case Kind::Held:   return rgb(f32vec3{1.0f, 0.15f, 0.15f});
+            case Kind::Awake:  return rgb(f32vec3{0.3f, 1.0f, 0.3f});
+            case Kind::Asleep: return rgb(f32vec3{0.3f, 0.6f, 1.0f});
+            }
+            return rgb(f32vec3{1.0f});
+        }
+
         f64vec3 to_vec(array<f64, 3> const& a)
         {
             return f64vec3{a[0], a[1], a[2]};
@@ -348,6 +374,24 @@ namespace encke
             });
             renderer_.set_taa(taa_);
 
+            ImGui::SetNextWindowPos(ImVec2{10.0f, 460.0f}, ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Debug draw", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+            {
+                auto wireframe = static_cast<int>(renderer_.wireframe());
+                ImGui::TextUnformatted("Wireframe (F4)");
+                ImGui::RadioButton("off", &wireframe, static_cast<int>(Wireframe::Off));
+                ImGui::SameLine();
+                ImGui::RadioButton("overlay", &wireframe, static_cast<int>(Wireframe::Overlay));
+                ImGui::SameLine();
+                ImGui::RadioButton("only", &wireframe, static_cast<int>(Wireframe::Only));
+                renderer_.set_wireframe(static_cast<Wireframe>(wireframe));
+
+                ImGui::Checkbox("Collision shapes (F5)", &show_collision_);
+                ImGui::Checkbox("Octree chunks (F6)", &show_octree_);
+                ImGui::Text("%zu lines", debug_lines_.lines().size());
+            }
+            ImGui::End();
+
             for (u32 index = 0; index < kDebugWindowCount; ++index)
             {
                 auto const window = static_cast<DebugWindow>(index);
@@ -451,6 +495,56 @@ namespace encke
             fixed_time_ = settings.time;
             log::info("animation pinned to t=%.3f s", *fixed_time_);
         }
+        if (settings.wireframe.has_value())
+        {
+            renderer_.set_wireframe(*settings.wireframe);
+            log::info("wireframe: %s", wireframe_name(*settings.wireframe));
+        }
+        if (settings.collision.has_value())
+        {
+            show_collision_ = *settings.collision;
+        }
+        if (settings.octree.has_value())
+        {
+            show_octree_ = *settings.octree;
+        }
+    }
+
+    void App::collect_debug_lines()
+    {
+        debug_lines_.clear();
+
+        if (show_collision_)
+        {
+            physics_.collision_triangles(
+                [this](physics::PhysicsWorld::ShapeKind kind, span<f64vec3 const> triangles) {
+                    u32 const colour = collision_colour(kind);
+                    for (size_t index = 0; index + 2 < triangles.size(); index += 3)
+                    {
+                        debug_lines_.triangle(triangles[index], triangles[index + 1], triangles[index + 2], colour);
+                    }
+                });
+        }
+
+        // Each chunk's box in its body's frame, coloured by LOD like the
+        // wireframe. Shrunk a little, so neighbours' edges stay apart.
+        if (show_octree_)
+        {
+            terrain_.each_drawn([this](entt::entity body, terrain::BodyTerrain const& terrain,
+                                       terrain::NodeKey const& key) {
+                WorldTransform const* const world = scene_.registry.try_get<WorldTransform>(body);
+                if (world == nullptr)
+                {
+                    return;
+                }
+                f64 const     edge   = terrain.voxel_size(key.lod) * static_cast<f64>(terrain::ChunkRequest{}.cells);
+                f64vec3 const centre = f64vec3{key.origin} * terrain.base_voxel_size + edge * 0.5;
+                debug_lines_.box(world->position + world->rotation * centre, world->rotation,
+                                 f64vec3{edge * 0.5 * 0.99}, lod_colour(terrain.voxel_size(key.lod)));
+            });
+        }
+
+        renderer_.set_debug_lines(&debug_lines_);
     }
 
     void App::spawn(scenario::Spawn const& spawn)
@@ -779,6 +873,22 @@ namespace encke
                 log::info("camera:\n%s", text.c_str());
             }
 
+            if (events.cycle_wireframe && !scripted)
+            {
+                auto const next = static_cast<Wireframe>((static_cast<u32>(renderer_.wireframe()) + 1u) %
+                                                         kWireframeCount);
+                renderer_.set_wireframe(next);
+                log::info("wireframe: %s", wireframe_name(next));
+            }
+            if (events.toggle_collision && !scripted)
+            {
+                show_collision_ = !show_collision_;
+            }
+            if (events.toggle_octree && !scripted)
+            {
+                show_octree_ = !show_octree_;
+            }
+
             if (events.cycle_tonemap && !ui_.wants_text() && !scripted)
             {
                 auto const next = static_cast<Tonemap>(
@@ -870,6 +980,10 @@ namespace encke
             scene_.update(seconds, assets_);
 
             draw_ui();
+
+            // After the UI, whose checkboxes may have changed what is shown,
+            // and from the world transforms the update just composed.
+            collect_debug_lines();
 
             // With animation pinned, exposure jumps straight to the metered
             // value, so two runs' captures match however long each took to

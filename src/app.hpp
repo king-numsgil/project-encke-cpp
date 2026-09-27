@@ -76,6 +76,10 @@ namespace encke
 
         void draw_ui();
 
+        // Refills debug_lines_ with what the toggles below show, from this
+        // frame's world transforms, and hands them to the renderer.
+        void collect_debug_lines();
+
         // A digit key, 0-based: a shading mode, or a debug window toggle.
         void on_debug_key(u32 key);
 
@@ -158,6 +162,12 @@ namespace encke
 
         // Temporal antialiasing, toggled in the stats window.
         bool taa_ = true;
+
+        // Debug drawing: collision shapes (F5) and the octree's chunks (F6);
+        // the wireframe (F4) is the renderer's. Rebuilt every frame.
+        bool       show_collision_ = false;
+        bool       show_octree_    = false;
+        DebugLines debug_lines_;
 
         // Wall-clock stamp of the previous completed frame, for frame time.
         optional<std::chrono::steady_clock::time_point> last_frame_;

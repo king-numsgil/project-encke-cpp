@@ -29,6 +29,12 @@ namespace encke::scenario
         // unless this says otherwise.
         optional<f64>     time;
 
+        // Debug drawing, over the frame after tonemap: the wireframe, every
+        // collision shape, and the box of every terrain chunk drawn.
+        optional<Wireframe> wireframe;
+        optional<bool>      collision;
+        optional<bool>      octree;
+
         // Startup only; refused in a `set` step. The UI draws through the
         // sRGB swapchain view as a GPU without the mutable-format extension
         // would.

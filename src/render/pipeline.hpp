@@ -34,6 +34,12 @@ namespace encke
 
             VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
 
+            VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            // LINE draws triangles as their edges, for the wireframe; it
+            // needs fillModeNonSolid, which device selection requires.
+            VkPolygonMode polygon_mode = VK_POLYGON_MODE_FILL;
+
             // Clamp depth to the viewport range instead of clipping at the
             // near and far planes. Shadow cascades use it so casters between
             // the sun and the cascade's near plane still cast.

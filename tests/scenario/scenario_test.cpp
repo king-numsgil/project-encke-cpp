@@ -20,7 +20,7 @@ namespace encke::scenario
                 { "op": "camera", "position": [1, 2, 3], "target": [4, 5, 6] },
                 { "op": "fly", "velocity": [0, 0, -200], "frames": 120 },
                 { "op": "wait", "frames": 4 },
-                { "op": "set", "taa": false, "shading": "brute_force" },
+                { "op": "set", "taa": false, "shading": "brute_force", "wireframe": "only", "octree": true },
                 { "op": "thaw_terrain" },
                 { "op": "interactive" }
             ]
@@ -52,6 +52,9 @@ namespace encke::scenario
         Settings const& set = std::get<Settings>(scenario->steps[7]);
         CHECK(set.taa == false);
         CHECK(set.shading == DebugView::BruteForce);
+        CHECK(set.wireframe == Wireframe::Only);
+        CHECK(set.octree == true);
+        CHECK_FALSE(set.collision.has_value());
 
         CHECK(op_name(scenario->steps[8]) == "thaw_terrain");
         CHECK(std::holds_alternative<Interactive>(scenario->steps[9]));
@@ -82,6 +85,7 @@ namespace encke::scenario
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "teleport" }] })", "test"));
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "wait", "frame": 3 }] })", "test"));
         CHECK_FALSE(parse(R"({ "settings": { "tonemap": "filmic" } })", "test"));
+        CHECK_FALSE(parse(R"({ "settings": { "wireframe": "on" } })", "test"));
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "capture", "file": "/tmp/x.png" }] })", "test"));
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "set", "srgb_ui": true }] })", "test"));
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "set", "collision_lod": 0 }] })", "test"));

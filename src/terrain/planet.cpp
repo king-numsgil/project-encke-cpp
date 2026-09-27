@@ -1308,6 +1308,21 @@ namespace encke::terrain
         return keys;
     }
 
+    void TerrainOctree::each_drawn(
+        function<void(entt::entity body, BodyTerrain const& terrain, NodeKey const& key)> const& visit) const
+    {
+        for (std::shared_ptr<Body> const& body : bodies_)
+        {
+            for (auto const& [key, node] : body->nodes)
+            {
+                if (node.displayed && node.entity != entt::null)
+                {
+                    visit(body->entity, *body->terrain, key);
+                }
+            }
+        }
+    }
+
     vector<MeshHandle> TerrainOctree::meshes() const
     {
         vector<MeshHandle> handles;

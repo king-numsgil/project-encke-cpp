@@ -1,0 +1,28 @@
+// Debug drawing over the start view: the wireframe over the image and
+// alone, then the octree's chunks from above the floor, then a dozen crates
+// dropped on the floor with every collision shape shown, ground chunks
+// included, and the drawn wireframe beside them to compare.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "settle" },
+        { "op": "set", "wireframe": "overlay" },
+        { "op": "capture", "file": "wire_overlay.png" },
+        { "op": "set", "wireframe": "only" },
+        { "op": "capture", "file": "wire_only.png" },
+
+        { "op": "set", "wireframe": "off", "octree": true },
+        { "op": "camera", "position": [0, 120, 90], "target": [0, 0, 0] },
+        { "op": "settle" },
+        { "op": "capture", "file": "octree.png" },
+
+        { "op": "set", "octree": false, "collision": true },
+        { "op": "spawn", "shape": "box", "position": [8, 4, 10], "count": [3, 2, 2],
+          "spacing": [1.2, 1.2, 1.2], "size": [0.5, 0.5, 0.5], "tilt": 25 },
+        { "op": "camera", "position": [4, 2.5, 5], "target": [8, 0.3, 10] },
+        { "op": "settle" },
+        { "op": "capture", "file": "collision.png" },
+        { "op": "set", "wireframe": "overlay" },
+        { "op": "capture", "file": "collision_wire.png" }
+    ]
+}
