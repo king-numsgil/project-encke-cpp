@@ -1,0 +1,20 @@
+// Three dozen crates dropped onto the knoll beside the object field, onto
+// the terrain's collision mesh at config::kCollisionLod, settled, and seen
+// from the side, close to the ground, where a mismatch between the LOD
+// drawn and the LOD collided with shows as hovering or sinking.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "settle" },
+        { "op": "spawn", "shape": "box", "position": [8, 6, 10], "count": [4, 3, 3],
+          "spacing": [1.2, 1.2, 1.2], "size": [0.5, 0.5, 0.5], "tilt": 25 },
+        { "op": "camera", "position": [2, 2.5, 3], "target": [8, 0.5, 10] },
+        { "op": "settle" },
+        { "op": "capture", "file": "crates.png" },
+
+        { "op": "camera", "position": [5.5, 0.6, 7.5], "target": [8, 0.3, 10] },
+        { "op": "settle" },
+        { "op": "capture", "file": "crates_ground.png" },
+        { "op": "interactive" }
+    ]
+}

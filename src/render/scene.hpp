@@ -106,6 +106,12 @@ namespace encke
         // so it is set for daylight.
         f32 ev100 = 14.0f;
 
+        // The procedural unit meshes and a crate's material, for what is
+        // spawned after the scene is built.
+        MeshHandle     cube_mesh;
+        MeshHandle     sphere_mesh;
+        MaterialHandle crate_material;
+
     private:
         // A mesh at `position` from the pole, flat material.
         entt::entity add(MeshHandle mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,

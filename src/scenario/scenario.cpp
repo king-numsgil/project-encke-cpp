@@ -34,11 +34,19 @@ struct glz::meta<encke::DebugWindow>
 };
 
 template<>
+struct glz::meta<encke::scenario::Shape>
+{
+    using enum encke::scenario::Shape;
+    static constexpr auto value = enumerate("box", Box, "sphere", Sphere);
+};
+
+template<>
 struct glz::meta<encke::scenario::Step>
 {
     static constexpr std::string_view tag = "op";
     static constexpr auto ids = std::array{"settle", "capture", "camera", "fly", "wait",
-                                           "freeze_terrain", "thaw_terrain", "interactive", "set"};
+                                           "freeze_terrain", "thaw_terrain", "interactive", "set",
+                                           "spawn"};
 };
 
 namespace encke::scenario
@@ -70,12 +78,15 @@ namespace encke::scenario
                 }
                 else if (Settings const* const settings = std::get_if<Settings>(&step))
                 {
-                    if (settings->srgb_ui.has_value())
+                    for (auto const& [name, set] : {std::pair{"srgb_ui", settings->srgb_ui.has_value()},
+                                                    std::pair{"collision_lod", settings->collision_lod.has_value()}})
                     {
-                        log::error("%.*s: step %zu: srgb_ui is chosen at startup; set it in "
-                                   "\"settings\"",
-                                   static_cast<int>(source.size()), source.data(), index);
-                        ok = false;
+                        if (set)
+                        {
+                            log::error("%.*s: step %zu: %s is chosen at startup; set it in \"settings\"",
+                                       static_cast<int>(source.size()), source.data(), index, name);
+                            ok = false;
+                        }
                     }
                 }
             }

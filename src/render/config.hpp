@@ -59,6 +59,28 @@ namespace encke::config
     // which no root node would split, and hands back at that distance.
     inline constexpr f64 kImpostorHysteresis = 1.25;
 
+    // -- physics ----------------------------------------------------------------------
+    // Steps a second, fixed whatever the frame rate.
+    inline constexpr f64 kPhysicsHz = 60.0;
+
+    // Most steps one frame may take to catch up with the wall clock; past it
+    // the simulation falls behind rather than spiralling.
+    inline constexpr u32 kPhysicsMaxSteps = 4;
+
+    // The terrain LOD bodies collide with: 0.5 m voxels, 16 m chunks. The
+    // ground drawn around the camera is LOD 0, whose octaves under 1 m this
+    // leaves out, so a resting body can sink or hover by the centimetres they
+    // add. LOD 2 left out those under 2 m and visibly buried crates' edges.
+    inline constexpr u32 kCollisionLod = 1;
+
+    // The ground around a moving body is built this far past its bound, so
+    // it is there before the body reaches it. Every body keeps what lies
+    // within twice this.
+    inline constexpr f64 kCollisionMargin = 8.0;
+
+    // A collision chunk no body has kept for this many steps is freed.
+    inline constexpr u64 kCollisionKeepSteps = 300;
+
     // -- material textures ---------------------------------------------------------
     // Capped further by the device's maxSamplerAnisotropy.
     inline constexpr f32 kMaxAnisotropy = 16.0f;

@@ -182,18 +182,31 @@ namespace encke
         pool_.start(workers, "terrain");
         log::info("worker pool: %u threads", pool_.size());
 
+        // Physics takes the logical processors the physical cores leave: the
+        // hyperthreads beside the terrain workers and this thread. Jolt's
+        // step is mostly pointer chasing and branches, which shares a core
+        // with the terrain's SIMD better than more SIMD would.
+        u32 const collision_lod = scenario_.has_value()
+                                      ? scenario_->settings.collision_lod.value_or(config::kCollisionLod)
+                                      : config::kCollisionLod;
+        physics_.init(cpu.logical_processors > cpu.physical_cores
+                          ? cpu.logical_processors - cpu.physical_cores
+                          : 0u,
+                      collision_lod);
+
         log::info("scene: %zu entities, %zu renderables, %zu lights",
                   scene_.registry.view<Transform>().size(),
                   scene_.registry.view<Renderable>().size(), scene_.registry.view<Light>().size());
 
         // A scenario's baseline, before its own settings: animation pinned so
-        // runs match, no overlay since its numbers change every frame, and no
-        // limiter since nobody is watching at a steady rate.
+        // runs match, and no overlay since its numbers change every frame.
+        // The limiter stays on: physics and flying advance one 60 Hz step a
+        // frame so runs match, which is real time only at 60 fps. A scenario
+        // nobody watches can turn it off and run faster to the same images.
         if (scenario_.has_value())
         {
-            fixed_time_   = 0.0;
-            show_ui_      = false;
-            limit_frames_ = false;
+            fixed_time_ = 0.0;
+            show_ui_    = false;
             apply_settings(scenario_->settings);
         }
         renderer_.set_taa(taa_);
@@ -439,6 +452,56 @@ namespace encke
         }
     }
 
+    void App::spawn(scenario::Spawn const& spawn)
+    {
+        f64vec3 const count{static_cast<f64>(spawn.count[0]), static_cast<f64>(spawn.count[1]),
+                            static_cast<f64>(spawn.count[2])};
+        f64vec3 const spacing = to_vec(spawn.spacing);
+        f64vec3 const first   = to_vec(spawn.position) - (count - 1.0) * spacing * 0.5;
+        f64vec3 const size    = spawn.shape == scenario::Shape::Sphere ? f64vec3{spawn.size[0]}
+                                                                        : to_vec(spawn.size);
+        f64 const     tilt    = spawn.tilt * 3.14159265358979323846 / 180.0;
+
+        u32 index = 0;
+        for (u32 z = 0; z < spawn.count[2]; ++z)
+        {
+            for (u32 y = 0; y < spawn.count[1]; ++y)
+            {
+                for (u32 x = 0; x < spawn.count[0]; ++x, ++index)
+                {
+                    // An axis that turns with the index, the same every run.
+                    f64 const     turn = static_cast<f64>(index);
+                    f64vec3 const axis = glm::normalize(f64vec3{std::sin(turn * 1.3), 1.0, std::cos(turn * 0.7)});
+
+                    entt::entity const entity = scene_.registry.create();
+                    scene_.registry.emplace<Transform>(
+                        entity, Transform{
+                                    .position = scene_.origin() + first + f64vec3{x, y, z} * spacing,
+                                    .rotation = glm::angleAxis(tilt, axis),
+                                    .scale    = f32vec3{size},
+                                });
+                    scene_.registry.emplace<Renderable>(
+                        entity, Renderable{
+                                    .mesh     = spawn.shape == scenario::Shape::Sphere ? scene_.sphere_mesh
+                                                                                       : scene_.cube_mesh,
+                                    .material  = scene_.crate_material,
+                                    .roughness = 1.0f,
+                                    .metallic  = 1.0f,   // the map's, which is none
+                                });
+                    if (spawn.shape == scenario::Shape::Sphere)
+                    {
+                        physics_.add_sphere(scene_.registry, entity);
+                    }
+                    else
+                    {
+                        physics_.add_box(scene_.registry, entity);
+                    }
+                }
+            }
+        }
+        log::info("physics: %u bodies spawned, %u in all", index, physics_.bodies());
+    }
+
     App::StepResult App::run_step(scenario::Step const& step)
     {
         return std::visit(
@@ -451,7 +514,7 @@ namespace encke
                     // camera wants, so it never goes idle; the assets still
                     // must.
                     bool const idle = (terrain_.frozen() || terrain_.idle()) && assets_.idle() &&
-                                      renderer_.streaming_idle();
+                                      renderer_.streaming_idle() && physics_.idle();
                     if (step_frames_ >= s.min_frames && idle)
                     {
                         return StepResult::Done;
@@ -506,6 +569,11 @@ namespace encke
                 }
                 else if constexpr (std::is_same_v<S, scenario::Interactive>)
                 {
+                    return StepResult::Done;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Spawn>)
+                {
+                    spawn(s);
                     return StepResult::Done;
                 }
                 else
@@ -793,6 +861,10 @@ namespace encke
             // camera's world transform from the last update, a frame behind.
             pool_.drain();
             terrain_.update(scene_, assets_, pool_);
+            // After the drain, which adds finished collision chunks; before
+            // Scene::update, which composes the Transforms it writes. A
+            // scenario steps once a frame, so its runs match.
+            physics_.update(scene_.registry, pool_, delta, scripted);
             renderer_.set_terrain_palette(terrain_.palette());
             scene_.update(seconds, assets_);
 

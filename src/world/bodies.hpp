@@ -30,6 +30,10 @@ namespace encke
 
         f32vec3 ground_albedo{0.0f};   // linear
         f32     sky_fill = 0.0f;
+
+        // m/s^2 at `radius`; the inverse square of the distance from the
+        // centre beyond it. Zero pulls nothing.
+        f64 surface_gravity = 0.0;
     };
 
     // Beside a Body: air over it, scattering and absorbing starlight, after

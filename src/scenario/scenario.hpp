@@ -29,14 +29,19 @@ namespace encke::scenario
         // unless this says otherwise.
         optional<f64>     time;
 
-        // Startup only; ignored in a `set` step. The UI draws through the
+        // Startup only; refused in a `set` step. The UI draws through the
         // sRGB swapchain view as a GPU without the mutable-format extension
         // would.
         optional<bool> srgb_ui;
+
+        // Startup only: the terrain LOD rigid bodies collide with, in place
+        // of config::kCollisionLod.
+        optional<u32> collision_lod;
     };
 
     // Waits until nothing is streaming: the terrain shows the leaves the
-    // camera wants (unless frozen), and every asset has landed. At least
+    // camera wants (unless frozen), every asset has landed, and every rigid
+    // body is in the simulation and asleep. At least
     // `min_frames` frames pass first, since a camera move reaches the octree
     // a frame late. Fails the scenario after `timeout_frames`.
     struct Settle
@@ -76,6 +81,29 @@ namespace encke::scenario
         u32 frames = 1;
     };
 
+    enum class Shape
+    {
+        Box,
+        Sphere,
+    };
+
+    // Dynamic bodies, a grid of `count` of them `spacing` metres apart,
+    // centred on `position`, metres from the test scene's origin. A box is
+    // `size` metres; a sphere's diameter is size's x. Each is turned by
+    // `tilt` degrees about an axis that differs from body to body, the same
+    // on every run, so they do not land flat. They wait in the air until the
+    // ground under them is built, then fall; `settle` waits for them to
+    // sleep.
+    struct Spawn
+    {
+        Shape         shape = Shape::Box;
+        array<f64, 3> position{};
+        array<f64, 3> size{{0.5, 0.5, 0.5}};
+        array<u32, 3> count{{1, 1, 1}};
+        array<f64, 3> spacing{{1.0, 1.0, 1.0}};
+        f64           tilt = 0.0;
+    };
+
     // Frozen, the octree selects and swaps nothing: what is on screen stays
     // while the camera moves, for looking at seams from where it did not
     // choose its chunks.
@@ -87,7 +115,7 @@ namespace encke::scenario
     struct Interactive {};
 
     using Step = std::variant<Settle, Capture, Camera, Fly, Wait, FreezeTerrain, ThawTerrain,
-                              Interactive, Settings>;
+                              Interactive, Settings, Spawn>;
 
     struct Scenario
     {

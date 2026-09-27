@@ -5,6 +5,7 @@
 
 #include "assets/asset_manager.hpp"
 #include "platform/window.hpp"
+#include "physics/physics_world.hpp"
 #include "platform/worker_pool.hpp"
 #include "render/config.hpp"
 #include "render/fly_camera.hpp"
@@ -60,6 +61,9 @@ namespace encke
         // be captured.
         bool tick_scenario();
         StepResult run_step(scenario::Step const& step);
+
+        // Rigid bodies, drawn with the scene's cube or sphere and crate.
+        void spawn(scenario::Spawn const& spawn);
 
         // After a frame the scenario asked to capture has been drawn.
         void finish_capture();
@@ -128,6 +132,10 @@ namespace encke
             .map_lod      = config::kSurfaceMapLod,
             .impostor_hysteresis = config::kImpostorHysteresis,
         }};
+
+        // Before the pool, so the pool's workers, whose collision jobs use
+        // its samplers, stop first.
+        physics::PhysicsWorld physics_;
 
         // Last, so its threads stop before anything above goes: completions
         // reach the scene and the assets, and jobs the builder's state.

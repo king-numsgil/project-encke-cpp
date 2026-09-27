@@ -238,6 +238,9 @@ namespace encke
         }
 
         Materials const materials = load_materials(assets);
+        cube_mesh      = cube;
+        sphere_mesh    = sphere;
+        crate_material = materials.planks;
 
         ev100 = 14.0f;
 
@@ -283,8 +286,9 @@ namespace encke
             registry.emplace<Body>(earth, Body{
                                               .radius        = kEarthRadius,
                                               .centre        = f64vec3{0.0},
-                                              .ground_albedo = f32vec3{0.25f},
-                                              .sky_fill      = 0.1f,
+                                              .ground_albedo   = f32vec3{0.25f},
+                                              .sky_fill        = 0.1f,
+                                              .surface_gravity = 9.81,
                                           });
             registry.emplace<terrain::PlanetTerrain>(earth, terrain::PlanetTerrain{.terrain = std::move(terrain)});
             registry.emplace<Atmosphere>(earth);
@@ -302,8 +306,9 @@ namespace encke
             registry.emplace<Body>(moon, Body{
                                              .radius        = kMoonRadius,
                                              .centre        = f64vec3{0.0},
-                                             .ground_albedo = srgb_to_linear(regolith),
-                                             .sky_fill      = 0.1f,
+                                             .ground_albedo   = srgb_to_linear(regolith),
+                                             .sky_fill        = 0.1f,
+                                             .surface_gravity = 1.62,
                                          });
         }
 

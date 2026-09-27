@@ -123,6 +123,9 @@ src/
     gpu_types.hpp        structs shared with the shaders
     pipeline.{hpp,cpp}   graphics and compute pipeline construction
     renderer.{hpp,cpp}   the passes, barriers, per-frame upload
+  physics/
+    components.hpp       RigidBody: a Jolt body's id and its last two poses
+    physics_world.{hpp,cpp} Jolt at a fixed 60 Hz, gravity per body, terrain collision chunks, kept and freed
   scenario/
     scenario.{hpp,cpp}   a scenario file's settings and steps, read with glaze; App runs them
   terrain/
@@ -485,11 +488,14 @@ How to work with them:
 
 What they do:
 
-- **A scenario pins animation at t = 0** (a `time` setting moves it), hides
-  the overlay, whose numbers change every frame, and turns the frame limiter
-  off, before its own settings apply. The spinning showpiece animates on
-  the clock, so without the pin a comparison across runs compares its
-  rotation. Exposure jumps straight to the metered value every frame.
+- **A scenario pins animation at t = 0** (a `time` setting moves it) and
+  hides the overlay, whose numbers change every frame, before its own
+  settings apply. The spinning showpiece animates on the clock, so without
+  the pin a comparison across runs compares its rotation. The frame
+  limiter stays on: physics and `fly` advance one 60 Hz step a frame, which
+  is real time only at 60 fps. With it off, a release build ran the crates
+  several times too fast. `"frame_limit": false` runs a scenario nobody
+  watches faster, to the same images. Exposure jumps straight to the metered value every frame.
 - **The keyboard and mouse change nothing while a scenario runs**, F3
   aside: the machine is shared, and a stray key would change a capture.
 - **Steps run one after another within a frame until one has to wait**,
@@ -499,19 +505,25 @@ What they do:
 - **`settle` is what makes captures reproducible.** It waits at least
   `min_frames` (10: a camera move reaches the octree a frame late), then
   until the octree shows the leaves the camera wants, every asset has
-  landed and streaming is idle. Frozen, the octree is not checked, since it
+  landed, streaming is idle and every rigid body is simulated and asleep. Frozen, the octree is not checked, since it
   will not chase the camera. It fails after `timeout_frames`.
 - **`capture` does not settle.** It discards TAA's history and captures
   `config::kTaaJitterCount` frames later, one jitter cycle, so the history
   is the same on every run. Put a `settle` before it.
 - **`fly` moves at a fixed 60 steps a second** with the octree live, so
   what has swapped by its end depends on timing and those runs differ.
+- **`spawn` drops a grid of dynamic boxes or spheres**, each tilted by a
+  per-index axis, the same on every run; `scenarios/boxes.json` drops
+  three dozen crates.
+- **Physics steps once per frame under a scenario**, whatever the frame
+  took, so a run's simulation is the same however fast it ran.
 - **`interactive` ends the scenario and hands the engine to the user**,
   the way to start somewhere without capturing.
 - **Settings are `optional` fields**, absent meaning unchanged; `set` takes
-  the same fields as `settings`. `srgb_ui` is startup-only and refused in a
-  `set`: the UI draws through the sRGB swapchain view and blends in linear
-  space, as a GPU without the mutable-format extension would.
+  the same fields as `settings`. Two are startup-only and refused in a
+  `set`: `srgb_ui`, where the UI draws through the sRGB swapchain view and
+  blends in linear space, as a GPU without the mutable-format extension
+  would; and `collision_lod`, the terrain LOD rigid bodies collide with.
 - **Mistakes stop the run before a window opens**: an unknown op, a
   misspelt field, an enum name that does not exist, an absolute capture
   path. glaze reports the line and column with a caret under it.
@@ -1549,6 +1561,85 @@ Known gaps:
 - An impostor waits for its textures to land before it draws. The octree
   switches once the bake is done, and they land in the same frame unless
   the upload budget is full, which would leave a frame with neither.
+
+## Physics — built, first draft
+
+`physics::PhysicsWorld` runs Jolt (see *Dependencies* for how it is
+built): one `PhysicsSystem` for the scene, a fixed `config::kPhysicsHz`
+(60) steps a second, positions in f64 world space end to end. An entity
+with a `RigidBody` is a root whose `Transform` the world writes after
+every step, interpolated between the last two steps by how far the wall
+clock is between them; under a scenario it steps exactly once a frame and
+draws the latest step. `update` runs after the pool's drain and before
+`Scene::update`.
+
+- **Gravity is each body's own.** The system's gravity is zero; before
+  every step each awake body gets a force toward the centre of the `Body`
+  whose surface is nearest, `Body::surface_gravity` at the radius and
+  inverse square beyond. Nothing assumes a world up, the same rule as the
+  camera.
+- **The ground is the terrain at `config::kCollisionLod`** (1: 0.5 m
+  voxels, 16 m chunks): collision chunks meshed on the worker pool by the
+  same sampler and Surface Nets as the drawn chunks, without morph targets
+  or skirts, as Jolt `MeshShape`s on static bodies. They are built around
+  each held or awake body, its bound plus `kCollisionMargin`, on the grid
+  of that LOD, independent of the camera, as a server's would be.
+  Compared at a user's pose on 2026-09-26: LOD 2 buried crates' edges in
+  the drawn ground, LOD 1 and 0 sat them on it. The `collision_lod`
+  scenario setting overrides it for comparisons.
+- **Chunks no body keeps are freed.** Every body, asleep or not, keeps
+  the chunks within its bound plus twice the margin, so one resting at a
+  chunk's edge does not make the chunks past it come and go; a chunk
+  nobody has kept for `kCollisionKeepSteps` (300, five seconds) is
+  removed, in grid order like additions. `physics_world_test` drops a box
+  from 60 m and checks it lands, that the chunks it fell past are freed,
+  and that a second drop matches the first to the bit.
+- **Bodies are swept** (`EMotionQuality::LinearCast`). Tested only where
+  each step ends, a body moving more than half its size in a step passes
+  a one-sided terrain triangle between two steps: the 60 m box went
+  straight through the ground, its centre 0.38 m above the surface one
+  step and 0.16 m below it the next. The 6 m crates were slow enough not
+  to show it.
+- **Nothing falls through ground on its way.** A new body is held out of
+  the simulation until the chunks around it are built, and while any chunk
+  a moving body needs is still building, the world does not step at all.
+- **Deterministic, verified:** `boxes.json` twice, byte-identical, with
+  Jolt on four threads. It needs the same calls in the same order, body
+  creation included, and chunks come back from the pool in whatever order
+  they finish; so a built chunk becomes a body only once every chunk asked
+  for is back, and then all of them in grid order (`Impl::add_built`). The
+  first run without that differed.
+- **Threads:** Jolt's own `JobSystemThreadPool`, `logical - physical`
+  threads (4 here), named `physicsN`, plus the main thread, which runs
+  jobs while it waits on a step. They are the hyperthreads beside the
+  terrain workers and the main thread; Jolt's step is mostly pointer
+  chasing and branches, which shares a core with the terrain's SIMD better
+  than more SIMD would. With no SMT the main thread steps alone. On hybrid
+  CPUs the formula gives the P-core count, untested.
+- **Jolt allocates through mimalloc** when it is on (`JPH::Allocate` and
+  friends). The hooks must be set before anything of Jolt's exists, the
+  broad-phase tables included, which is why `PhysicsWorld::init` builds
+  its `Impl` after setting them: built in the constructor, the first run
+  crashed in `BroadPhaseLayerInterfaceTable`.
+
+Known gaps:
+
+- The scene's own objects are not colliders: crates fall through the
+  masts, pillars and lamp posts.
+- LOD 1 collision still lacks the octaves under 1 m that the drawn LOD 0
+  ground has; a resting body can sink or hover by the centimetres they add.
+  Not yet checked on the mountain belts' steeper rock, where those octaves
+  are larger.
+- Every dynamic body is swept, whether it moves fast or not. Cheap for
+  dozens of bodies; for thousands, sweep only the fast or the small.
+- **Scenario and live stepping differ on purpose.** Live, wall-clock time
+  goes into an accumulator and Jolt always takes fixed 1/60 s steps; a
+  variable step would break determinism and the solver's stability. Under
+  a scenario it is one step a frame, so frame N is the same simulated
+  instant on every run, and a capture of bodies in motion matches.
+- No stats-window row for the physics threads, and no step timing.
+- A body needing new ground halts the whole world while it builds, which
+  shows as a hitch in a live run.
 
 ## Camera control
 

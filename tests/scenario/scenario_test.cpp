@@ -57,6 +57,24 @@ namespace encke::scenario
         CHECK(std::holds_alternative<Interactive>(scenario->steps[9]));
     }
 
+    TEST_CASE("a spawn step reads its grid and shape", "[scenario]")
+    {
+        optional<Scenario> const scenario = parse(R"({ "steps": [
+            { "op": "spawn", "shape": "sphere", "position": [0, 6, 0], "count": [4, 2, 3], "tilt": 20 },
+            { "op": "spawn" }
+        ] })", "test");
+        REQUIRE(scenario.has_value());
+
+        Spawn const& spheres = std::get<Spawn>(scenario->steps[0]);
+        CHECK(spheres.shape == Shape::Sphere);
+        CHECK(spheres.count == array<u32, 3>{{4, 2, 3}});
+        CHECK(spheres.tilt == 20.0);
+        CHECK(spheres.size == Spawn{}.size);
+
+        CHECK(std::get<Spawn>(scenario->steps[1]).shape == Shape::Box);
+        CHECK_FALSE(parse(R"({ "steps": [{ "op": "spawn", "shape": "cone" }] })", "test"));
+    }
+
     TEST_CASE("a scenario with a mistake in it is refused", "[scenario]")
     {
         // An unknown op, a misspelt field, a bad enum name, a path out of the
@@ -66,6 +84,8 @@ namespace encke::scenario
         CHECK_FALSE(parse(R"({ "settings": { "tonemap": "filmic" } })", "test"));
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "capture", "file": "/tmp/x.png" }] })", "test"));
         CHECK_FALSE(parse(R"({ "steps": [{ "op": "set", "srgb_ui": true }] })", "test"));
+        CHECK_FALSE(parse(R"({ "steps": [{ "op": "set", "collision_lod": 0 }] })", "test"));
+        CHECK(parse(R"({ "settings": { "collision_lod": 0 } })", "test"));
     }
 
     TEST_CASE("a step written out reads back as the same step", "[scenario]")

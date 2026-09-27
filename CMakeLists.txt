@@ -166,6 +166,8 @@ add_library(encke_core OBJECT
     src/core/memory.cpp
     src/core/sanitizers.cpp
 
+    src/physics/physics_world.cpp
+
     src/platform/cpu.cpp
     src/platform/thread.cpp
     src/platform/window.cpp
@@ -462,6 +464,7 @@ include(Catch)
 add_executable(encke_tests
     tests/core/json_test.cpp
     tests/physics/jolt_test.cpp
+    tests/physics/physics_world_test.cpp
     tests/render/camera_test.cpp
     tests/scenario/scenario_test.cpp
     tests/terrain/detail_noise_test.cpp
@@ -480,6 +483,7 @@ add_executable(encke_tests
 # the library; its maths is inline in headers, so every source that includes
 # Jolt needs the same flag or clang fuses its multiply-adds here.
 set_source_files_properties(
+    src/physics/physics_world.cpp
     tests/physics/jolt_test.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>"
 )
