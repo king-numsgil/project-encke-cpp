@@ -56,10 +56,11 @@ be visible in this repository's code or history, so ask rather than infer intent
 
 `encke` is a Vulkan renderer with a working clustered deferred pipeline: shadow
 maps, a G-buffer pass, compute light clustering, compute lighting and a tonemap
-pass. The test scene is the north pole of an Earth-sized planet, strewn with
-boxes and spheres, lit by a real-magnitude Sun low on the horizon (four shadow
-cascades), shadowed spot lights on masts and a ring of point lamps, with the
-Moon overhead at its real distance. The Earth is procedural terrain, meshed
+pass. The test scene is a floor flattened into the ground of an Earth-sized
+planet, 930 km from its north pole, strewn with boxes and spheres, lit by a
+real-magnitude Sun low on the horizon (four shadow cascades), shadowed spot
+lights on masts and a ring of point lamps, with a quarter Moon in the sky at
+its real distance. The Earth is procedural terrain, meshed
 with Surface Nets on a worker pool in an implicit octree that follows the
 camera, geomorphed between LODs so they meet, under a physically based
 atmosphere that holds from the ground to orbit. The other built-in
@@ -110,7 +111,7 @@ src/
   render/
     camera.{hpp,cpp}     f64 camera, infinite reversed-Z projection
     fly_camera.{hpp,cpp} right-mouse fly control: mouse look, WASD, speed on the wheel
-    scene.{hpp,cpp}      the EnTT registry and active camera; builds the test planet
+    scene.{hpp,cpp}      the EnTT registry and active camera; builds the test planet and its floor
     components.hpp       Renderable and Light, the components the renderer reads
     extract.{hpp,cpp}    registry -> RenderList once a frame: the renderer's only view of it
     material.{hpp,cpp}   an ambientCG set's colour, normal and packed ORM, via SDL3_image
@@ -133,6 +134,7 @@ src/
     detail_noise.{hpp,cpp} lattice-split Perlin fBm octaves, f64 origin + f32 offsets
     macro_field.{hpp,cpp}  FastNoise2 graphs per channel on a body-fixed lattice, trilinear
     terrain_field.{hpp,cpp} BodyTerrain and TerrainSampler: chunk and point queries
+    modifiers.{hpp,cpp}  edits to a body's field, applied where it is composed: Flatten, a level floor
     surface_nets.{hpp,cpp}  a chunk's samples -> vertices and quads, under the ownership rule
     ground.{hpp,cpp}     the five ground sets and the climate rule that weighs them, for chunks and maps
     surface_map.{hpp,cpp} a body's look from far off, baked: a cube atlas of albedo, normal, roughness, height
@@ -529,9 +531,12 @@ What they do:
   path. glaze reports the line and column with a caret under it.
 - **Two runs of a scenario are byte-identical.** Verified at introduction:
   `pole.json` twice, and clustered against brute force.
-- The table pose in `pole.json`, carried over from the helmet pose the
-  environment variables used, predates grounding: it looks up at the helmet
-  from under the table.
+- **Scenario positions are in the test scene's frame**: `camera`, `fly`
+  and `spawn` are metres from the middle of the floor with +Y its up, and
+  F3 writes poses the same way. Moving the scene moves every scenario
+  with it.
+- **Do not run a scenario ending in `interactive` unattended**: it never
+  quits (`boxes.json` is one).
 
 ### Parameters, and why these
 
@@ -891,26 +896,35 @@ Known gaps:
 `Scene::build_test_planet`: the Earth is a terrain body
 (`terrain::example_planet`) whose entity is a radius below `kWorldOrigin`,
 at its centre, so `kWorldOrigin` is the pole of the sphere; see *The Earth as
-terrain* for the meshing. The object field does not stand there. The
-terrain's height puts the ground under the pole somewhere else -- 72 m above
-the sphere with seed 1337, logged at startup with the pole's climate -- so
-`origin()` is moved onto it. It is cold grassland and gravel there, on a
-knoll the start pose looks across. The ground is
-found by `terrain::GroundProbe`, which marches and bisects the point query at
-the octree's finest LOD, the LOD drawn around the camera there; Surface Nets
-at 0.25 m voxels sits within centimetres of it. The ground is not level: the
-detail octaves make it hilly. So every object is also stood on the ground
-under it (`Scene::grounded`, through the probe, kept for it):
-alone, by the lowest ground under its footprint's corners, so no edge floats;
-in an assembly (colonnade, gateway, table and helmet, stacked crates), by the
-lowest ground under its supports, one offset for every part, so it stays in
-one piece and its high side sinks a few centimetres. Objects stay upright
-rather than tilting with the ground. A scenario's `camera` step is
-relative to the moved origin; the Moon and the Earth's entity are placed from
-`kWorldOrigin`.
+terrain* for the meshing. The object field stands on a site 930 km from the
+pole, 81.6 degrees north, in a valley of sand and gravel: `kSiteEye` and
+`kSiteHeading`, an F3 pose, are where the start camera stands and faces.
 
-The Moon is a sphere of its real radius at its real distance straight up. It
-is a few pixels across, as it should be; look straight up to find it.
+- **The scene has a frame**: `origin()` is the middle of the floor, 16 m
+  ahead of the start camera, and `rotation()` takes +Y to the ground's
+  radial up there, turned so the old start pose lands on the site's.
+  Everything is authored in that frame as it was at the pole; `add`, the
+  lights' parents, the helmet, the camera and `Spin::base` carry the
+  rotation.
+- **The floor is a `terrain::Flatten`** (see *Terrain modifiers*), 64 m
+  across its level part and blended over 48 more, at the mean height of
+  the ground under it, found by `terrain::GroundProbe` on the unedited
+  terrain. The site is on a slope, so it cuts up to 35 m into the uphill
+  side; the scene logs that, and the field's steepest gradient in the
+  blend beside the terrain's own there (the same, about 2.3, the LOD 0
+  gap under *Geomorph and seams*).
+- Objects are still stood on the ground under them (`Scene::grounded`,
+  through the probe on the edited terrain), which on the floor lifts them
+  by nothing; alone by the lowest ground under the footprint's corners, in
+  an assembly by the lowest under its supports.
+
+The Sun's direction is fixed to the Earth, 12 degrees north of the
+equator, and stands 20 degrees up over the floor. The Moon is a sphere of
+its real radius at its real distance, placed astronomically from the Sun
+(`moon_direction`): the Sun's declination gives its ecliptic longitude, and
+the Moon is 90 degrees east of it along the ecliptic, at first quarter, and
+5.145 degrees north of it, its orbit's inclination. That puts it 23 degrees
+up, a few pixels across and half lit; it is in the start view, top right.
 
 ## Textures
 
@@ -1277,8 +1291,8 @@ and a grid corner (`NodeKey`), and its children are found by arithmetic.
   *Ground materials*. UVs are described under *Textures*.
 - **Captures** wait for `TerrainOctree::idle()`, every body showing exactly
   its leaves, as well as asset streaming. The camera must not move.
-- The test scene's object field stands on the ground below the pole; see
-  *The test planet*.
+- The test scene's object field stands on a floor flattened into the
+  ground; see *The test planet*.
 
 ### Geomorph and seams
 
@@ -1419,6 +1433,34 @@ Node Editor would, so an authored graph can replace any of them.
   mesh vertices. They only perturb what latitude and altitude set; see
   *Ground materials*.
 
+### Terrain modifiers
+
+`terrain/modifiers` holds edits to a body's field, in
+`BodyTerrain::modifiers`. They are applied in `TerrainSampler::combine`'s
+`compose`, the one place the field is formed, in f64 before it narrows, so
+every consumer sees them: chunks and their coarse snapshots at every LOD,
+point queries, `certainly_empty`, the cull, collision chunks and the ground
+probe. The surface map does not: it is baked from the macro layer, and an
+edit metres across is under its kilometre texels.
+
+- **An edit is a pure function of a sample's f64 position and its unedited
+  value**, which keeps chunk samples bit-exact across chunks. Each combine
+  keeps only the edits whose bound reaches its points' box; one left out
+  would have changed the value by exactly nothing (its weight is exactly 0
+  past the bound), so which box a point is sampled in cannot matter.
+  `modifiers_test` compares a chunk with each of its points sampled alone.
+- **`Flatten`** is the first: a level floor. Within `radius` of the axis
+  through `centre` along `up`, the field is the height above the plane, so
+  the surface is the plane whatever the terrain did, cutting and filling
+  both; over `blend` further it eases back to the terrain with a
+  smoothstep. Mixing two heights keeps the field a height field, so the
+  blend is a ramp between terrain and floor. It holds `reach` above and
+  below the plane and eases out past that, or the column would run through
+  the planet and out the far side as a pillar.
+- **The blend steepens the field** by up to 1.5 times the height
+  difference over `blend`, and the cull and the probe trust a gradient
+  under 2. Keep `blend` several times the largest cut or fill.
+
 ### Ground materials
 
 Terrain chunks blend five ambientCG sets, `TerrainPalette` in
@@ -1467,7 +1509,7 @@ grass (Grass004), snow (Snow010A), sand (Ground093C).
   `gpu::TerrainMaterial`), each material resolved as an object's is: its
   maps once all have landed, its flat colour until then. `morph_masks.z` is
   the terrain object's flags: 1 morphs, 2 blends the palette.
-- The scene logs the climate channels at the pole on startup, for tuning.
+- The scene logs the climate channels at the floor on startup, for tuning.
 
 Known gaps:
 
@@ -1677,11 +1719,9 @@ present -- most of a frame -- and made movement slow and violently uneven.
   (`surroundings_at`). Flying to the Moon switches to its up and its
   regolith; it switches, rather than blends, halfway.
 - **A scenario's `camera` step takes an optional `up`**, defaulting to the
-  test scene's +Y. A look-at needs one: keeping the camera's previous up
-  instead turned its starting pitch into roll.
-- The test scene's own placements are still authored as translations from
-  the pole, which only works because the pole's normal is world +Y; the SDF
-  scenes will replace it.
+  test scene's +Y, which is the floor's up, not the world's. A look-at
+  needs one: keeping the camera's previous up instead turned its starting
+  pitch into roll.
 
 ## CPU-written buffers are host-coherent, required
 

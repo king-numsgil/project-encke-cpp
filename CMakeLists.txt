@@ -192,6 +192,7 @@ add_library(encke_core OBJECT
     src/terrain/detail_noise.cpp
     src/terrain/ground.cpp
     src/terrain/macro_field.cpp
+    src/terrain/modifiers.cpp
     src/terrain/planet.cpp
     src/terrain/surface_map.cpp
     src/terrain/surface_nets.cpp
@@ -228,6 +229,7 @@ target_link_libraries(encke PRIVATE encke_core)
 set_source_files_properties(
     src/terrain/detail_noise.cpp
     src/terrain/macro_field.cpp
+    src/terrain/modifiers.cpp
     src/terrain/surface_nets.cpp
     src/terrain/terrain_field.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>"
@@ -469,6 +471,7 @@ add_executable(encke_tests
     tests/scenario/scenario_test.cpp
     tests/terrain/detail_noise_test.cpp
     tests/terrain/fastnoise_allocator_test.cpp
+    tests/terrain/modifiers_test.cpp
     tests/terrain/octree_test.cpp
     tests/terrain/perlin_reference.cpp
     tests/terrain/planet_test.cpp

@@ -23,13 +23,14 @@ namespace encke
         class GroundProbe;
     }
 
-    // Turns an entity about `axis`, in its parent's frame, at `rate` rad/s.
-    // It replaces the Transform's rotation outright: the angle is rate times
-    // the scene clock, from no rotation at zero.
+    // Turns an entity about `axis`, in the frame `base` turns its parent's
+    // into, at `rate` rad/s. It replaces the Transform's rotation outright:
+    // the angle is rate times the scene clock, from `base` at zero.
     struct Spin
     {
         f64     rate = 0.0;
         f64vec3 axis{0.0, 1.0, 0.0};
+        f64quat base{1.0, 0.0, 0.0, 0.0};
     };
 
     // On a model's root entity until the model is Ready and its nodes have
@@ -56,13 +57,14 @@ namespace encke
     class Scene
     {
     public:
-        // An Earth-sized planet whose north pole is the floor, strewn with
-        // boxes, spheres and pillars, lit by a Sun low on the horizon and a
-        // handful of spot and point lights, with the Moon overhead at its real
-        // distance, and the glTF sample helmet on a table. Places the camera
-        // at the edge of the field. Built far from the world origin on
-        // purpose, so any regression in camera-relative rendering shows up as
-        // visible jitter.
+        // An Earth-sized planet with a level floor cut and filled into its
+        // ground 930 km from the north pole, strewn with boxes, spheres and
+        // pillars, lit by a Sun low on the horizon and a handful of spot and
+        // point lights, with a quarter Moon in the sky at its real distance,
+        // and the glTF sample helmet on a table. Places the camera at the
+        // edge of the field. Built far from the world origin on purpose, so
+        // any regression in camera-relative rendering shows up as visible
+        // jitter.
         //
         // Asks `assets` for the meshes and materials it uses; they stream in
         // while it draws. The Earth is a terrain::PlanetTerrain body for
@@ -84,10 +86,13 @@ namespace encke
         // WorldTransform. Read world transforms after this.
         void update(f64 seconds, AssetManager const& assets);
 
-        // World position the scene is laid out around: the terrain below the
-        // test planet's pole. Objects are also stood on the ground under
-        // their own positions, so y = 0 here is the ground only at the origin.
+        // The frame the scene is laid out in: its origin, in the world, is the
+        // middle of the floor, and its rotation takes +Y to the floor's up.
+        // Objects are also stood on the ground under their own positions,
+        // which matters only past the floor's edge.
         f64vec3 origin() const { return origin_; }
+        f64quat rotation() const { return rotation_; }
+        f64vec3 to_world(f64vec3 const& local) const { return origin_ + rotation_ * local; }
 
         // Every object, light, camera, star and body is an entity: a
         // Transform, plus a Renderable or a Light (render/components.hpp), a
@@ -113,7 +118,7 @@ namespace encke
         MaterialHandle crate_material;
 
     private:
-        // A mesh at `position` from the pole, flat material.
+        // A mesh at `position` in the scene's frame, flat material.
         entt::entity add(MeshHandle mesh, f64vec3 position, f64vec3 scale, f32vec3 albedo_srgb,
                          f32 roughness, f32 metallic, f32vec3 emissive = f32vec3{0.0f});
 
@@ -124,8 +129,8 @@ namespace encke
         // The nodes of `model` under `root`, as `spawn` asks.
         void instantiate(entt::entity root, Model const& model, ModelSpawn const& spawn);
 
-        // `position`, from the pole, raised or lowered so what was on the
-        // level ground at y = 0 stands on the terrain mesh under its x and z,
+        // `position`, in the scene's frame, raised or lowered so what was on
+        // the level ground at y = 0 stands on the terrain mesh under its x and z,
         // or by assembly_lift_ while one is being built. Unchanged where
         // there is no mesh to stand on.
         f64vec3 grounded(f64vec3 const& position) const;
@@ -145,11 +150,12 @@ namespace encke
                                Light const& light);
 
         f64vec3 origin_{0.0};
+        f64quat rotation_{1.0, 0.0, 0.0, 0.0};
 
-        // The Earth's ground at the finest LOD, and the point on it below the
-        // pole, in the Earth's frame: what grounded() stands things on.
+        // The Earth's ground at the finest LOD, and the middle of the floor,
+        // in the Earth's frame: what grounded() stands things on.
         std::shared_ptr<terrain::GroundProbe const> ground_;
-        f64vec3                                     ground_pole_{0.0};
+        f64vec3                                     ground_origin_{0.0};
         optional<f64>                               assembly_lift_;
     };
 }

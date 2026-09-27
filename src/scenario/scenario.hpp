@@ -58,8 +58,9 @@ namespace encke::scenario
         string file;
     };
 
-    // Places the camera at `position` looking at `target`, metres from the
-    // test scene's origin, its up toward `up`.
+    // Places the camera at `position` looking at `target`, its up toward
+    // `up`, all in the test scene's frame: metres from its origin, +Y away
+    // from the ground there.
     struct Camera
     {
         array<f64, 3> position{};
@@ -67,7 +68,8 @@ namespace encke::scenario
         array<f64, 3> up{{0.0, 1.0, 0.0}};
     };
 
-    // Moves the camera by `velocity`, metres per second, at a fixed 60 steps
+    // Moves the camera by `velocity`, metres per second in the test scene's
+    // frame, at a fixed 60 steps
     // a second for `frames` frames. The octree stays live unless frozen, so
     // what has swapped by the end depends on timing.
     struct Fly
@@ -88,7 +90,7 @@ namespace encke::scenario
     };
 
     // Dynamic bodies, a grid of `count` of them `spacing` metres apart,
-    // centred on `position`, metres from the test scene's origin. A box is
+    // centred on `position`, in the test scene's frame. A box is
     // `size` metres; a sphere's diameter is size's x. Each is turned by
     // `tilt` degrees about an axis that differs from body to body, the same
     // on every run, so they do not land flat. They wait in the air until the

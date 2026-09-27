@@ -2,6 +2,7 @@
 
 #include "terrain/detail_noise.hpp"
 #include "terrain/macro_field.hpp"
+#include "terrain/modifiers.hpp"
 
 #include <cmath>
 
@@ -12,7 +13,7 @@ namespace encke::terrain
     //
     // The field is a signed height distance: |p| - radius - height(p), where
     // height is the macro height plus the detail fBm scaled by the macro
-    // amplitude. Negative inside.
+    // amplitude, then edited by the modifiers. Negative inside.
     struct BodyTerrain
     {
         f64        radius = 0.0;
@@ -22,6 +23,10 @@ namespace encke::terrain
         f64        base_voxel_size = 0.25;
         DetailSpec detail{};
         MacroSpec  macro{};
+        // Stay within the ground's own height range, which height_bound
+        // assumes. The surface map is baked from the macro layer and does not
+        // show them: they are metres across, its texels kilometres.
+        Modifiers  modifiers{};
 
         f64 voxel_size(u32 lod) const { return std::ldexp(base_voxel_size, static_cast<int>(lod)); }
     };
@@ -232,5 +237,8 @@ namespace encke::terrain
         vector<f32> partial_;
         vector<f32> coarse_grid_;
         vector<f32> ring_;
+
+        // The flattens that can reach the points of the current combine().
+        vector<Flatten const*> flattens_;
     };
 }

@@ -384,18 +384,19 @@ namespace encke
         // The test scene's camera is a root, so its local transform is its
         // world one.
         Transform& camera = scene_.registry.get<Transform>(scene_.camera);
-        camera.position   = scene_.origin() + eye;
-        fly_.aim(camera, target - eye, up);
+        camera.position   = scene_.to_world(eye);
+        fly_.aim(camera, scene_.rotation() * (target - eye), scene_.rotation() * up);
     }
 
     scenario::Camera App::camera_step() const
     {
-        // A root, so its local transform is its world one; the scene's frame
-        // is the world's moved to the origin. The target is 10 m ahead.
+        // A root, so its local transform is its world one, taken into the
+        // scene's frame. The target is 10 m ahead.
         Transform const& camera = scene_.registry.get<Transform>(scene_.camera);
-        f64vec3 const    eye    = camera.position - scene_.origin();
-        f64vec3 const    target = eye + forward(camera.rotation) * 10.0;
-        f64vec3 const    up     = camera.rotation * f64vec3{0.0, 1.0, 0.0};
+        f64quat const    into   = glm::inverse(scene_.rotation());
+        f64vec3 const    eye    = into * (camera.position - scene_.origin());
+        f64vec3 const    target = eye + into * forward(camera.rotation) * 10.0;
+        f64vec3 const    up     = into * (camera.rotation * f64vec3{0.0, 1.0, 0.0});
 
         return scenario::Camera{.position = rounded(eye, 4.0), .target = rounded(target, 4.0),
                                 .up = rounded(up, 6.0)};
@@ -476,8 +477,8 @@ namespace encke
                     entt::entity const entity = scene_.registry.create();
                     scene_.registry.emplace<Transform>(
                         entity, Transform{
-                                    .position = scene_.origin() + first + f64vec3{x, y, z} * spacing,
-                                    .rotation = glm::angleAxis(tilt, axis),
+                                    .position = scene_.to_world(first + f64vec3{x, y, z} * spacing),
+                                    .rotation = scene_.rotation() * glm::angleAxis(tilt, axis),
                                     .scale    = f32vec3{size},
                                 });
                     scene_.registry.emplace<Renderable>(
@@ -550,7 +551,7 @@ namespace encke
                         return StepResult::Done;
                     }
                     Transform& camera = scene_.registry.get<Transform>(scene_.camera);
-                    camera.position += to_vec(s.velocity) / kScenarioStepHz;
+                    camera.position += scene_.rotation() * to_vec(s.velocity) / kScenarioStepHz;
                     return StepResult::Running;
                 }
                 else if constexpr (std::is_same_v<S, scenario::Wait>)

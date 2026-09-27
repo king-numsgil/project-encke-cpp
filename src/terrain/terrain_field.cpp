@@ -473,6 +473,27 @@ namespace encke::terrain
         weight_.assign(count, 1.0f);
         octave_values_.resize(count);
 
+        // Only the flattens whose bound reaches the points' box. One left out
+        // would have changed nothing, to the bit, so which box a point is
+        // sampled in cannot matter.
+        flattens_.clear();
+        if (!terrain_.modifiers.empty() && count > 0)
+        {
+            auto const [x_low, x_high] = std::minmax_element(x.begin(), x.end());
+            auto const [y_low, y_high] = std::minmax_element(y.begin(), y.end());
+            auto const [z_low, z_high] = std::minmax_element(z.begin(), z.end());
+            f64vec3 const low  = origin + f64vec3{*x_low, *y_low, *z_low};
+            f64vec3 const high = origin + f64vec3{*x_high, *y_high, *z_high};
+            for (Flatten const& flatten : terrain_.modifiers.flattens)
+            {
+                f64vec3 const nearest = glm::clamp(flatten.centre, low, high);
+                if (glm::length(nearest - flatten.centre) < flatten.bound())
+                {
+                    flattens_.push_back(&flatten);
+                }
+            }
+        }
+
         auto const compose = [&](span<f32> into) {
             for (size_t i = 0; i < count; ++i)
             {
@@ -481,7 +502,12 @@ namespace encke::terrain
                 f64vec3 const point  = origin + f64vec3{x[i], y[i], z[i]};
                 f64 const     above  = glm::length(point) - terrain_.radius;
                 f64 const     ground = static_cast<f64>(height[i]) + static_cast<f64>(amplitude[i]) * static_cast<f64>(detail_sum_[i]);
-                into[i] = static_cast<f32>(above - ground);
+                f64           value  = above - ground;
+                for (Flatten const* const flatten : flattens_)
+                {
+                    value = flatten->apply(point, value);
+                }
+                into[i] = static_cast<f32>(value);
             }
         };
 

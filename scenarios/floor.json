@@ -1,0 +1,20 @@
+// The floor flattened into the terrain under the object field: from above,
+// where its level disc shows against the hills; then from inside its edge
+// toward the uphill side, where it cuts up to 35 m into the slope, and
+// toward the Sun, across the blend on the lower side.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "camera", "position": [0, 250, 60], "target": [0, 0, 0] },
+        { "op": "settle" },
+        { "op": "capture", "file": "above.png" },
+
+        { "op": "camera", "position": [0, 1.7, -40], "target": [0, 1.7, -140] },
+        { "op": "settle" },
+        { "op": "capture", "file": "cut.png" },
+
+        { "op": "camera", "position": [40, 1.7, 0], "target": [140, 1.7, 0] },
+        { "op": "settle" },
+        { "op": "capture", "file": "blend.png" }
+    ]
+}

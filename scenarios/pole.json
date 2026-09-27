@@ -1,6 +1,5 @@
-// The test scene from its start pose, then the table with the helmet.
-// The table pose predates grounding objects on the terrain: it now looks up
-// at the helmet from under the table top. Replace it with one from F3.
+// The test scene from its start pose, then the table with the helmet. The
+// file keeps its name from when the scene stood at the north pole.
 {
     "settings": { "ev100": 13 },
     "steps": [
