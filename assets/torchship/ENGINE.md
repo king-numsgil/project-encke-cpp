@@ -33,6 +33,9 @@ Both conventions are in use: the hull doors carry `open_*` (modelled closed), th
 `SCREENS.md`.
 
 Staging and sequencing (which hatch opens before which, interlocks) are not in the files; that is engine logic.
+One ordering is forced by the geometry: the **cargo door's lower leaf carries a sealing lip behind the upper leaf**,
+so the upper leaf must open first and close last (the lip would otherwise sweep through it). The docking doors'
+centre seal rides on the right leaf behind the left one and needs no ordering.
 
 ## Structure
 
@@ -58,8 +61,36 @@ Staging and sequencing (which hatch opens before which, interlocks) are not in t
 - The export log warning "More than one shader node tex image used for a texture" is harmless: it only means
   one sampler is shared.
 
+## Physics shapes (Jolt)
+
+Extra mesh nodes, **never rendered** (no material, no UVs). Filter them out of rendering by name prefix. Each
+node's mesh vertices are the shape, in node-local space; extras say how to build it:
+
+| extra | shape |
+|---|---|
+| `physics: "convex_hull"` | `ConvexHullShape` from the mesh vertices (at most 64 per hull) |
+| `physics: "box"`, `half_extents: [x, y, z]` | `BoxShape` centred on the node origin, glTF axes |
+
+**Exterior world, `COL_*` in `torchship.gltf`:**
+- `COL_Hull_NN`: the static hull, doors closed, as convex slabs 0.35 m tall stacked along +Y. Each slab is the
+  convex hull of the real geometry in its height band, so tapers and protrusions stay tight. Children of the root,
+  so one static compound body.
+- `COL_Turret_<name>_Base` / `_Gun`: boxes parented to the turret's base and gun nodes; they move with the turret.
+- `COL_Door_*` / `COL_Hatch_EVA`: boxes parented to each door node; they move with the door.
+
+**Interior world, `VOL_*` in `torchship_interior.gltf`:** convex volumes that together enclose the whole
+interior, for the handover between the two Jolt worlds (a body inside any `VOL_` is in the interior world).
+- `VOL_Drive`, `VOL_D1`, `VOL_D2_D4`, `VOL_Shoulder`, `VOL_D5_D6`, `VOL_Avionics`: one per deck zone, following the
+  outside of the wall liners, stacked without gaps (the shoulder and avionics crown are tapered hulls).
+- `VOL_Door_Cargo`, `VOL_Door_Docking`, `VOL_Hatch_EVA`: boxes through each walkable hull door, reaching past the
+  outer face of the closed door leaves, so a body walking in switches worlds before it meets the exterior hull
+  collider (which is solid across the doorways). Torpedo tubes have none.
+
+The interior's own collision (walls, props, doors) is not included: build it from the render meshes or ask for
+simple shapes.
+
 ## Not in the files yet
 
-- Colliders, portals and occlusion volumes (the engine has no physics or portals yet).
+- Portals and occlusion volumes.
 - Turret joint limits.
 - The view domes' ingress/egress "rest pose".

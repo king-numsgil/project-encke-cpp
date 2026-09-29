@@ -81,7 +81,10 @@ namespace encke::physics
         // as it says. Each is marked with a StaticBody. They never move in
         // their space. Called once the scene is built and its transforms
         // composed, and after every Scene::update, for models' parts as they
-        // spawn. A ship's space is made here the first time it is seen.
+        // spawn. A ship's space is made here the first time it is seen, and
+        // its ShipShapes are taken in here as they spawn: its volume grows by
+        // each Volume piece, and once Hull pieces have come the ship's root
+        // becomes a dynamic body of their compound.
         void add_static_colliders(entt::registry& registry);
 
         // Builds the ground bodies need and steps. With `fixed_frame`, one

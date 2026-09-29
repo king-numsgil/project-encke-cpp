@@ -12,6 +12,22 @@ namespace encke
         vector<u32>     indices;
     };
 
+    // A node that is a physics shape rather than something drawn: it has a
+    // `physics` in its glTF extras, "convex_hull" of its mesh's vertices or
+    // "box" of `half_extents` about its origin. Never rendered.
+    struct NodeShape
+    {
+        enum class Kind : u8
+        {
+            None,
+            ConvexHull,
+            Box,
+        };
+
+        Kind    kind = Kind::None;
+        f64vec3 half_extents{0.0};   // for a box, in the node's frame
+    };
+
     // A loaded model: its node tree, and each node's mesh as parts that are
     // one mesh asset and one material asset each. The AssetManager makes it
     // from a glTF; Scene::spawn instances it.
@@ -52,6 +68,8 @@ namespace encke
         // `joint` in its glTF extras. It is modelled in one pose, so a static
         // collider would hold it there.
         bool moving = false;
+
+        NodeShape shape;
     };
 
     struct Model

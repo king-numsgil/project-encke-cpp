@@ -348,6 +348,7 @@ namespace encke
                 .scale    = f64vec3{node.scale},
                 .mesh     = node.mesh,
                 .moving   = node.moving,
+                .shape    = node.shape,
             });
         }
 

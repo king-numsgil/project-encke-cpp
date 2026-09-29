@@ -32,6 +32,7 @@
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/TransformedShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
@@ -241,11 +242,33 @@ namespace encke::physics
         // A physics space: one Jolt system, the world's or a ship's. A ship's
         // frame is its entity's world pose, read once an update; the world's
         // is the identity, so the conversions hold for both.
+        // A convex piece of a ship's volume, as the planes bounding it in the
+        // ship's frame: xyz an outward unit normal, w its distance from the
+        // origin, so a point is inside where every dot(n, p) - w is under 0.
+        struct Volume
+        {
+            vector<f64vec4> planes;
+        };
+
+        // A piece of a ship's hull, waiting for the ship's body to be made.
+        struct HullPiece
+        {
+            JPH::ShapeRefC shape;
+            f64vec3        position{0.0};
+            f64quat        rotation{1.0, 0.0, 0.0, 0.0};
+        };
+
         struct Space
         {
             entt::entity                        ship = entt::null;   // null: the world's
-            ShipSpace                           volume;
+            vector<Volume>                      volumes;
             std::unique_ptr<JPH::PhysicsSystem> system;
+
+            // A ship whose Hull shapes have been taken in: its pieces until
+            // its body is made, and then whether it has one, whose pose and
+            // motion the frame follows step by step.
+            vector<HullPiece> hull;
+            bool              body = false;
 
             f64vec3 position{0.0};
             f64quat rotation{1.0, 0.0, 0.0, 0.0};
@@ -272,15 +295,79 @@ namespace encke::physics
             // leaving it and gives up entering it.
             f64vec3 carried(f64vec3 const& point) const { return velocity + glm::cross(spin, point - position); }
 
-            // Whether a point in the frame is inside the volume grown by
-            // `margin`, or shrunk by a negative one.
-            bool holds(f64vec3 const& local, f64 margin) const
+            // How far a point in the frame is outside the volume, negative
+            // inside: the least over its pieces of the most over each
+            // piece's planes, which is exact inside and never more than the
+            // true distance outside. Infinite with no volume.
+            f64 distance(f64vec3 const& local) const
             {
-                f64 const radial = std::hypot(local.x, local.z);
-                return radial < volume.radius + margin && local.y > volume.bottom - margin &&
-                       local.y < volume.top + margin;
+                f64 nearest = std::numeric_limits<f64>::infinity();
+                for (Volume const& piece : volumes)
+                {
+                    f64 outside = -std::numeric_limits<f64>::infinity();
+                    for (f64vec4 const& plane : piece.planes)
+                    {
+                        outside = std::max(outside, glm::dot(f64vec3{plane}, local) - plane.w);
+                    }
+                    nearest = std::min(nearest, outside);
+                }
+                return nearest;
             }
         };
+
+        // A box's six planes, or a convex mesh's, one per triangle, placed by
+        // `position` and `rotation` after `scale`. A triangle's normal is
+        // turned outward from the mesh's centroid, whichever way it winds.
+        Volume volume_from(NodeShape const& shape, CollisionMesh const* mesh, f64vec3 const& position,
+                           f64quat const& rotation, f64vec3 const& scale)
+        {
+            Volume out;
+            if (shape.kind == NodeShape::Kind::Box)
+            {
+                for (glm::length_t axis = 0; axis < 3; ++axis)
+                {
+                    f64vec3 direction{0.0};
+                    direction[axis]    = 1.0;
+                    f64vec3 const n    = rotation * direction;
+                    f64 const     half = shape.half_extents[axis] * scale[axis];
+                    out.planes.emplace_back(n, glm::dot(n, position) + half);
+                    out.planes.emplace_back(-n, glm::dot(-n, position) + half);
+                }
+                return out;
+            }
+            if (mesh == nullptr || mesh->positions.empty())
+            {
+                return out;
+            }
+
+            vector<f64vec3> points;
+            points.reserve(mesh->positions.size());
+            f64vec3 centroid{0.0};
+            for (f32vec3 const& p : mesh->positions)
+            {
+                points.push_back(position + rotation * (f64vec3{p} * scale));
+                centroid += points.back();
+            }
+            centroid /= static_cast<f64>(points.size());
+
+            for (size_t i = 0; i + 2 < mesh->indices.size(); i += 3)
+            {
+                f64vec3 const a = points[mesh->indices[i]];
+                f64vec3 n = glm::cross(points[mesh->indices[i + 1]] - a, points[mesh->indices[i + 2]] - a);
+                f64 const length = glm::length(n);
+                if (length < 1.0e-12)
+                {
+                    continue;
+                }
+                n /= length;
+                if (glm::dot(n, a - centroid) < 0.0)
+                {
+                    n = -n;
+                }
+                out.planes.emplace_back(n, glm::dot(n, a));
+            }
+            return out;
+        }
     }
 
     struct PhysicsWorld::Impl
@@ -359,12 +446,13 @@ namespace encke::physics
             return space != nullptr ? *space : world();
         }
 
-        // The space whose volume holds a world point, or the world's.
-        Space const& containing(f64vec3 const& point) const
+        // The space whose volume a sphere at a world point reaches into, or
+        // the world's.
+        Space const& containing(f64vec3 const& point, f64 radius) const
         {
             for (size_t index = 1; index < spaces.size(); ++index)
             {
-                if (spaces[index]->holds(spaces[index]->to_local(point), 0.0))
+                if (spaces[index]->distance(spaces[index]->to_local(point)) < radius)
                 {
                     return *spaces[index];
                 }
@@ -372,24 +460,27 @@ namespace encke::physics
             return world();
         }
 
-        Space& containing(f64vec3 const& point)
+        Space& containing(f64vec3 const& point, f64 radius)
         {
-            return const_cast<Space&>(std::as_const(*this).containing(point));
+            return const_cast<Space&>(std::as_const(*this).containing(point, radius));
         }
 
-        // Where something at a world point, now in `current`, belongs: it
-        // stays in its ship until it is past the volume and the margin, and
-        // enters one only once as far inside it.
-        Space& destination(f64vec3 const& point, Space& current)
+        // Where a sphere at a world point, now in `current`, belongs. It
+        // enters a ship as soon as it reaches into the volume, so a body
+        // pressed against a closed door reaches the door's volume, which
+        // stands out past the leaves, before the hull stops it; and it
+        // leaves only once it is clear of the volume by the margin.
+        Space& destination(f64vec3 const& point, f64 radius, Space& current)
         {
-            if (!current.world() && current.holds(current.to_local(point), config::kShipSpaceHysteresis))
+            if (!current.world() &&
+                current.distance(current.to_local(point)) < radius + config::kShipSpaceHysteresis)
             {
                 return current;
             }
             for (size_t index = 1; index < spaces.size(); ++index)
             {
                 Space& space = *spaces[index];
-                if (&space != &current && space.holds(space.to_local(point), -config::kShipSpaceHysteresis))
+                if (&space != &current && space.distance(space.to_local(point)) < radius)
                 {
                     return space;
                 }
@@ -423,12 +514,11 @@ namespace encke::physics
                     made->system = make_system(config::kShipMaxBodies);
                     space        = made.get();
                     spaces.push_back(std::move(made));
-                    log::info("physics: a ship's space, %.1f m across and %.1f m tall", 2.0 * ship.radius,
-                              ship.top - ship.bottom);
+                    log::info("physics: a ship's space, %.0f t", ship.mass / 1000.0);
                 }
-                space->volume = ship;
 
-                if (space->placed && !elapsed.has_value())
+                // A ship with a body follows it step by step instead.
+                if (space->body || (space->placed && !elapsed.has_value()))
                 {
                     continue;
                 }
@@ -451,6 +541,143 @@ namespace encke::physics
                 space->rotation = world_transform.rotation;
                 space->placed   = true;
                 space->gravity  = space->vector_to_local(gravity_at(registry, space->position) - space->acceleration);
+            }
+        }
+
+        // Every ShipShape not yet taken in, into its ship: a Volume piece as
+        // planes in the ship's frame, a Hull piece as a convex shape placed
+        // in it. Then a body for every ship with hull pieces and none yet.
+        // Poses are relative to the ship's WorldTransform, so they hold
+        // wherever the ship is.
+        void take_shapes(entt::registry& registry)
+        {
+            vector<entt::entity> taken;
+            for (auto const [entity, piece, world_transform] :
+                 registry.view<ShipShape const, WorldTransform const>(entt::exclude<ShipShapeTaken>).each())
+            {
+                Space* const space = find(piece.ship);
+                if (space == nullptr || piece.ship == entt::null)
+                {
+                    continue;
+                }
+                taken.push_back(entity);
+
+                WorldTransform const& ship     = registry.get<WorldTransform>(piece.ship);
+                f64quat const         undo     = glm::conjugate(ship.rotation);
+                f64vec3 const         position = undo * (world_transform.position - ship.position);
+                f64quat const         rotation = undo * world_transform.rotation;
+                f64vec3 const         scale{world_transform.scale};
+
+                if (piece.role == ShipShape::Role::Volume)
+                {
+                    space->volumes.push_back(volume_from(piece.shape, piece.mesh.get(), position, rotation, scale));
+                    continue;
+                }
+
+                JPH::ShapeSettings::ShapeResult result;
+                if (piece.shape.kind == NodeShape::Kind::Box)
+                {
+                    f64vec3 const half = piece.shape.half_extents * scale;
+                    f32 const radius = std::min(JPH::cDefaultConvexRadius,
+                                                0.5f * static_cast<f32>(std::min({half.x, half.y, half.z})));
+                    result = JPH::BoxShapeSettings{to_jolt_vector(half), radius}.Create();
+                }
+                else if (piece.mesh != nullptr)
+                {
+                    JPH::Array<JPH::Vec3> points;
+                    points.reserve(piece.mesh->positions.size());
+                    for (f32vec3 const& p : piece.mesh->positions)
+                    {
+                        points.push_back(to_jolt_vector(f64vec3{p} * scale));
+                    }
+                    result = JPH::ConvexHullShapeSettings{points}.Create();
+                }
+                if (!result.IsValid())
+                {
+                    log::warn("physics: a piece of a ship's hull was not made: %s",
+                              result.HasError() ? result.GetError().c_str() : "no vertices");
+                    continue;
+                }
+                space->hull.push_back(HullPiece{result.Get(), position, rotation});
+            }
+            for (entt::entity const entity : taken)
+            {
+                registry.emplace<ShipShapeTaken>(entity);
+            }
+
+            for (size_t index = 1; index < spaces.size(); ++index)
+            {
+                Space& space = *spaces[index];
+                if (!space.body && !space.hull.empty())
+                {
+                    make_ship_body(registry, space);
+                }
+            }
+        }
+
+        // The ship's body in the world: its hull pieces as one compound, of
+        // the ship's mass, at its Transform's pose, held like any new body.
+        // The ship's root is then a RigidBody, written by the world.
+        void make_ship_body(entt::registry& registry, Space& space)
+        {
+            JPH::StaticCompoundShapeSettings compound;
+            for (HullPiece const& piece : space.hull)
+            {
+                compound.AddShape(to_jolt_vector(piece.position), to_jolt(piece.rotation), piece.shape);
+            }
+            JPH::ShapeSettings::ShapeResult const result = compound.Create();
+            if (!result.IsValid())
+            {
+                log::error("physics: a ship's hull was not made: %s", result.GetError().c_str());
+                space.hull.clear();
+                return;
+            }
+
+            f64 const          mass  = registry.get<ShipSpace>(space.ship).mass;
+            JPH::AABox const   box   = result.Get()->GetLocalBounds();
+            f64 const          bound = std::max(glm::length(from_jolt_vector(box.mMin)),
+                                                glm::length(from_jolt_vector(box.mMax)));
+            JPH::BodyCreationSettings settings = dynamic_settings(registry.get<Transform>(space.ship), result.Get());
+            if (mass > 0.0)
+            {
+                settings.mOverrideMassProperties       = JPH::EOverrideMassProperties::CalculateInertia;
+                settings.mMassPropertiesOverride.mMass = static_cast<f32>(mass);
+            }
+            add_body(registry, space.ship, settings, bound);
+            space.body = true;
+            space.hull.clear();
+            log::info("physics: a ship's hull of %zu pieces, %.0f t, %.1f m from its origin at most",
+                      compound.mSubShapes.size(), mass / 1000.0, bound);
+        }
+
+        // Before each step, a ship with a body takes its frame from it: its
+        // pose, velocity and spin, and its acceleration from the change in
+        // velocity since the last step, which the gravity aboard subtracts.
+        void follow_ships(entt::registry const& registry, f64 dt)
+        {
+            JPH::BodyInterface const& bodies = world().system->GetBodyInterfaceNoLock();
+            for (size_t index = 1; index < spaces.size(); ++index)
+            {
+                Space& space = *spaces[index];
+                if (!space.body)
+                {
+                    continue;
+                }
+                RigidBody const& rigid = registry.get<RigidBody>(space.ship);
+                JPH::BodyID const id   = body_id(rigid);
+
+                JPH::RVec3 position;
+                JPH::Quat  rotation;
+                bodies.GetPositionAndRotation(id, position, rotation);
+                f64vec3 const velocity = from_jolt_vector(bodies.GetLinearVelocity(id));
+
+                space.acceleration = space.placed ? (velocity - space.velocity) / dt : f64vec3{0.0};
+                space.velocity     = velocity;
+                space.spin         = from_jolt_vector(bodies.GetAngularVelocity(id));
+                space.position     = from_jolt(position);
+                space.rotation     = from_jolt(rotation);
+                space.placed       = true;
+                space.gravity = space.vector_to_local(gravity_at(registry, space.position) - space.acceleration);
             }
         }
 
@@ -721,22 +948,28 @@ namespace encke::physics
             {
                 return;
             }
-            for (auto const [entity, rigid, transform] : registry.view<RigidBody, Transform>().each())
+            // Bodies by their bounding sphere; a ship itself stays in the world.
+            for (auto const [entity, rigid, transform] :
+                 registry.view<RigidBody, Transform>(entt::exclude<ShipSpace>).each())
             {
                 if (!rigid.added)
                 {
                     continue;
                 }
                 Space& from = space_of(rigid.space);
-                Space& to   = destination(from.to_world(rigid.position), from);
+                Space& to   = destination(from.to_world(rigid.position), rigid.bound, from);
                 if (&to != &from)
                 {
                     move_body(rigid, transform, from, to);
                 }
             }
+
+            // The character by its capsule's middle and radius.
             if (character && !character_held)
             {
-                Space& to = destination(feet(), *character_space);
+                f64vec3 const middle = feet() + character_space->vector_to_world(character_up) *
+                                                    (0.5 * config::kCharacterHeight);
+                Space& to = destination(middle, config::kCharacterRadius, *character_space);
                 if (&to != character_space)
                 {
                     move_character(to);
@@ -972,12 +1205,9 @@ namespace encke::physics
             }
         }
 
-        // A dynamic body on `entity` at its Transform's pose, held, in the
-        // world: a root. Once added it moves into a ship whose volume it is
-        // in.
-        void add(entt::registry& registry, entt::entity entity, JPH::ShapeRefC const& shape, f64 bound)
+        // A dynamic body of `shape` at a Transform's pose.
+        static JPH::BodyCreationSettings dynamic_settings(Transform const& transform, JPH::ShapeRefC const& shape)
         {
-            Transform const&          transform = registry.get<Transform>(entity);
             JPH::BodyCreationSettings settings{shape, to_jolt(transform.position), to_jolt(transform.rotation),
                                                JPH::EMotionType::Dynamic, kMoving};
             // Swept, not only tested where each step ends. A body that moves
@@ -985,7 +1215,22 @@ namespace encke::physics
             // one-sided terrain triangle between two steps: a half-metre box
             // dropped from 60 m went straight through the ground.
             settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
-            JPH::Body* const body = world().system->GetBodyInterface().CreateBody(settings);
+            return settings;
+        }
+
+        // A dynamic body on `entity` at its Transform's pose, held, in the
+        // world: a root. Once added it moves into a ship whose volume it is
+        // in.
+        void add(entt::registry& registry, entt::entity entity, JPH::ShapeRefC const& shape, f64 bound)
+        {
+            add_body(registry, entity, dynamic_settings(registry.get<Transform>(entity), shape), bound);
+        }
+
+        void add_body(entt::registry& registry, entt::entity entity, JPH::BodyCreationSettings const& settings,
+                      f64 bound)
+        {
+            Transform const& transform = registry.get<Transform>(entity);
+            JPH::Body* const body      = world().system->GetBodyInterface().CreateBody(settings);
             if (body == nullptr)
             {
                 log::error("physics: out of bodies");
@@ -1026,6 +1271,7 @@ namespace encke::physics
         {
             f32 const dt = static_cast<f32>(1.0 / config::kPhysicsHz);
 
+            follow_ships(registry, static_cast<f64>(dt));
             transfer(registry);
 
             // Each awake body in the world gets its own gravity, as a force
@@ -1173,9 +1419,19 @@ namespace encke::physics
                 continue;
             }
 
+            // In a ship's frame, relative to the ship's WorldTransform from
+            // the same update, which is where the ship's body may not be.
             auto const add = [&](Space& space) {
-                JPH::BodyCreationSettings settings{shape, to_jolt(space.to_local(world.position)),
-                                                   to_jolt(glm::conjugate(space.rotation) * world.rotation),
+                f64vec3 position = world.position;
+                f64quat rotation = world.rotation;
+                if (!space.world())
+                {
+                    WorldTransform const& ship = registry.get<WorldTransform>(space.ship);
+                    f64quat const         undo = glm::conjugate(ship.rotation);
+                    position                   = undo * (world.position - ship.position);
+                    rotation                   = undo * world.rotation;
+                }
+                JPH::BodyCreationSettings settings{shape, to_jolt(position), to_jolt(rotation),
                                                    JPH::EMotionType::Static, kStatic};
                 settings.mUserData = kStaticProp;
                 space.system->GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::DontActivate);
@@ -1208,6 +1464,8 @@ namespace encke::physics
             log::info("physics: %zu static colliders as %u bodies, %u of them without a shape", made.size(), bodies,
                       failed);
         }
+
+        impl_->take_shapes(registry);
     }
 
     void PhysicsWorld::update(entt::registry& registry, WorkerPool& pool, f64 seconds, bool fixed_frame)
@@ -1329,7 +1587,8 @@ namespace encke::physics
         remove_character();
         impl_->sync(registry, nullopt);
 
-        Space&        space = impl_->containing(feet);
+        // By its feet, which may stand on a volume's bottom face.
+        Space&        space = impl_->containing(feet, config::kCharacterRadius);
         f64vec3 const g     = space.world() ? gravity_at(registry, feet) : space.vector_to_world(space.gravity);
         impl_->make_character(space, space.to_local(feet), space.vector_to_local(up_from(g)));
 
@@ -1357,7 +1616,7 @@ namespace encke::physics
         {
             return;
         }
-        Space& space = impl_->containing(feet);
+        Space& space = impl_->containing(feet, config::kCharacterRadius);
         if (&space != impl_->character_space)
         {
             f64vec3 const up = impl_->character_space->vector_to_world(impl_->character_up);
@@ -1398,7 +1657,7 @@ namespace encke::physics
 
     f64vec3 PhysicsWorld::up_at(entt::registry const& registry, f64vec3 const& point) const
     {
-        Space const& space = impl_->containing(point);
+        Space const& space = impl_->containing(point, config::kCharacterRadius);
         return up_from(space.world() ? gravity_at(registry, point) : space.vector_to_world(space.gravity));
     }
 

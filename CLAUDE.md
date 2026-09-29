@@ -1093,8 +1093,10 @@ child entity per primitive carrying the `Renderable`: a primitive is one
 mesh asset with one material, as fine-grained as the file allows, so every
 part of a multi-node model stays addressable. A mesh used by eight nodes is
 eight draws from one range of the geometry pool. Moving the root moves the
-model. Of node extras only `joint` is read, as `ModelNode::moving`; see
-*Physics*.
+model. Of node extras `joint` is read, as `ModelNode::moving`, and
+`physics` (`"convex_hull"`, or `"box"` with `half_extents`), as
+`ModelNode::shape`: a node with a shape is never drawn and is left out of
+the model's bounds; see *Physics*.
 
 - **glTF inherits scale and `Transform` does not**, so `load_gltf` converts:
   it composes each node's model-space matrix the glTF way, splits it into
@@ -1740,23 +1742,38 @@ draws the latest step. `update` runs after the pool's drain and before
   that order, sharing the job system and temp allocator. A ship's gravity
   is one vector in its frame, the world's at the ship less the ship's
   acceleration, set on its system before each step, so landed it is the
-  planet's and under thrust or in free fall it follows. The ship's pose,
-  velocity, spin and acceleration come from its entity's `WorldTransform`
-  across updates (`Impl::sync`), finite differences for now, since the
-  ship does not fly yet. The volume is a cylinder along the ship's +Y;
-  before every step (`Impl::transfer`) a body or the character whose
-  point has crossed it, by `kShipSpaceHysteresis` either way, is made
-  again in the other space with its pose and world velocity carried over
-  and its frame's velocity and spin taken off or added, and its Transform
-  reparented to the ship or back to the world. Bodies aboard are children
-  of the ship, their poses in its frame; terrain is built only for the
-  world's. A `StaticCollider` names the space it is fixed in and whether
-  it is in the world's too: the torchship's hull is in both, its decks
-  and seats in the ship's alone. `physics_world_test` hangs a turned ship
-  over the pole with a floor only in its space, drops one box inside the
-  volume and one beside it, and walks a character off the floor and out;
-  `scenarios/torchship.json` drops crates on D2 and walks out the cargo
-  door, byte-identical across runs.
+  planet's and under thrust or in free fall it follows.
+- **A ship's shapes come from its model** (`ShipShape`, one per shape
+  node; `ModelSpawn::shapes_ship` names the ship). `VOL_` nodes are its
+  volume, each a convex piece kept as planes in the ship's frame; the
+  rest are its hull, each a convex hull or box, which `take_shapes` makes
+  into one `StaticCompoundShape` and a dynamic body on the ship's root
+  of `ShipSpace::mass` (270 t for the torchship, wet), inertia scaled to
+  it. From then on the ship's frame follows that body step by step
+  (`follow_ships`): pose, velocity, spin, and acceleration from the
+  change in velocity. A ship without hull pieces holds still where its
+  Transform is, and its frame is read from that (`Impl::sync`), as the
+  unit test's is. The interior is parented to the ship's root, so it
+  goes where the body goes.
+- **Crossing is by sphere against the volume** (`Impl::transfer`, before
+  every step): a body, by its bound, or the character, by its capsule's
+  middle and radius, enters a ship as soon as it reaches into the volume
+  and leaves once clear of it by `kShipSpaceHysteresis`. It is made
+  again in the other space with its world pose and velocity, its frame's
+  velocity and spin taken off or added, and its Transform reparented to
+  the ship or back to the world. The torchship's door volumes stand out
+  past its closed leaves, so a body pressed against a closed door from
+  outside reaches the door's volume before the solid hull stops it; the
+  door volumes are the portals. The ship itself never crosses. Bodies
+  aboard are children of the ship, their poses in its frame; terrain is
+  built only for the world's. A `StaticCollider` names the space it is
+  fixed in and whether it is in the world's too: the torchship's decks
+  and seats are in the ship's alone, and its render hull in neither.
+  `physics_world_test` hangs a turned ship over the pole with a floor
+  only in its space, drops one box inside the volume and one beside it,
+  and walks a character off the floor and out; `scenarios/torchship.json`
+  drops crates on D2 and walks out the cargo door, byte-identical across
+  runs.
 - **The collision view takes compound shapes apart first**
   (`CollectTransformedShapes`): Jolt triangulates only leaf shapes, and
   the character's offset inner capsule, a `RotatedTranslatedShape`, hit
@@ -1766,18 +1783,18 @@ Known gaps:
 
 - The props are static: the spinner and anything moved later keep no
   collider, and a model's moving parts have none in any pose.
-- The torchship's hull is 128k triangles, past the collision view's
-  `kMaxDebugLines`, so near it the view drops shapes.
+- Near the torchship its decks' triangles, the terrain's and the hull's
+  pieces pass the collision view's `kMaxDebugLines`, and it drops shapes.
 - The ship's decks are joined by ladders, and the character cannot climb.
   The floor hatches are modelled open and have no colliders, so the deck
   centres are holes down the ladder shaft.
-- The torchship's volume is a guess in `render/scene.cpp`, a cylinder of
-  4.1 m from 5 to 30 m up, until the file carries one.
-- Ship spaces: the ship's world body is its static hull, which would not
-  follow a flying ship; spin enters only the velocity carried across the
-  boundary, not the gravity aboard (no centrifugal or Coriolis term); a
-  teleported ship reads as one huge acceleration for an update; a ship
-  whose entity is destroyed keeps its space.
+- Ship spaces: spin enters only the velocity carried across the
+  boundary, not the gravity aboard (no centrifugal or Coriolis term);
+  nothing aboard pushes back on the ship's body; its door and turret
+  boxes are fixed in the compound where the file has them, doors shut;
+  its centre of mass is the compound's, at uniform density, where full
+  tanks and the drive would put it lower; a ship whose entity is
+  destroyed keeps its space. Nothing drives the ship yet: no thrust.
 - The ship's inside is drawn from outside, and the hull does not hide it
   from the culler: it costs its draws wherever the ship is in view.
 - LOD 1 collision still lacks the octaves under 1 m that the drawn LOD 0

@@ -204,11 +204,21 @@ namespace encke::physics
 
         // A ship hanging 20 m over the pole, turned about the up so its
         // frame is not the world's: a floor 6 m square whose top is 1 m up
-        // its +Y, only in its own space, and a volume 3 m in radius.
+        // its +Y, only in its own space, and a volume the box over it, 6 m
+        // square and 5 m tall. It has no hull, so it holds still.
         f64quat const      turn = glm::angleAxis(0.7, f64vec3{0.0, 1.0, 0.0});
         entt::entity const ship = registry.create();
         registry.emplace<Transform>(ship, Transform{.position = *ground + f64vec3{0.0, 20.0, 0.0}, .rotation = turn});
-        registry.emplace<ShipSpace>(ship, ShipSpace{.radius = 3.0, .bottom = 0.0, .top = 5.0});
+        registry.emplace<ShipSpace>(ship);
+        entt::entity const volume = registry.create();
+        registry.emplace<Transform>(volume, Transform{.position = f64vec3{0.0, 2.5, 0.0}, .parent = ship});
+        registry.emplace<ShipShape>(volume, ShipShape{
+                                                .role  = ShipShape::Role::Volume,
+                                                .ship  = ship,
+                                                .shape = NodeShape{.kind         = NodeShape::Kind::Box,
+                                                                   .half_extents = f64vec3{3.0, 2.5, 3.0}},
+                                                .mesh  = nullptr,
+                                            });
         entt::entity const floor = registry.create();
         registry.emplace<Transform>(floor, Transform{.position = f64vec3{0.0, 0.5, 0.0},
                                                      .scale    = f32vec3{6.0f, 1.0f, 6.0f},

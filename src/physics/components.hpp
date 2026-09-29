@@ -41,15 +41,39 @@ namespace encke::physics
     // fixed to the root's frame, so what is aboard simulates in small
     // numbers and in the ship's gravity, the world's at the ship less the
     // ship's own acceleration, whatever the ship does. A body or the
-    // character crossing the volume moves between the world's space and
+    // character crossing its volume moves between the world's space and
     // this one, keeping its pose and its velocity in the world.
     //
-    // The volume is a cylinder along the root's +Y, in its frame, metres.
+    // Its shapes are ShipShape entities: the volume is the union of its
+    // Volume shapes, and its Hull shapes, once any exist, make the root a
+    // dynamic body in the world of `mass` kilograms. Without them it holds
+    // still where its Transform puts it.
     struct ShipSpace
     {
-        f64 radius = 0.0;
-        f64 bottom = 0.0;
-        f64 top    = 0.0;
+        f64 mass = 0.0;
+    };
+
+    // One convex piece of a ship, at its entity's world pose relative to
+    // the ship's: a hull of `mesh`'s vertices, or a box of `half_extents`
+    // about the entity's origin. A Hull piece is part of the ship's body in
+    // the world; a Volume piece is part of the space it holds aboard.
+    struct ShipShape
+    {
+        enum class Role : u8
+        {
+            Hull,
+            Volume,
+        };
+
+        Role                                 role = Role::Hull;
+        entt::entity                         ship = entt::null;
+        NodeShape                            shape;
+        std::shared_ptr<CollisionMesh const> mesh;   // for a convex hull
+    };
+
+    // On a ShipShape entity once the physics world has taken it in.
+    struct ShipShapeTaken
+    {
     };
 
     // On an entity the physics world holds still as a collider, from

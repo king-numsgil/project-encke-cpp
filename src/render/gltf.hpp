@@ -1,5 +1,6 @@
 #pragma once
 
+#include "assets/model.hpp"
 #include "render/mesh.hpp"
 #include "render/pixels.hpp"
 
@@ -75,6 +76,7 @@ namespace encke
         f32vec3       scale{1.0f};      // own size only
         optional<u32> mesh;     // into GltfModel::meshes
         bool          moving = false;   // has a `joint` in its extras
+        NodeShape     shape;            // from a `physics` in its extras
     };
 
     struct GltfModel

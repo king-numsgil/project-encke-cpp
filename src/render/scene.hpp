@@ -77,6 +77,12 @@ namespace encke
         entt::entity collision_space  = entt::null;
         bool         collide_in_world = true;
 
+        // The ship its physics shape nodes (NodeShape: never drawn) belong
+        // to: those named `VOL_` become pieces of its volume, the rest pieces
+        // of its hull. With none, shape nodes are left out. Attachments
+        // inherit it.
+        entt::entity shapes_ship = entt::null;
+
         // Further models spawned at named nodes of this one, at its scale
         // and luminance: a placement node carrying no geometry of its own,
         // such as a ship's seat.

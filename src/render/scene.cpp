@@ -338,6 +338,39 @@ namespace encke
                                                 });
             nodes[index] = entity;
 
+            // A physics shape is never drawn. A box is the node's own; a hull
+            // is each part's, on an entity of its own like a drawn part.
+            if (node.shape.kind != NodeShape::Kind::None)
+            {
+                if (spawn.shapes_ship == entt::null)
+                {
+                    continue;
+                }
+                physics::ShipShape const piece{
+                    .role  = node.name.starts_with("VOL_") ? physics::ShipShape::Role::Volume
+                                                           : physics::ShipShape::Role::Hull,
+                    .ship  = spawn.shapes_ship,
+                    .shape = node.shape,
+                    .mesh  = nullptr,
+                };
+                if (node.shape.kind == NodeShape::Kind::Box)
+                {
+                    registry.emplace<physics::ShipShape>(entity, piece);
+                }
+                else if (node.mesh.has_value())
+                {
+                    for (ModelPart const& part : model.meshes[*node.mesh].parts)
+                    {
+                        entt::entity const hull = registry.create();
+                        registry.emplace<Transform>(hull, Transform{.scale = size, .parent = entity});
+                        physics::ShipShape with_mesh = piece;
+                        with_mesh.mesh               = part.collision;
+                        registry.emplace<physics::ShipShape>(hull, std::move(with_mesh));
+                    }
+                }
+                continue;
+            }
+
             if (!node.mesh.has_value())
             {
                 continue;
@@ -394,6 +427,7 @@ namespace encke
                                                     .no_collision     = {},
                                                     .collision_space  = spawn.collision_space,
                                                     .collide_in_world = spawn.collide_in_world,
+                                                    .shapes_ship      = spawn.shapes_ship,
                                                     .attachments      = {},
                                                 });
         }
@@ -617,33 +651,30 @@ namespace encke
                       .no_collision     = {},
                       .collision_space  = entt::null,
                       .collide_in_world = true,
+                      .shapes_ship      = entt::null,
                       .attachments      = {},
                   });
         }
 
         // The torchship, standing on its tail at the floor's south side, 35 m
         // tall, a user's F3 pose where they walked. Its +Y is the bow, so it
-        // stands along the scene's up unturned. The hull and the interior
-        // share one frame and one root; the hull's lowest point is kShipKeel
-        // above that frame's origin, which is lowered onto the floor. The
-        // bridge's two control seats are their own asset, placed at nodes.
+        // stands along the scene's up unturned. The interior hangs under the
+        // hull's root, so it goes wherever the hull does. The bridge's two
+        // control seats are their own asset, placed at nodes.
         //
-        // Hull and decks collide as their own triangles, so the ship can be
-        // walked into and through. Its doors, hatches, view domes and ladder
-        // have joints and are left out, open or shut; so are the turrets,
-        // which will turn and have no joint in the file yet. The seats are a
-        // convex hull per part.
-        //
-        // The inside is the ship's own physics space (physics::ShipSpace),
-        // so what is aboard keeps simulating in the ship's frame once it
-        // flies. The hull collides in both spaces, the decks and seats only
-        // in the ship's. The volume is a guess until the file carries one:
-        // a cylinder a little wider than the decks, which reach 3.6 m from
-        // the axis, and inside the hull's outer wall, at least 3.9 m out;
-        // from under the drive deck's floor, 5.95 m up, to over the
-        // avionics deck's ceiling.
+        // The ship is a physics::ShipSpace: in the world it is a dynamic
+        // body of its wet mass, the compound of the exterior's `COL_` convex
+        // slabs and boxes (doors closed, turrets and all), which the root is
+        // lowered onto the floor by the lowest of, kShipKeel above the
+        // origin. Aboard is its own space, whose volume is the interior's
+        // `VOL_` pieces: one per deck zone and one through each walkable
+        // door, standing out past the closed leaves so a body walking in
+        // switches spaces before the hull stops it. The decks collide there
+        // as their own triangles, less their doors, hatches, view domes and
+        // ladder, which have joints; the seats as a convex hull per part.
         {
-            constexpr f64 kShipKeel = 0.12;
+            constexpr f64 kShipKeel = 0.23;
+            constexpr f64 kWetMass  = 270'000.0;   // kg, full tanks
 
             // Emission at a strength of 1; the panels are exported at 6 and
             // the screens under 3.
@@ -657,31 +688,35 @@ namespace encke
                                                 .fit          = std::nullopt,
                                                 .rest_on_root = false,
                                                 .luminance    = kShipLuminance,
-                                                .collision        = ModelSpawn::Collision::Mesh,
-                                                .no_collision     = {"Turret_"},
+                                                .collision        = ModelSpawn::Collision::None,
+                                                .no_collision     = {},
                                                 .collision_space  = entt::null,
                                                 .collide_in_world = true,
+                                                .shapes_ship      = entt::null,
                                                 .attachments      = {},
                                             });
-            registry.get<ModelSpawn>(ship).collision_space = ship;
-            registry.emplace<physics::ShipSpace>(ship, physics::ShipSpace{.radius = 4.1, .bottom = 5.0, .top = 30.0});
+            registry.get<ModelSpawn>(ship).shapes_ship = ship;
+            registry.emplace<physics::ShipSpace>(ship, physics::ShipSpace{.mass = kWetMass});
 
-            spawn(registry.get<Transform>(ship).position, rotation_,
-                  ModelSpawn{
-                      .model            = assets.load_model(asset_path("torchship/torchship_interior.gltf")),
-                      .scale            = 1.0,
-                      .fit              = std::nullopt,
-                      .rest_on_root     = false,
-                      .luminance        = kShipLuminance,
-                      .collision        = ModelSpawn::Collision::Mesh,
-                      .no_collision     = {},
-                      .collision_space  = ship,
-                      .collide_in_world = false,
-                      .attachments      = {
-                          {.node = "Seat_Pilot", .model = seat, .collision = ModelSpawn::Collision::Hulls},
-                          {.node = "Seat_Tactical", .model = seat, .collision = ModelSpawn::Collision::Hulls},
-                      },
-                  });
+            entt::entity const interior =
+                spawn(f64vec3{0.0}, f64quat{1.0, 0.0, 0.0, 0.0},
+                      ModelSpawn{
+                          .model            = assets.load_model(asset_path("torchship/torchship_interior.gltf")),
+                          .scale            = 1.0,
+                          .fit              = std::nullopt,
+                          .rest_on_root     = false,
+                          .luminance        = kShipLuminance,
+                          .collision        = ModelSpawn::Collision::Mesh,
+                          .no_collision     = {},
+                          .collision_space  = ship,
+                          .collide_in_world = false,
+                          .shapes_ship      = ship,
+                          .attachments      = {
+                              {.node = "Seat_Pilot", .model = seat, .collision = ModelSpawn::Collision::Hulls},
+                              {.node = "Seat_Tactical", .model = seat, .collision = ModelSpawn::Collision::Hulls},
+                          },
+                      });
+            registry.get<Transform>(interior).parent = ship;
         }
 
         // Crates, the small one stacked across the other two.

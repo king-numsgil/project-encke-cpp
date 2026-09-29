@@ -35,9 +35,15 @@ namespace encke
     {
         namespace fs = std::filesystem;
 
-        // Marks, by node index, every node whose extras name a `joint`: a
-        // part that turns or slides. `user` is a vector<u8> sized to the
-        // nodes as they are met.
+        // What a node's extras say that the loader keeps.
+        struct NodeExtras
+        {
+            bool      moving = false;   // a `joint`: a part that turns or slides
+            NodeShape shape;            // a `physics` shape, never drawn
+        };
+
+        // Reads the extras of every node that has them, by node index.
+        // `user` is a vector<NodeExtras>, grown to the nodes as they are met.
         void read_node_extras(simdjson::dom::object* extras, std::size_t index, fastgltf::Category category,
                               void* user)
         {
@@ -45,17 +51,51 @@ namespace encke
             {
                 return;
             }
+            vector<NodeExtras>& all = *static_cast<vector<NodeExtras>*>(user);
+            if (index >= all.size())
+            {
+                all.resize(index + 1);
+            }
+            NodeExtras& out = all[index];
+
             simdjson::dom::element joint;
-            if ((*extras)["joint"].get(joint) != simdjson::SUCCESS)
+            out.moving = (*extras)["joint"].get(joint) == simdjson::SUCCESS;
+
+            std::string_view physics;
+            if ((*extras)["physics"].get(physics) != simdjson::SUCCESS)
             {
                 return;
             }
-            vector<u8>& moving = *static_cast<vector<u8>*>(user);
-            if (index >= moving.size())
+            if (physics == "convex_hull")
             {
-                moving.resize(index + 1, 0);
+                out.shape.kind = NodeShape::Kind::ConvexHull;
             }
-            moving[index] = 1;
+            else if (physics == "box")
+            {
+                simdjson::dom::array half;
+                if ((*extras)["half_extents"].get(half) != simdjson::SUCCESS || half.size() != 3)
+                {
+                    log::warn("gltf: node %zu is a box without three half extents; not a shape", index);
+                    return;
+                }
+                size_t axis = 0;
+                for (simdjson::dom::element const value : half)
+                {
+                    f64 extent = 0.0;
+                    if (value.get(extent) != simdjson::SUCCESS)
+                    {
+                        log::warn("gltf: node %zu has a half extent that is not a number; not a shape", index);
+                        return;
+                    }
+                    out.shape.half_extents[static_cast<glm::length_t>(axis++)] = extent;
+                }
+                out.shape.kind = NodeShape::Kind::Box;
+            }
+            else
+            {
+                log::warn("gltf: node %zu has physics \"%.*s\", which is not known; drawn", index,
+                          static_cast<int>(physics.size()), physics.data());
+            }
         }
 
         GltfImages locate_images(fastgltf::Asset const& asset, fs::path const& directory)
@@ -462,9 +502,9 @@ namespace encke
         }
 
         fastgltf::Parser parser{fastgltf::Extensions::KHR_materials_emissive_strength};
-        vector<u8>       moving;
+        vector<NodeExtras> extras;
         parser.setExtrasParseCallback(read_node_extras);
-        parser.setUserPointer(&moving);
+        parser.setUserPointer(&extras);
         auto loaded = parser.loadGltf(data.get(), fs::path{path}.parent_path(),
                                       fastgltf::Options::LoadExternalBuffers);
         if (loaded.error() != fastgltf::Error::None)
@@ -553,7 +593,11 @@ namespace encke
             GltfNode node;
             node.name   = string{source.name.c_str()};
             node.parent = parent;
-            node.moving = source_index < moving.size() && moving[source_index] != 0;
+            if (source_index < extras.size())
+            {
+                node.moving = extras[source_index].moving;
+                node.shape  = extras[source_index].shape;
+            }
             locals.push_back(to_glm(fastgltf::getTransformMatrix(source)));
             if (source.meshIndex.has_value())
             {
@@ -622,7 +666,8 @@ namespace encke
             }
             node.scale = f32vec3{pose.scale};
 
-            if (!node.mesh.has_value())
+            // A physics shape is never drawn, so it is no part of the bounds.
+            if (!node.mesh.has_value() || node.shape.kind != NodeShape::Kind::None)
             {
                 continue;
             }
