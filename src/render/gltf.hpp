@@ -74,6 +74,7 @@ namespace encke
         f32quat       rotation{1.0f, 0.0f, 0.0f, 0.0f};
         f32vec3       scale{1.0f};      // own size only
         optional<u32> mesh;     // into GltfModel::meshes
+        bool          moving = false;   // has a `joint` in its extras
     };
 
     struct GltfModel

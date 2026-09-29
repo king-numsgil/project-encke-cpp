@@ -219,12 +219,13 @@ namespace encke
         // and collides as the shape it draws.
         if (mesh == cube_mesh)
         {
-            registry.emplace<physics::StaticCollider>(entity, physics::StaticCollider{.shape = physics::StaticCollider::Shape::Box});
+            registry.emplace<physics::StaticCollider>(
+                entity, physics::StaticCollider{.shape = physics::StaticCollider::Shape::Box, .mesh = nullptr});
         }
         else if (mesh == sphere_mesh)
         {
-            registry.emplace<physics::StaticCollider>(entity,
-                                                      physics::StaticCollider{.shape = physics::StaticCollider::Shape::Sphere});
+            registry.emplace<physics::StaticCollider>(
+                entity, physics::StaticCollider{.shape = physics::StaticCollider::Shape::Sphere, .mesh = nullptr});
         }
         return entity;
     }
@@ -302,12 +303,22 @@ namespace encke
         f64vec3 const lift = spawn.rest_on_root ? f64vec3{0.0, -model.min.y * scale, 0.0}
                                                 : f64vec3{0.0};
 
+        using Collision = ModelSpawn::Collision;
+
         // Parents precede children, so each node's parent entity exists by
-        // the time it is reached.
+        // the time it is reached, and whether its parent collides.
         vector<entt::entity> nodes(model.nodes.size(), entt::entity{entt::null});
+        vector<u8>           solid(model.nodes.size(), 0);
         for (size_t index = 0; index < model.nodes.size(); ++index)
         {
             ModelNode const& node = model.nodes[index];
+
+            bool const excluded = (spawn.collision == Collision::Mesh && node.moving) ||
+                                  std::ranges::any_of(spawn.no_collision, [&](string const& prefix) {
+                                      return node.name.starts_with(prefix);
+                                  });
+            solid[index] = spawn.collision != Collision::None && !excluded &&
+                           (!node.parent.has_value() || solid[*node.parent] != 0);
 
             // Uniform, so it commutes with every rotation above: scaling each
             // offset and size is exactly scaling the whole model.
@@ -344,7 +355,41 @@ namespace encke
                                                         .emissive  = part.emissive * spawn.luminance,
                                                         .metallic  = part.metallic,
                                                     });
+                if (solid[index] != 0 && part.collision != nullptr)
+                {
+                    registry.emplace<physics::StaticCollider>(
+                        drawn, physics::StaticCollider{
+                                   .shape = spawn.collision == Collision::Mesh ? physics::StaticCollider::Shape::Mesh
+                                                                               : physics::StaticCollider::Shape::Hull,
+                                   .mesh  = part.collision,
+                               });
+                }
             }
+        }
+
+        // Spawned by the next update, under the node, which may be before
+        // their model is Ready.
+        for (ModelSpawn::Attachment const& attachment : spawn.attachments)
+        {
+            auto const found = std::ranges::find(model.nodes, attachment.node, &ModelNode::name);
+            if (found == model.nodes.end())
+            {
+                log::warn("scene: no node %s to attach a model to", attachment.node.c_str());
+                continue;
+            }
+            entt::entity const child = registry.create();
+            registry.emplace<Transform>(
+                child, Transform{.parent = nodes[static_cast<size_t>(found - model.nodes.begin())]});
+            registry.emplace<ModelSpawn>(child, ModelSpawn{
+                                                    .model        = attachment.model,
+                                                    .scale        = scale,
+                                                    .fit          = std::nullopt,
+                                                    .rest_on_root = false,
+                                                    .luminance    = spawn.luminance,
+                                                    .collision    = attachment.collision,
+                                                    .no_collision = {},
+                                                    .attachments  = {},
+                                                });
         }
     }
 
@@ -562,6 +607,56 @@ namespace encke
                       .fit          = kHelmetWidth,
                       .rest_on_root = true,
                       .luminance    = kVisorLuminance,
+                      .collision    = ModelSpawn::Collision::None,
+                      .no_collision = {},
+                      .attachments  = {},
+                  });
+        }
+
+        // The torchship, standing on its tail at the floor's south side, 35 m
+        // tall, a user's F3 pose where they walked. Its +Y is the bow, so it
+        // stands along the scene's up unturned. The hull and the interior
+        // share one frame and one root; the hull's lowest point is kShipKeel
+        // above that frame's origin, which is lowered onto the floor. The
+        // bridge's two control seats are their own asset, placed at nodes.
+        //
+        // Hull and decks collide as their own triangles, so the ship can be
+        // walked into and through. Its doors, hatches, view domes and ladder
+        // have joints and are left out, open or shut; so are the turrets,
+        // which will turn and have no joint in the file yet. The seats are a
+        // convex hull per part.
+        {
+            constexpr f64 kShipKeel = 0.12;
+
+            // Emission at a strength of 1; the panels are exported at 6 and
+            // the screens under 3.
+            constexpr f32 kShipLuminance = 500.0f;
+
+            ModelHandle const  seat = assets.load_model(asset_path("torchship/seat/control_seat.gltf"));
+            entt::entity const ship = spawn(to_world(grounded(f64vec3{1.3218, -kShipKeel, 43.607})), rotation_,
+                                            ModelSpawn{
+                                                .model        = assets.load_model(asset_path("torchship/torchship.gltf")),
+                                                .scale        = 1.0,
+                                                .fit          = std::nullopt,
+                                                .rest_on_root = false,
+                                                .luminance    = kShipLuminance,
+                                                .collision    = ModelSpawn::Collision::Mesh,
+                                                .no_collision = {"Turret_"},
+                                                .attachments  = {},
+                                            });
+            spawn(registry.get<Transform>(ship).position, rotation_,
+                  ModelSpawn{
+                      .model        = assets.load_model(asset_path("torchship/torchship_interior.gltf")),
+                      .scale        = 1.0,
+                      .fit          = std::nullopt,
+                      .rest_on_root = false,
+                      .luminance    = kShipLuminance,
+                      .collision    = ModelSpawn::Collision::Mesh,
+                      .no_collision = {},
+                      .attachments  = {
+                          {.node = "Seat_Pilot", .model = seat, .collision = ModelSpawn::Collision::Hulls},
+                          {.node = "Seat_Tactical", .model = seat, .collision = ModelSpawn::Collision::Hulls},
+                      },
                   });
         }
 

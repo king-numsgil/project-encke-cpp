@@ -112,6 +112,8 @@ namespace encke::physics
         WorkerPool   pool;
         pool.start(3, "test");
         physics.init(0, config::kCollisionLod);
+        // Colliders stand at world transforms, which the wall has none of yet.
+        propagate_transforms(registry);
         physics.add_static_colliders(registry);
         physics.add_character(registry, *ground + f64vec3{0.0, 2.0, 0.0});
 

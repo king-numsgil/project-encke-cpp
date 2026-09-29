@@ -1093,7 +1093,8 @@ child entity per primitive carrying the `Renderable`: a primitive is one
 mesh asset with one material, as fine-grained as the file allows, so every
 part of a multi-node model stays addressable. A mesh used by eight nodes is
 eight draws from one range of the geometry pool. Moving the root moves the
-model. Node extras are not read.
+model. Of node extras only `joint` is read, as `ModelNode::moving`; see
+*Physics*.
 
 - **glTF inherits scale and `Transform` does not**, so `load_gltf` converts:
   it composes each node's model-space matrix the glTF way, splits it into
@@ -1718,11 +1719,31 @@ draws the latest step. `update` runs after the pool's drain and before
   is the spinning cube, which a static collider would not follow; the
   helmet has none. Their bodies carry `kStaticProp` as user data, which
   tells them from ground chunks in the collision view.
+- **A glTF model collides if its `ModelSpawn` asks**: `Collision::Mesh`
+  gives each part a static `MeshShape` of its own triangles, which the
+  model keeps on the CPU (`ModelPart::collision`) after the vertices go to
+  the GPU; `Collision::Hulls` gives each part the convex hull of its
+  vertices, a simplified stand-in (the torchship's seats). As meshes,
+  nodes with a `joint` in their glTF extras (`ModelNode::moving`: doors,
+  hatches, the view domes, the ladder) are left out with their subtrees,
+  and so are nodes named by `no_collision` (the turrets). Colliders sit on
+  child entities, so `add_static_colliders` reads `WorldTransform`: it runs
+  once after startup's `propagate_transforms` and again after every
+  `Scene::update`, making a body for each `StaticCollider` without a
+  `StaticBody` yet. Shapes are cached by mesh and scale, so instanced
+  props build once.
+- **The collision view takes compound shapes apart first**
+  (`CollectTransformedShapes`): Jolt triangulates only leaf shapes, and
+  the character's offset inner capsule, a `RotatedTranslatedShape`, hit
+  a trap the first time the view was on while walking.
 
 Known gaps:
 
 - The props are static: the spinner and anything moved later keep no
-  collider, and nothing makes one from a glTF model.
+  collider, and a model's moving parts have none in any pose.
+- The torchship's hull is 128k triangles, past the collision view's
+  `kMaxDebugLines`, so near it the view drops shapes.
+- The ship's decks are joined by ladders, and the character cannot climb.
 - LOD 1 collision still lacks the octaves under 1 m that the drawn LOD 0
   ground has; a resting body can sink or hover by the centimetres they add.
   Not yet checked on the mountain belts' steeper rock, where those octaves

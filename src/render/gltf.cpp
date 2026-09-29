@@ -7,6 +7,7 @@
 #include <fastgltf/core.hpp>
 #include <fastgltf/glm_element_traits.hpp>
 #include <fastgltf/tools.hpp>
+#include <simdjson.h>
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +34,29 @@ namespace encke
     namespace
     {
         namespace fs = std::filesystem;
+
+        // Marks, by node index, every node whose extras name a `joint`: a
+        // part that turns or slides. `user` is a vector<u8> sized to the
+        // nodes as they are met.
+        void read_node_extras(simdjson::dom::object* extras, std::size_t index, fastgltf::Category category,
+                              void* user)
+        {
+            if (extras == nullptr || category != fastgltf::Category::Nodes)
+            {
+                return;
+            }
+            simdjson::dom::element joint;
+            if ((*extras)["joint"].get(joint) != simdjson::SUCCESS)
+            {
+                return;
+            }
+            vector<u8>& moving = *static_cast<vector<u8>*>(user);
+            if (index >= moving.size())
+            {
+                moving.resize(index + 1, 0);
+            }
+            moving[index] = 1;
+        }
 
         GltfImages locate_images(fastgltf::Asset const& asset, fs::path const& directory)
         {
@@ -438,6 +462,9 @@ namespace encke
         }
 
         fastgltf::Parser parser{fastgltf::Extensions::KHR_materials_emissive_strength};
+        vector<u8>       moving;
+        parser.setExtrasParseCallback(read_node_extras);
+        parser.setUserPointer(&moving);
         auto loaded = parser.loadGltf(data.get(), fs::path{path}.parent_path(),
                                       fastgltf::Options::LoadExternalBuffers);
         if (loaded.error() != fastgltf::Error::None)
@@ -526,6 +553,7 @@ namespace encke
             GltfNode node;
             node.name   = string{source.name.c_str()};
             node.parent = parent;
+            node.moving = source_index < moving.size() && moving[source_index] != 0;
             locals.push_back(to_glm(fastgltf::getTransformMatrix(source)));
             if (source.meshIndex.has_value())
             {

@@ -310,6 +310,16 @@ namespace encke
                 GltfPrimitive&      primitive = source_mesh.primitives[primitive_index];
                 GltfMaterial const& material  = source.materials[primitive.material];
 
+                // The triangles stay on the CPU for colliders; the vertices
+                // go to the GPU and are freed.
+                auto collision = std::make_shared<CollisionMesh>();
+                collision->positions.reserve(primitive.vertices.size());
+                for (Vertex const& vertex : primitive.vertices)
+                {
+                    collision->positions.push_back(vertex.position);
+                }
+                collision->indices = primitive.indices;
+
                 MeshHandle const handle =
                     add_mesh(name + " " + std::to_string(primitive_index),
                              MeshData{.vertices = std::move(primitive.vertices),
@@ -323,6 +333,7 @@ namespace encke
                     .roughness = material.roughness,
                     .metallic  = material.metallic,
                     .emissive  = material.emissive,
+                    .collision = std::move(collision),
                 });
             }
         }
@@ -336,6 +347,7 @@ namespace encke
                 .rotation = f64quat{node.rotation},
                 .scale    = f64vec3{node.scale},
                 .mesh     = node.mesh,
+                .moving   = node.moving,
             });
         }
 

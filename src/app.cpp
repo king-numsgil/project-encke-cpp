@@ -221,6 +221,9 @@ namespace encke
                           ? cpu.logical_processors - cpu.physical_cores
                           : 0u,
                       collision_lod);
+        // The props, from world transforms the first frame has not composed
+        // yet; models' parts follow as they spawn.
+        propagate_transforms(scene_.registry);
         physics_.add_static_colliders(scene_.registry);
 
         log::info("scene: %zu entities, %zu renderables, %zu lights",
@@ -1100,6 +1103,10 @@ namespace encke
             }
             renderer_.set_terrain_palette(terrain_.palette());
             scene_.update(seconds, assets_);
+
+            // Colliders for model parts spawned by the update, at the world
+            // transforms it composed, before the next frame's step.
+            physics_.add_static_colliders(scene_.registry);
 
             draw_ui();
 

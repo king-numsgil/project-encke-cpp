@@ -4,6 +4,14 @@
 
 namespace encke
 {
+    // A part's triangles kept on the CPU after its mesh has gone to the GPU,
+    // in the mesh's own space, for a collider built from it.
+    struct CollisionMesh
+    {
+        vector<f32vec3> positions;
+        vector<u32>     indices;
+    };
+
     // A loaded model: its node tree, and each node's mesh as parts that are
     // one mesh asset and one material asset each. The AssetManager makes it
     // from a glTF; Scene::spawn instances it.
@@ -17,6 +25,8 @@ namespace encke
         f32     roughness = 1.0f;
         f32     metallic  = 1.0f;
         f32vec3 emissive{0.0f};   // relative; the scene scales it to luminance
+
+        std::shared_ptr<CollisionMesh const> collision;
     };
 
     // One glTF mesh: a part per primitive, each drawn by its own entity.
@@ -37,6 +47,11 @@ namespace encke
         f64quat       rotation{1.0, 0.0, 0.0, 0.0};
         f64vec3       scale{1.0};
         optional<u32> mesh;     // into Model::meshes
+
+        // A door, hatch or other part that turns or slides: the node has a
+        // `joint` in its glTF extras. It is modelled in one pose, so a static
+        // collider would hold it there.
+        bool moving = false;
     };
 
     struct Model

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "assets/model.hpp"
+
 namespace encke::physics
 {
     // On an entity simulated by the PhysicsWorld: a root entity, whose
@@ -27,17 +29,27 @@ namespace encke::physics
         bool added = false;
     };
 
-    // On a root entity the physics world holds still as a collider, from
-    // PhysicsWorld::add_static_colliders: the unit cube or sphere its
-    // Transform's scale stretches, as its mesh is, at its Transform's pose.
+    // On an entity the physics world holds still as a collider, from
+    // PhysicsWorld::add_static_colliders, at its world pose and stretched by
+    // its world scale, as its mesh is.
     struct StaticCollider
     {
         enum class Shape : u8
         {
-            Box,
-            Sphere,   // uniform scale; the diameter is the scale's x
+            Box,      // the unit cube
+            Sphere,   // the unit sphere; uniform scale, the diameter is the scale's x
+            Mesh,     // `mesh`'s triangles, exactly
+            Hull,     // the convex hull of `mesh`'s vertices: a simplified stand-in
         };
 
-        Shape shape = Shape::Box;
+        Shape                                shape = Shape::Box;
+        std::shared_ptr<CollisionMesh const> mesh;   // for Mesh and Hull
+    };
+
+    // On an entity with a StaticCollider once its body has been made, so
+    // it is made once.
+    struct StaticBody
+    {
+        u32 body = 0;
     };
 }

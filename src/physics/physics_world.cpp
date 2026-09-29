@@ -24,17 +24,22 @@
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayerInterfaceTable.h>
 #include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h>
+#include <Jolt/Physics/Collision/CollisionCollector.h>
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/TransformedShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 
 #include <glm/gtx/quaternion.hpp>
@@ -58,6 +63,14 @@ namespace encke::physics
         constexpr u32 kMaxBodyPairs  = 65'536;
         constexpr u32 kMaxContacts   = 16'384;
         constexpr u32 kTempBytes     = 16u << 20;
+
+        // A body's shape taken apart into the leaf shapes that make it up.
+        struct LeafShapes final : JPH::TransformedShapeCollector
+        {
+            vector<JPH::TransformedShape> shapes;
+
+            void AddHit(JPH::TransformedShape const& shape) override { shapes.push_back(shape); }
+        };
 
         JPH::RVec3 to_jolt(f64vec3 const& v)
         {
@@ -237,6 +250,88 @@ namespace encke::physics
         // One per pool worker, each keyed by terrain, made on first use by
         // that worker alone.
         vector<std::unordered_map<terrain::BodyTerrain const*, std::unique_ptr<terrain::TerrainSampler>>> samplers;
+
+        // Static mesh and hull shapes, by their triangles, kind and scale,
+        // so a mesh instanced many times is built once. Null where the
+        // shape failed, so it fails once.
+        std::map<std::tuple<std::shared_ptr<CollisionMesh const>, StaticCollider::Shape, f32, f32, f32>,
+                 JPH::ShapeRefC>
+            static_shapes;
+
+        // A StaticCollider's shape at `scale`, which is baked into a mesh's
+        // or hull's points. Null if it could not be made, logged once.
+        JPH::ShapeRefC static_shape(StaticCollider const& collider, f32vec3 const& scale)
+        {
+            f32vec3 const half = scale * 0.5f;
+            switch (collider.shape)
+            {
+            case StaticCollider::Shape::Sphere:
+                return new JPH::SphereShape{half.x};
+            case StaticCollider::Shape::Box:
+            {
+                f32 const radius = std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({half.x, half.y, half.z}));
+                return new JPH::BoxShape{JPH::Vec3{half.x, half.y, half.z}, radius};
+            }
+            case StaticCollider::Shape::Mesh:
+            case StaticCollider::Shape::Hull:
+                break;
+            }
+            if (collider.mesh == nullptr)
+            {
+                return nullptr;
+            }
+
+            auto const key = std::make_tuple(collider.mesh, collider.shape, scale.x, scale.y, scale.z);
+            if (auto const found = static_shapes.find(key); found != static_shapes.end())
+            {
+                return found->second;
+            }
+
+            CollisionMesh const&             mesh = *collider.mesh;
+            JPH::ShapeSettings::ShapeResult result;
+            if (collider.shape == StaticCollider::Shape::Mesh)
+            {
+                JPH::VertexList vertices;
+                vertices.reserve(mesh.positions.size());
+                for (f32vec3 const& p : mesh.positions)
+                {
+                    vertices.push_back(JPH::Float3{p.x * scale.x, p.y * scale.y, p.z * scale.z});
+                }
+                JPH::IndexedTriangleList triangles;
+                triangles.reserve(mesh.indices.size() / 3);
+                for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3)
+                {
+                    triangles.push_back(JPH::IndexedTriangle{mesh.indices[i], mesh.indices[i + 1], mesh.indices[i + 2], 0});
+                }
+                JPH::MeshShapeSettings const settings{std::move(vertices), std::move(triangles)};
+                result = settings.Create();
+            }
+            else
+            {
+                JPH::Array<JPH::Vec3> points;
+                points.reserve(mesh.positions.size());
+                for (f32vec3 const& p : mesh.positions)
+                {
+                    points.push_back(JPH::Vec3{p.x * scale.x, p.y * scale.y, p.z * scale.z});
+                }
+                JPH::ConvexHullShapeSettings const settings{points};
+                result = settings.Create();
+            }
+
+            JPH::ShapeRefC shape;
+            if (result.IsValid())
+            {
+                shape = result.Get();
+            }
+            else
+            {
+                log::warn("physics: a static %s of %zu triangles was not made: %s",
+                          collider.shape == StaticCollider::Shape::Mesh ? "mesh" : "hull", mesh.indices.size() / 3,
+                          result.GetError().c_str());
+            }
+            static_shapes.emplace(key, shape);
+            return shape;
+        }
 
         u32 lod         = config::kCollisionLod;
         f64 accumulator = 0.0;
@@ -726,32 +821,44 @@ namespace encke::physics
         impl_->add(registry, entity, new JPH::SphereShape{radius}, static_cast<f64>(radius));
     }
 
-    void PhysicsWorld::add_static_colliders(entt::registry const& registry)
+    void PhysicsWorld::add_static_colliders(entt::registry& registry)
     {
-        JPH::BodyInterface& bodies = impl_->system->GetBodyInterface();
-        u32                 count  = 0;
-        for (auto const [entity, collider, transform] :
-             registry.view<StaticCollider const, Transform const>().each())
+        if (!impl_)
         {
-            f32vec3 const  half = transform.scale * 0.5f;
-            JPH::ShapeRefC shape;
-            if (collider.shape == StaticCollider::Shape::Sphere)
+            return;
+        }
+
+        // Marked after the view is done with, since marking changes a pool
+        // the view excludes.
+        JPH::BodyInterface&                     bodies = impl_->system->GetBodyInterface();
+        vector<std::pair<entt::entity, u32>>    made;
+        u32                                     failed = 0;
+        for (auto const [entity, collider, world] :
+             registry.view<StaticCollider const, WorldTransform const>(entt::exclude<StaticBody>).each())
+        {
+            JPH::ShapeRefC const shape = impl_->static_shape(collider, world.scale);
+            if (shape == nullptr)
             {
-                shape = new JPH::SphereShape{half.x};
-            }
-            else
-            {
-                f32 const radius = std::min(JPH::cDefaultConvexRadius, 0.5f * std::min({half.x, half.y, half.z}));
-                shape            = new JPH::BoxShape{JPH::Vec3{half.x, half.y, half.z}, radius};
+                made.emplace_back(entity, JPH::BodyID::cInvalidBodyID);
+                ++failed;
+                continue;
             }
 
-            JPH::BodyCreationSettings settings{shape, to_jolt(transform.position), to_jolt(transform.rotation),
+            JPH::BodyCreationSettings settings{shape, to_jolt(world.position), to_jolt(world.rotation),
                                                JPH::EMotionType::Static, kStatic};
-            settings.mUserData = kStaticProp;
-            bodies.CreateAndAddBody(settings, JPH::EActivation::DontActivate);
-            ++count;
+            settings.mUserData    = kStaticProp;
+            JPH::BodyID const id = bodies.CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+            made.emplace_back(entity, id.GetIndexAndSequenceNumber());
         }
-        log::info("physics: %u static colliders", count);
+
+        for (auto const& [entity, body] : made)
+        {
+            registry.emplace<StaticBody>(entity, StaticBody{.body = body});
+        }
+        if (!made.empty())
+        {
+            log::info("physics: %zu static colliders, %u of them without a shape", made.size(), failed);
+        }
     }
 
     void PhysicsWorld::update(entt::registry& registry, WorkerPool& pool, f64 seconds, bool fixed_frame)
@@ -999,26 +1106,32 @@ namespace encke::physics
                                    : body.IsActive()        ? ShapeKind::Awake
                                                             : ShapeKind::Asleep;
 
-            // Triangulated about the centre of mass at the origin, in f32,
-            // then placed in f64: a chunk's corner is millions of metres out.
-            f64vec3 const centre = from_jolt(body.GetCenterOfMassPosition());
+            // Triangulated relative to the centre of mass, in f32, then
+            // placed in f64: a chunk's corner is millions of metres out.
+            // Only leaf shapes triangulate, so a compound, such as the
+            // character's offset inner capsule, is taken apart first.
+            JPH::RVec3 const centre = body.GetCenterOfMassPosition();
             points.clear();
 
-            JPH::Shape::GetTrianglesContext context;
-            body.GetShape()->GetTrianglesStart(context, JPH::AABox::sBiggest(), JPH::Vec3::sZero(),
-                                               body.GetRotation(), JPH::Vec3::sReplicate(1.0f));
-            constexpr int         kBatch = 256;
-            array<JPH::Float3, 3 * kBatch> batch{};
-            for (;;)
+            LeafShapes leaves;
+            body.GetTransformedShape().CollectTransformedShapes(JPH::AABox::sBiggest(), leaves);
+            for (JPH::TransformedShape const& leaf : leaves.shapes)
             {
-                int const count = body.GetShape()->GetTrianglesNext(context, kBatch, batch.data());
-                if (count <= 0)
+                JPH::Shape::GetTrianglesContext context;
+                leaf.GetTrianglesStart(context, JPH::AABox::sBiggest(), centre);
+                constexpr int                  kBatch = 256;
+                array<JPH::Float3, 3 * kBatch> batch{};
+                for (;;)
                 {
-                    break;
-                }
-                for (size_t index = 0; index < static_cast<size_t>(3 * count); ++index)
-                {
-                    points.push_back(centre + f64vec3{batch[index].x, batch[index].y, batch[index].z});
+                    int const count = leaf.GetTrianglesNext(context, kBatch, batch.data());
+                    if (count <= 0)
+                    {
+                        break;
+                    }
+                    for (size_t index = 0; index < static_cast<size_t>(3 * count); ++index)
+                    {
+                        points.push_back(from_jolt(centre) + f64vec3{batch[index].x, batch[index].y, batch[index].z});
+                    }
                 }
             }
             visit(kind, points);

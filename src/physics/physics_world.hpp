@@ -70,10 +70,12 @@ namespace encke::physics
         // A dynamic sphere, its diameter the Transform's scale on x.
         void add_sphere(entt::registry& registry, entt::entity entity);
 
-        // A static body for every StaticCollider in the registry, in the
-        // registry's order, which is the same on every run. They never
-        // move; built once, after the scene.
-        void add_static_colliders(entt::registry const& registry);
+        // A static body for every StaticCollider in the registry that has
+        // none yet, at its WorldTransform, in the registry's order, which is
+        // the same on every run; each is marked with a StaticBody. They never
+        // move. Called once the scene is built and its transforms composed,
+        // and after every Scene::update, for models' parts as they spawn.
+        void add_static_colliders(entt::registry& registry);
 
         // Builds the ground bodies need and steps. With `fixed_frame`, one
         // step exactly, whatever `seconds` says, so a scenario steps the same

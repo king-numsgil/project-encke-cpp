@@ -1,0 +1,32 @@
+// The torchship on the floor's south side: from where the user stood when
+// placing it, then from the field, where the whole hull is in view. Then on
+// foot: walked into the hull's +Z side, where its mesh collider stops the
+// character, and stood on deck D2 facing the cargo door, which it could only
+// do on the deck's collider. The ship's frame is the scene's, its origin 0.12 m under the
+// floor at (1.3218, 43.607), so D2's floor, 13.4 m up the ship, is 13.28 m
+// up here.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "camera", "position": [1.3218, 1.7, 63.607], "target": [1.3218, 12, 43.607] },
+        { "op": "settle" },
+        { "op": "capture", "file": "close.png" },
+
+        { "op": "camera", "position": [-6, 1.7, 4], "target": [1.3218, 14, 43.607] },
+        { "op": "settle" },
+        { "op": "capture", "file": "field.png" },
+
+        { "op": "set", "movement": "walk" },
+        { "op": "camera", "position": [1.3218, 1.7, 53], "target": [1.3218, 1.7, 43.607] },
+        { "op": "settle" },
+        { "op": "walk", "move": [0, 1], "frames": 180 },
+        { "op": "settle" },
+        { "op": "set", "collision": true },
+        { "op": "capture", "file": "hull.png" },
+
+        { "op": "set", "collision": false },
+        { "op": "camera", "position": [-0.2, 14.98, 43.607], "target": [4.3, 14.6, 43.607] },
+        { "op": "settle" },
+        { "op": "capture", "file": "deck.png" }
+    ]
+}

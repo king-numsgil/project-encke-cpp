@@ -52,6 +52,34 @@ namespace encke
 
         // cd/m^2 for an emissive factor of 1.
         f32 luminance = 1.0f;
+
+        // How its parts collide: not at all, as their own triangles, or each
+        // as the convex hull of its vertices, a simplified stand-in. Every
+        // collider is static.
+        enum class Collision : u8
+        {
+            None,
+            Mesh,
+            Hulls,
+        };
+        Collision collision = Collision::None;
+
+        // Nodes left without colliders, with everything under them: those
+        // whose names start with one of these. As meshes, moving parts
+        // (ModelNode::moving) are left out as well; as hulls they are not,
+        // since a hull stands in for the whole assembly.
+        vector<string> no_collision;
+
+        // Further models spawned at named nodes of this one, at its scale
+        // and luminance: a placement node carrying no geometry of its own,
+        // such as a ship's seat.
+        struct Attachment
+        {
+            string      node;
+            ModelHandle model;
+            Collision   collision = Collision::None;
+        };
+        vector<Attachment> attachments;
     };
 
     class Scene
