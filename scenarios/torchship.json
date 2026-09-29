@@ -2,7 +2,9 @@
 // placing it, then from the field, where the whole hull is in view. Then on
 // foot: walked into the hull's +Z side, where its mesh collider stops the
 // character, and stood on deck D2 facing the cargo door, which it could only
-// do on the deck's collider. The ship's frame is the scene's, its origin 0.12 m under the
+// do on the deck's collider, crates dropped beside it, and the character
+// walked out of the cargo door, from the ship's space into the world's.
+// The ship's frame is the scene's, its origin 0.12 m under the
 // floor at (1.3218, 43.607), so D2's floor, 13.4 m up the ship, is 13.28 m
 // up here.
 {
@@ -25,8 +27,25 @@
         { "op": "capture", "file": "hull.png" },
 
         { "op": "set", "collision": false },
-        { "op": "camera", "position": [-0.2, 14.98, 43.607], "target": [4.3, 14.6, 43.607] },
+        // Beside D2's ladder, not under it: the floor hatch there is
+        // modelled open and has no collider, and the centreline walks into
+        // its hole, 1.5 m square, and down to the drive deck.
+        { "op": "camera", "position": [-0.2, 14.98, 44.807], "target": [4.3, 14.6, 44.807] },
         { "op": "settle" },
-        { "op": "capture", "file": "deck.png" }
+        { "op": "capture", "file": "deck.png" },
+
+        // Eight crates dropped on D2 beside the way to the door, in the
+        // ship's space, onto its deck, which the world does not have.
+        { "op": "spawn", "shape": "box", "position": [3.0, 14.2, 42.307], "count": [2, 2, 2],
+          "spacing": [0.6, 0.6, 0.6], "size": [0.4, 0.4, 0.4], "tilt": 20 },
+        { "op": "settle" },
+        { "op": "capture", "file": "crates.png" },
+
+        // Out through the cargo door, which has no collider, and off the
+        // deck: past the volume the character moves into the world and
+        // falls the 13 m to the floor.
+        { "op": "walk", "move": [0, 1], "frames": 120 },
+        { "op": "settle" },
+        { "op": "capture", "file": "outside.png" }
     ]
 }

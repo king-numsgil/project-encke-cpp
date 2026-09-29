@@ -22,6 +22,11 @@ namespace encke::physics
     // that is on its way, and the simulation does not depend on how long the
     // pool took.
     //
+    // A ship (an entity with a ShipSpace) has a space of its own, a second
+    // Jolt system fixed to its frame, for what is aboard; see ShipSpace. The
+    // world's and every ship's step together, one after another, and a body
+    // or the character moves between them as it crosses a ship's volume.
+    //
     // Jolt's jobs run on its own thread pool, one thread per logical
     // processor the physical cores leave over (the hyperthreads beside the
     // terrain workers), plus the main thread, which works while it waits for
@@ -70,11 +75,13 @@ namespace encke::physics
         // A dynamic sphere, its diameter the Transform's scale on x.
         void add_sphere(entt::registry& registry, entt::entity entity);
 
-        // A static body for every StaticCollider in the registry that has
+        // Static bodies for every StaticCollider in the registry that has
         // none yet, at its WorldTransform, in the registry's order, which is
-        // the same on every run; each is marked with a StaticBody. They never
-        // move. Called once the scene is built and its transforms composed,
-        // and after every Scene::update, for models' parts as they spawn.
+        // the same on every run: in the world's space, its ship's, or both,
+        // as it says. Each is marked with a StaticBody. They never move in
+        // their space. Called once the scene is built and its transforms
+        // composed, and after every Scene::update, for models' parts as they
+        // spawn. A ship's space is made here the first time it is seen.
         void add_static_colliders(entt::registry& registry);
 
         // Builds the ground bodies need and steps. With `fixed_frame`, one
@@ -105,8 +112,8 @@ namespace encke::physics
 
         optional<CharacterState> character() const;
 
-        // Away from the nearest pulling body at `point`: the up a character
-        // there stands to.
+        // The up a character at `point` stands to: away from the nearest
+        // pulling body, or, aboard a ship, against the ship's gravity.
         f64vec3 up_at(entt::registry const& registry, f64vec3 const& point) const;
 
         // Nothing held, no ground being built, every body asleep, and the
@@ -121,6 +128,11 @@ namespace encke::physics
 
         // Collision chunks built or building, surface or not.
         u32 collision_chunks() const;
+
+        // Ships with a space of their own, and whether the character is in
+        // one.
+        u32  ship_spaces() const;
+        bool character_aboard() const;
 
         // What a collision shape belongs to, for the debug view.
         enum class ShapeKind

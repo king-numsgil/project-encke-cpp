@@ -187,6 +187,109 @@ namespace encke::physics
         CHECK(stopped.feet.x > face - config::kCharacterRadius - 0.1);
     }
 
+    TEST_CASE("a ship's space holds what is aboard, and lets go of what leaves", "[physics]")
+    {
+        auto const terrain = std::make_shared<terrain::BodyTerrain const>(terrain::example_planet(kSeed));
+
+        entt::registry     registry;
+        entt::entity const earth = registry.create();
+        registry.emplace<Transform>(earth);
+        registry.emplace<Body>(earth, Body{.radius = terrain->radius, .surface_gravity = 9.81});
+        registry.emplace<terrain::PlanetTerrain>(earth, terrain::PlanetTerrain{.terrain = terrain});
+
+        terrain::GroundProbe const probe{*terrain, config::kCollisionLod};
+        optional<f64vec3> const    ground =
+            probe.below(f64vec3{0.0, terrain->radius + terrain::height_bound(*terrain) + 100.0, 0.0});
+        REQUIRE(ground.has_value());
+
+        // A ship hanging 20 m over the pole, turned about the up so its
+        // frame is not the world's: a floor 6 m square whose top is 1 m up
+        // its +Y, only in its own space, and a volume 3 m in radius.
+        f64quat const      turn = glm::angleAxis(0.7, f64vec3{0.0, 1.0, 0.0});
+        entt::entity const ship = registry.create();
+        registry.emplace<Transform>(ship, Transform{.position = *ground + f64vec3{0.0, 20.0, 0.0}, .rotation = turn});
+        registry.emplace<ShipSpace>(ship, ShipSpace{.radius = 3.0, .bottom = 0.0, .top = 5.0});
+        entt::entity const floor = registry.create();
+        registry.emplace<Transform>(floor, Transform{.position = f64vec3{0.0, 0.5, 0.0},
+                                                     .scale    = f32vec3{6.0f, 1.0f, 6.0f},
+                                                     .parent   = ship});
+        registry.emplace<StaticCollider>(floor, StaticCollider{.shape = StaticCollider::Shape::Box,
+                                                               .mesh  = nullptr,
+                                                               .space = ship,
+                                                               .world = false});
+        propagate_transforms(registry);
+        WorldTransform const ship_world = registry.get<WorldTransform>(ship);
+        auto const           in_ship    = [&](f64vec3 const& local) { return ship_world.position + turn * local; };
+
+        PhysicsWorld physics;
+        WorkerPool   pool;
+        pool.start(3, "test");
+        physics.init(0, config::kCollisionLod);
+        physics.add_static_colliders(registry);
+        CHECK(physics.ship_spaces() == 1);
+
+        // One box dropped inside the volume, one beside it, outside.
+        auto const box = [&](f64vec3 const& local) {
+            entt::entity const entity = registry.create();
+            registry.emplace<Transform>(entity, Transform{.position = in_ship(local), .rotation = turn,
+                                                          .scale    = f32vec3{0.5f}});
+            physics.add_box(registry, entity);
+            return entity;
+        };
+        entt::entity const aboard = box(f64vec3{1.0, 3.0, 0.5});
+        entt::entity const beside = box(f64vec3{5.0, 3.0, 0.0});
+
+        auto const run = [&](u64 steps) {
+            u64 const  until    = physics.steps() + steps;
+            auto const deadline = std::chrono::steady_clock::now() + std::chrono::minutes(1);   // takes seconds
+            while (physics.steps() < until && std::chrono::steady_clock::now() < deadline)
+            {
+                while (pool.outstanding() > 0)
+                {
+                    if (pool.drain() == 0)
+                    {
+                        std::this_thread::yield();
+                    }
+                }
+                physics.update(registry, pool, 0.0, true);
+            }
+            REQUIRE(physics.steps() >= until);
+            propagate_transforms(registry);
+        };
+        run(240);
+
+        // Aboard: in the ship's space, a child of the ship, resting on the
+        // floor a half-box above its top, less Jolt's 2 cm penetration
+        // slop, where the ship's frame says.
+        RigidBody const& held = registry.get<RigidBody>(aboard);
+        CHECK(held.space == ship);
+        CHECK(registry.get<Transform>(aboard).parent == ship);
+        CAPTURE(held.position.x, held.position.y, held.position.z);
+        CHECK(std::abs(held.position.y - 1.25) < 0.03);
+        CHECK(glm::length(registry.get<WorldTransform>(aboard).position - in_ship(held.position)) < 1e-6);
+
+        // Beside: the floor is not in the world, so it fell to the ground.
+        RigidBody const& fell = registry.get<RigidBody>(beside);
+        CHECK(fell.space == entt::entity{entt::null});
+        CHECK(fell.position.y - ground->y < 1.0);
+
+        // A character on the floor is aboard; walked out along the ship's
+        // +X, it leaves the volume, the floor with it, and lands below.
+        physics.add_character(registry, in_ship(f64vec3{-1.0, 1.0, -1.0}));
+        run(30);
+        CHECK(physics.character_aboard());
+        CHECK(std::abs(glm::dot(physics.character()->feet - in_ship(f64vec3{0.0, 1.0, 0.0}), turn * f64vec3{0.0, 1.0, 0.0})) < 0.05);
+
+        physics.set_character_input(CharacterInput{.move = turn * f64vec3{config::kWalkSpeed, 0.0, 0.0}});
+        run(180);
+        physics.set_character_input({});
+        run(180);
+        CHECK_FALSE(physics.character_aboard());
+        CharacterState const landed = physics.character().value();
+        CHECK(landed.on_ground);
+        CHECK(landed.feet.y - ground->y < 1.0);
+    }
+
     TEST_CASE("a box dropped from high up lands, and the ground it fell past is freed", "[physics]")
     {
         Drop const first = drop_box();

@@ -70,6 +70,13 @@ namespace encke
         // since a hull stands in for the whole assembly.
         vector<string> no_collision;
 
+        // A ship with a physics::ShipSpace whose space the colliders are
+        // fixed in, and whether they collide in the world's as well: a
+        // ship's hull is both, its decks only its own. Attachments inherit
+        // both.
+        entt::entity collision_space  = entt::null;
+        bool         collide_in_world = true;
+
         // Further models spawned at named nodes of this one, at its scale
         // and luminance: a placement node carrying no geometry of its own,
         // such as a ship's seat.

@@ -86,6 +86,13 @@ namespace encke::config
     // A collision chunk no body has kept for this many steps is freed.
     inline constexpr u64 kCollisionKeepSteps = 300;
 
+    // A body enters a ship's space this far inside its volume and leaves it
+    // this far outside, so one in the doorway does not go back and forth.
+    inline constexpr f64 kShipSpaceHysteresis = 0.3;
+
+    // Bodies in a ship's space, at most.
+    inline constexpr u32 kShipMaxBodies = 4'096;
+
     // -- the walking character ---------------------------------------------------------
     // A capsule standing on its feet: full height and radius, metres, and the
     // eye below its top.

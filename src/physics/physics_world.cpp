@@ -231,18 +231,73 @@ namespace encke::physics
             }
             return best;
         }
+
+        // Away from gravity, or +Y where there is none.
+        f64vec3 up_from(f64vec3 const& gravity)
+        {
+            return glm::length(gravity) > 0.0 ? -glm::normalize(gravity) : f64vec3{0.0, 1.0, 0.0};
+        }
+
+        // A physics space: one Jolt system, the world's or a ship's. A ship's
+        // frame is its entity's world pose, read once an update; the world's
+        // is the identity, so the conversions hold for both.
+        struct Space
+        {
+            entt::entity                        ship = entt::null;   // null: the world's
+            ShipSpace                           volume;
+            std::unique_ptr<JPH::PhysicsSystem> system;
+
+            f64vec3 position{0.0};
+            f64quat rotation{1.0, 0.0, 0.0, 0.0};
+
+            // The frame's velocity, spin (radians a second about a world
+            // axis) and acceleration, from its pose across updates.
+            f64vec3 velocity{0.0};
+            f64vec3 spin{0.0};
+            f64vec3 acceleration{0.0};
+            bool    placed = false;
+
+            // A ship's gravity in its own frame, this update's: the world's
+            // at the ship less the ship's acceleration.
+            f64vec3 gravity{0.0};
+
+            bool world() const { return ship == entt::null; }
+
+            f64vec3 to_world(f64vec3 const& local) const { return position + rotation * local; }
+            f64vec3 to_local(f64vec3 const& point) const { return glm::conjugate(rotation) * (point - position); }
+            f64vec3 vector_to_world(f64vec3 const& v) const { return rotation * v; }
+            f64vec3 vector_to_local(f64vec3 const& v) const { return glm::conjugate(rotation) * v; }
+
+            // The frame's own velocity at a world point, which a body keeps
+            // leaving it and gives up entering it.
+            f64vec3 carried(f64vec3 const& point) const { return velocity + glm::cross(spin, point - position); }
+
+            // Whether a point in the frame is inside the volume grown by
+            // `margin`, or shrunk by a negative one.
+            bool holds(f64vec3 const& local, f64 margin) const
+            {
+                f64 const radial = std::hypot(local.x, local.z);
+                return radial < volume.radius + margin && local.y > volume.bottom - margin &&
+                       local.y < volume.top + margin;
+            }
+        };
     }
 
     struct PhysicsWorld::Impl
     {
         bool live = false;
 
+        // Shared by every space's system: they are fixed tables, and the
+        // spaces step one after another, never at once.
         JPH::BroadPhaseLayerInterfaceTable                       broad_phase{kLayerCount, kLayerCount};
         JPH::ObjectLayerPairFilterTable                          object_filter{kLayerCount};
         std::unique_ptr<JPH::ObjectVsBroadPhaseLayerFilterTable> broad_filter;
         std::unique_ptr<JPH::TempAllocatorImpl>                  temp;
         std::unique_ptr<JPH::JobSystemThreadPool>                jobs;
-        std::unique_ptr<JPH::PhysicsSystem>                      system;
+
+        // The world's first, then ships' in the order they were found, which
+        // is the order they step in.
+        vector<std::unique_ptr<Space>> spaces;
 
         std::unordered_map<ChunkId, Chunk, ChunkIdHash> chunks;
         u32                                             building = 0;
@@ -257,6 +312,147 @@ namespace encke::physics
         std::map<std::tuple<std::shared_ptr<CollisionMesh const>, StaticCollider::Shape, f32, f32, f32>,
                  JPH::ShapeRefC>
             static_shapes;
+
+        u32 lod         = config::kCollisionLod;
+        f64 accumulator = 0.0;
+        u32 held        = 0;
+        u32 dynamic     = 0;
+        u64 steps       = 0;
+
+        // Steps the last update took, which the ships' poses moved across.
+        u32 last_steps = 0;
+
+        // The walking character, if there is one, in `character_space`: its
+        // up and its velocity along the ground in that space's frame, which
+        // eases toward what is asked, and its feet at the last two steps in
+        // the world, for the camera to go between as bodies' Transforms do.
+        JPH::Ref<JPH::CharacterVirtual> character;
+        Space*                          character_space = nullptr;
+        bool                            character_held  = true;
+        CharacterInput                  character_input;
+        f64vec3                         character_previous{0.0};
+        f64vec3                         character_feet{0.0};
+        f64vec3                         character_up{0.0, 1.0, 0.0};
+        JPH::Vec3                       character_across = JPH::Vec3::sZero();
+        f64                             alpha = 1.0;
+
+        Space&       world() { return *spaces.front(); }
+        Space const& world() const { return *spaces.front(); }
+
+        // The space of a ship, or the world's for null. Null for a ship
+        // that has none.
+        Space* find(entt::entity ship)
+        {
+            for (std::unique_ptr<Space>& space : spaces)
+            {
+                if (space->ship == ship)
+                {
+                    return space.get();
+                }
+            }
+            return nullptr;
+        }
+
+        Space& space_of(entt::entity ship)
+        {
+            Space* const space = find(ship);
+            return space != nullptr ? *space : world();
+        }
+
+        // The space whose volume holds a world point, or the world's.
+        Space const& containing(f64vec3 const& point) const
+        {
+            for (size_t index = 1; index < spaces.size(); ++index)
+            {
+                if (spaces[index]->holds(spaces[index]->to_local(point), 0.0))
+                {
+                    return *spaces[index];
+                }
+            }
+            return world();
+        }
+
+        Space& containing(f64vec3 const& point)
+        {
+            return const_cast<Space&>(std::as_const(*this).containing(point));
+        }
+
+        // Where something at a world point, now in `current`, belongs: it
+        // stays in its ship until it is past the volume and the margin, and
+        // enters one only once as far inside it.
+        Space& destination(f64vec3 const& point, Space& current)
+        {
+            if (!current.world() && current.holds(current.to_local(point), config::kShipSpaceHysteresis))
+            {
+                return current;
+            }
+            for (size_t index = 1; index < spaces.size(); ++index)
+            {
+                Space& space = *spaces[index];
+                if (&space != &current && space.holds(space.to_local(point), -config::kShipSpaceHysteresis))
+                {
+                    return space;
+                }
+            }
+            return world();
+        }
+
+        std::unique_ptr<JPH::PhysicsSystem> make_system(u32 max_bodies)
+        {
+            auto system = std::make_unique<JPH::PhysicsSystem>();
+            system->Init(max_bodies, 0, kMaxBodyPairs, kMaxContacts, broad_phase, *broad_filter, object_filter);
+            // The world's gravity is each body's, applied as a force before
+            // every step; a ship's is set on its system then.
+            system->SetGravity(JPH::Vec3::sZero());
+            return system;
+        }
+
+        // A space for every ship not yet given one, and, with `elapsed`, the
+        // simulated time since the last call, every ship's pose, motion and
+        // gravity. The pose is its entity's WorldTransform, so this reads
+        // where the last Scene::update put it.
+        void sync(entt::registry const& registry, optional<f64> elapsed)
+        {
+            for (auto const [entity, ship, world_transform] : registry.view<ShipSpace const, WorldTransform const>().each())
+            {
+                Space* space = find(entity);
+                if (space == nullptr)
+                {
+                    auto made    = std::make_unique<Space>();
+                    made->ship   = entity;
+                    made->system = make_system(config::kShipMaxBodies);
+                    space        = made.get();
+                    spaces.push_back(std::move(made));
+                    log::info("physics: a ship's space, %.1f m across and %.1f m tall", 2.0 * ship.radius,
+                              ship.top - ship.bottom);
+                }
+                space->volume = ship;
+
+                if (space->placed && !elapsed.has_value())
+                {
+                    continue;
+                }
+                if (space->placed && *elapsed > 0.0)
+                {
+                    f64 const     dt       = *elapsed;
+                    f64vec3 const velocity = (world_transform.position - space->position) / dt;
+                    space->acceleration    = (velocity - space->velocity) / dt;
+                    space->velocity        = velocity;
+
+                    f64quat turn = world_transform.rotation * glm::conjugate(space->rotation);
+                    if (turn.w < 0.0)
+                    {
+                        turn = -turn;
+                    }
+                    f64 const angle = glm::angle(turn);
+                    space->spin     = angle > 1.0e-12 ? glm::axis(turn) * (angle / dt) : f64vec3{0.0};
+                }
+                space->position = world_transform.position;
+                space->rotation = world_transform.rotation;
+                space->placed   = true;
+                space->gravity  = space->vector_to_local(gravity_at(registry, space->position) - space->acceleration);
+            }
+        }
 
         // A StaticCollider's shape at `scale`, which is baked into a mesh's
         // or hull's points. Null if it could not be made, logged once.
@@ -333,47 +529,62 @@ namespace encke::physics
             return shape;
         }
 
-        u32 lod         = config::kCollisionLod;
-        f64 accumulator = 0.0;
-        u32 held        = 0;
-        u32 dynamic     = 0;
-        u64 steps       = 0;
+        // The character's feet, in the world.
+        f64vec3 feet() const
+        {
+            return character ? character_space->to_world(from_jolt(character->GetPosition())) : f64vec3{0.0};
+        }
 
-        // The walking character, if there is one: its feet at the last two
-        // steps, for the camera to go between as bodies' Transforms do, and
-        // its velocity along the ground, which eases toward what is asked.
-        JPH::Ref<JPH::CharacterVirtual> character;
-        bool                            character_held = true;
-        CharacterInput                  character_input;
-        f64vec3                         character_previous{0.0};
-        f64vec3                         character_feet{0.0};
-        f64vec3                         character_up{0.0, 1.0, 0.0};
-        JPH::Vec3                       character_across = JPH::Vec3::sZero();
-        f64                             alpha = 1.0;
-
-        // The character's feet.
-        f64vec3 feet() const { return character ? from_jolt(character->GetPosition()) : f64vec3{0.0}; }
-
-        // Awake bodies, the character's inner body left out: it is
-        // kinematic, moved every step, and Jolt keeps it active.
+        // Awake bodies in every space, the character's inner body left out:
+        // it is kinematic, moved every step, and Jolt keeps it active.
         u32 awake_bodies() const
         {
-            u32 awake = system->GetNumActiveBodies(JPH::EBodyType::RigidBody);
-            if (character && system->GetBodyInterfaceNoLock().IsActive(character->GetInnerBodyID()))
+            u32 awake = 0;
+            for (std::unique_ptr<Space> const& space : spaces)
+            {
+                awake += space->system->GetNumActiveBodies(JPH::EBodyType::RigidBody);
+            }
+            if (character && character_space->system->GetBodyInterfaceNoLock().IsActive(character->GetInnerBodyID()))
             {
                 --awake;
             }
             return awake;
         }
 
+        // A new character in `space`, feet and up in its frame; the one
+        // there was goes, and its inner body with it.
+        void make_character(Space& space, f64vec3 const& feet_local, f64vec3 const& up_local)
+        {
+            character    = nullptr;
+            character_up = up_local;
+
+            JPH::CharacterVirtualSettings settings;
+            settings.mShape          = character_shape();
+            settings.mInnerBodyShape = settings.mShape;
+            settings.mInnerBodyLayer = kMoving;
+            settings.mMaxSlopeAngle  = JPH::DegreesToRadians(static_cast<f32>(config::kMaxSlopeDegrees));
+            settings.mMass           = static_cast<f32>(config::kCharacterMass);
+            settings.mUp             = to_jolt_vector(up_local);
+            // Contacts count as ground only on the bottom hemisphere, not the
+            // capsule's side.
+            settings.mSupportingVolume = JPH::Plane{JPH::Vec3::sAxisY(), -static_cast<f32>(config::kCharacterRadius)};
+
+            character       = new JPH::CharacterVirtual{&settings, to_jolt(feet_local), to_jolt(upright(up_local)), 0,
+                                                        space.system.get()};
+            character_space = &space;
+        }
+
         // One step of the character, before the bodies': Jolt's
         // CharacterVirtual sample, generalised to an up that turns with the
         // ground's body. On walkable ground it takes the ground's velocity
         // plus its own, easing toward what is asked, and a jump; in the air
-        // it keeps its fall and most of what it had across.
+        // it keeps its fall and most of what it had across. All of it in its
+        // space's frame.
         void step_character(entt::registry const& registry, f32 dt)
         {
-            f64vec3 const g  = gravity_at(registry, feet());
+            Space& space = *character_space;
+
+            f64vec3 const g = space.world() ? gravity_at(registry, feet()) : space.gravity;
             f64vec3 const up = glm::length(g) > 0.0 ? -glm::normalize(g) : character_up;
             character_up     = up;
 
@@ -386,7 +597,8 @@ namespace encke::physics
             JPH::Vec3 const vertical = up_j * velocity.Dot(up_j);
             JPH::Vec3 const ground   = character->GetGroundVelocity();
 
-            f64vec3 const   move   = character_input.move - up * glm::dot(character_input.move, up);
+            f64vec3 const   asked  = space.vector_to_local(character_input.move);
+            f64vec3 const   move   = asked - up * glm::dot(asked, up);
             JPH::Vec3 const wanted = to_jolt_vector(move);
 
             bool const toward_ground = velocity.Dot(up_j) - ground.Dot(up_j) < 0.1f;
@@ -425,11 +637,111 @@ namespace encke::physics
             update.mWalkStairsStepUp     = up_j * static_cast<f32>(config::kStepUp);
 
             JPH::IgnoreSingleBodyFilter const self{character->GetInnerBodyID()};
-            character->ExtendedUpdate(dt, gravity, update, system->GetDefaultBroadPhaseLayerFilter(kMoving),
-                                      system->GetDefaultLayerFilter(kMoving), self, {}, *temp);
+            character->ExtendedUpdate(dt, gravity, update, space.system->GetDefaultBroadPhaseLayerFilter(kMoving),
+                                      space.system->GetDefaultLayerFilter(kMoving), self, {}, *temp);
 
             character_previous = character_feet;
             character_feet     = feet();
+        }
+
+        // Moves a body into another space: made there with its pose and its
+        // velocity in the world, then removed here. Its Transform is
+        // reparented to the new space's ship, and its last two poses are
+        // carried into its frame, so it draws where it was.
+        void move_body(RigidBody& rigid, Transform& transform, Space& from, Space& to)
+        {
+            JPH::BodyID const         id = body_id(rigid);
+            JPH::BodyCreationSettings settings;
+            {
+                JPH::BodyLockRead const lock{from.system->GetBodyLockInterfaceNoLock(), id};
+                if (!lock.Succeeded())
+                {
+                    return;
+                }
+                settings = lock.GetBody().GetBodyCreationSettings();
+            }
+
+            f64vec3 const point = from.to_world(from_jolt(settings.mPosition));
+            f64quat const turn  = from.rotation * from_jolt(settings.mRotation);
+            f64vec3 const velocity =
+                from.vector_to_world(from_jolt_vector(settings.mLinearVelocity)) + from.carried(point);
+            f64vec3 const spin = from.vector_to_world(from_jolt_vector(settings.mAngularVelocity)) + from.spin;
+
+            settings.mPosition        = to_jolt(to.to_local(point));
+            settings.mRotation        = to_jolt(glm::conjugate(to.rotation) * turn);
+            settings.mLinearVelocity  = to_jolt_vector(to.vector_to_local(velocity - to.carried(point)));
+            settings.mAngularVelocity = to_jolt_vector(to.vector_to_local(spin - to.spin));
+
+            JPH::BodyID const moved = to.system->GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::Activate);
+            if (moved.IsInvalid())
+            {
+                log::error("physics: out of bodies; one stays where it was");
+                return;
+            }
+            JPH::BodyInterface& source = from.system->GetBodyInterface();
+            source.RemoveBody(id);
+            source.DestroyBody(id);
+
+            auto const carry  = [&](f64vec3 const& p) { return to.to_local(from.to_world(p)); };
+            auto const rotate = [&](f64quat const& q) { return glm::conjugate(to.rotation) * (from.rotation * q); };
+            rigid.previous_position = carry(rigid.previous_position);
+            rigid.position          = carry(rigid.position);
+            rigid.previous_rotation = rotate(rigid.previous_rotation);
+            rigid.rotation          = rotate(rigid.rotation);
+            rigid.body              = moved.GetIndexAndSequenceNumber();
+            rigid.space             = to.ship;
+            transform.parent        = to.ship;
+
+            log::info("physics: a body moved into %s", to.world() ? "the world" : "a ship");
+        }
+
+        // Moves the character into another space, keeping where it stands,
+        // how it moves in the world and which way is up.
+        void move_character(Space& to)
+        {
+            Space const&  from     = *character_space;
+            f64vec3 const point    = feet();
+            f64vec3 const velocity = from.vector_to_world(from_jolt_vector(character->GetLinearVelocity())) +
+                                     from.carried(point);
+            f64vec3 const across   = from.vector_to_world(from_jolt_vector(character_across));
+            f64vec3 const up       = from.vector_to_world(character_up);
+
+            make_character(to, to.to_local(point), to.vector_to_local(up));
+            character->SetLinearVelocity(to_jolt_vector(to.vector_to_local(velocity - to.carried(point))));
+            character_across = to_jolt_vector(to.vector_to_local(across));
+
+            log::info("physics: the character moved into %s", to.world() ? "the world" : "a ship");
+        }
+
+        // Everything that has crossed a ship's volume moves to the space it
+        // is now in. Before each step, so every body steps in its own.
+        void transfer(entt::registry& registry)
+        {
+            if (spaces.size() < 2)
+            {
+                return;
+            }
+            for (auto const [entity, rigid, transform] : registry.view<RigidBody, Transform>().each())
+            {
+                if (!rigid.added)
+                {
+                    continue;
+                }
+                Space& from = space_of(rigid.space);
+                Space& to   = destination(from.to_world(rigid.position), from);
+                if (&to != &from)
+                {
+                    move_body(rigid, transform, from, to);
+                }
+            }
+            if (character && !character_held)
+            {
+                Space& to = destination(feet(), *character_space);
+                if (&to != character_space)
+                {
+                    move_character(to);
+                }
+            }
         }
 
         ~Impl()
@@ -438,9 +750,9 @@ namespace encke::physics
             {
                 return;
             }
-            // It removes its inner body from the system as it goes.
+            // It removes its inner body from its system as it goes.
             character = nullptr;
-            system.reset();
+            spaces.clear();
             jobs.reset();
             temp.reset();
             JPH::UnregisterTypes();
@@ -538,7 +850,7 @@ namespace encke::physics
             }
             std::ranges::sort(stale, before);
 
-            JPH::BodyInterface& bodies = system->GetBodyInterface();
+            JPH::BodyInterface& bodies = world().system->GetBodyInterface();
             for (ChunkId const& id : stale)
             {
                 Chunk const& chunk = chunks.at(id);
@@ -648,7 +960,7 @@ namespace encke::physics
             }
             std::ranges::sort(built, before);
 
-            JPH::BodyInterface& bodies = system->GetBodyInterface();
+            JPH::BodyInterface& bodies = world().system->GetBodyInterface();
             for (ChunkId const& id : built)
             {
                 Chunk&                          chunk = chunks[id];
@@ -660,7 +972,9 @@ namespace encke::physics
             }
         }
 
-        // A dynamic body on `entity` at its Transform's pose, held.
+        // A dynamic body on `entity` at its Transform's pose, held, in the
+        // world: a root. Once added it moves into a ship whose volume it is
+        // in.
         void add(entt::registry& registry, entt::entity entity, JPH::ShapeRefC const& shape, f64 bound)
         {
             Transform const&          transform = registry.get<Transform>(entity);
@@ -671,7 +985,7 @@ namespace encke::physics
             // one-sided terrain triangle between two steps: a half-metre box
             // dropped from 60 m went straight through the ground.
             settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
-            JPH::Body* const body = system->GetBodyInterface().CreateBody(settings);
+            JPH::Body* const body = world().system->GetBodyInterface().CreateBody(settings);
             if (body == nullptr)
             {
                 log::error("physics: out of bodies");
@@ -686,6 +1000,7 @@ namespace encke::physics
                                                     .rotation          = transform.rotation,
                                                     .bound             = bound,
                                                     .added             = false,
+                                                    .space             = entt::null,
                                                 });
             ++held;
         }
@@ -711,10 +1026,14 @@ namespace encke::physics
         {
             f32 const dt = static_cast<f32>(1.0 / config::kPhysicsHz);
 
-            // Each awake body's own gravity, as a force for this step.
-            JPH::BodyIDVector active;
-            system->GetActiveBodies(JPH::EBodyType::RigidBody, active);
-            JPH::BodyLockInterfaceNoLock const& locks = system->GetBodyLockInterfaceNoLock();
+            transfer(registry);
+
+            // Each awake body in the world gets its own gravity, as a force
+            // for this step.
+            JPH::PhysicsSystem& system = *world().system;
+            JPH::BodyIDVector   active;
+            system.GetActiveBodies(JPH::EBodyType::RigidBody, active);
+            JPH::BodyLockInterfaceNoLock const& locks = system.GetBodyLockInterfaceNoLock();
             for (JPH::BodyID const id : active)
             {
                 JPH::BodyLockWrite lock{locks, id};
@@ -738,25 +1057,35 @@ namespace encke::physics
                               inverse_mass);
             }
 
+            // A ship's is one vector in its frame, the same for everything
+            // aboard.
+            for (size_t index = 1; index < spaces.size(); ++index)
+            {
+                spaces[index]->system->SetGravity(to_jolt_vector(spaces[index]->gravity));
+            }
+
             if (character && !character_held)
             {
                 step_character(registry, dt);
             }
 
-            system->Update(dt, 1, temp.get(), jobs.get());
+            for (std::unique_ptr<Space> const& space : spaces)
+            {
+                space->system->Update(dt, 1, temp.get(), jobs.get());
+            }
             ++steps;
 
             // Every body, not only the awake ones: one that fell asleep in
             // this step moved in it too.
-            JPH::BodyInterface const& bodies = system->GetBodyInterfaceNoLock();
             for (auto const [entity, rigid] : registry.view<RigidBody>().each())
             {
                 rigid.previous_position = rigid.position;
                 rigid.previous_rotation = rigid.rotation;
                 if (rigid.added)
                 {
-                    JPH::RVec3 position;
-                    JPH::Quat  rotation;
+                    JPH::BodyInterface const& bodies = space_of(rigid.space).system->GetBodyInterfaceNoLock();
+                    JPH::RVec3                position;
+                    JPH::Quat                 rotation;
                     bodies.GetPositionAndRotation(body_id(rigid), position, rotation);
                     rigid.position = from_jolt(position);
                     rigid.rotation = from_jolt(rotation);
@@ -787,11 +1116,10 @@ namespace encke::physics
         impl_->broad_filter = std::make_unique<JPH::ObjectVsBroadPhaseLayerFilterTable>(
             impl_->broad_phase, kLayerCount, impl_->object_filter, kLayerCount);
 
-        impl_->system = std::make_unique<JPH::PhysicsSystem>();
-        impl_->system->Init(kMaxBodies, 0, kMaxBodyPairs, kMaxContacts, impl_->broad_phase,
-                            *impl_->broad_filter, impl_->object_filter);
-        // Gravity is each body's, applied as a force before every step.
-        impl_->system->SetGravity(JPH::Vec3::sZero());
+        auto world    = std::make_unique<Space>();
+        world->system = impl_->make_system(kMaxBodies);
+        world->placed = true;
+        impl_->spaces.push_back(std::move(world));
 
         impl_->temp = std::make_unique<JPH::TempAllocatorImpl>(kTempBytes);
         impl_->jobs = std::make_unique<JPH::JobSystemThreadPool>();
@@ -827,37 +1155,58 @@ namespace encke::physics
         {
             return;
         }
+        impl_->sync(registry, nullopt);
 
         // Marked after the view is done with, since marking changes a pool
         // the view excludes.
-        JPH::BodyInterface&                     bodies = impl_->system->GetBodyInterface();
-        vector<std::pair<entt::entity, u32>>    made;
-        u32                                     failed = 0;
+        vector<entt::entity> made;
+        u32                  bodies = 0;
+        u32                  failed = 0;
         for (auto const [entity, collider, world] :
              registry.view<StaticCollider const, WorldTransform const>(entt::exclude<StaticBody>).each())
         {
+            made.push_back(entity);
             JPH::ShapeRefC const shape = impl_->static_shape(collider, world.scale);
             if (shape == nullptr)
             {
-                made.emplace_back(entity, JPH::BodyID::cInvalidBodyID);
                 ++failed;
                 continue;
             }
 
-            JPH::BodyCreationSettings settings{shape, to_jolt(world.position), to_jolt(world.rotation),
-                                               JPH::EMotionType::Static, kStatic};
-            settings.mUserData    = kStaticProp;
-            JPH::BodyID const id = bodies.CreateAndAddBody(settings, JPH::EActivation::DontActivate);
-            made.emplace_back(entity, id.GetIndexAndSequenceNumber());
+            auto const add = [&](Space& space) {
+                JPH::BodyCreationSettings settings{shape, to_jolt(space.to_local(world.position)),
+                                                   to_jolt(glm::conjugate(space.rotation) * world.rotation),
+                                                   JPH::EMotionType::Static, kStatic};
+                settings.mUserData = kStaticProp;
+                space.system->GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::DontActivate);
+                ++bodies;
+            };
+
+            if (collider.world)
+            {
+                add(impl_->world());
+            }
+            if (collider.space != entt::null)
+            {
+                if (Space* const space = impl_->find(collider.space))
+                {
+                    add(*space);
+                }
+                else
+                {
+                    log::warn("physics: a collider names a ship with no ShipSpace");
+                }
+            }
         }
 
-        for (auto const& [entity, body] : made)
+        for (entt::entity const entity : made)
         {
-            registry.emplace<StaticBody>(entity, StaticBody{.body = body});
+            registry.emplace<StaticBody>(entity);
         }
         if (!made.empty())
         {
-            log::info("physics: %zu static colliders, %u of them without a shape", made.size(), failed);
+            log::info("physics: %zu static colliders as %u bodies, %u of them without a shape", made.size(), bodies,
+                      failed);
         }
     }
 
@@ -868,18 +1217,24 @@ namespace encke::physics
             return;
         }
 
+        impl_->sync(registry, static_cast<f64>(impl_->last_steps) / config::kPhysicsHz);
         impl_->add_built();
 
-        // The ground every held or moving body will touch is built; asleep, a
-        // body stays where it is, over ground already built. Every body,
-        // asleep or not, keeps the ground around it, out to twice the margin
-        // it is built to, so a body resting near a chunk's edge does not make
-        // the chunks past it come and go.
+        // The ground every held or moving body in the world will touch is
+        // built; asleep, a body stays where it is, over ground already
+        // built. Every body, asleep or not, keeps the ground around it, out
+        // to twice the margin it is built to, so a body resting near a
+        // chunk's edge does not make the chunks past it come and go. Aboard
+        // a ship there is no terrain to build.
         vector<Ground> const all     = grounds(registry);
-        JPH::BodyInterface&  bodies  = impl_->system->GetBodyInterface();
+        JPH::BodyInterface&  bodies  = impl_->world().system->GetBodyInterface();
         bool                 waiting = false;
         for (auto const [entity, rigid] : registry.view<RigidBody>().each())
         {
+            if (rigid.space != entt::null)
+            {
+                continue;
+            }
             Ground const* const ground = impl_->nearest(all, rigid.position);
             if (ground == nullptr)
             {
@@ -894,7 +1249,7 @@ namespace encke::physics
 
         // The character's ground, as a moving body's: always, since what it
         // is asked can move it at any step.
-        if (impl_->character)
+        if (impl_->character && impl_->character_space->world())
         {
             f64vec3 const       feet   = impl_->feet();
             f64 const           bound  = config::kCharacterHeight;
@@ -906,6 +1261,7 @@ namespace encke::physics
         }
 
         f64 alpha = 1.0;
+        u32 taken = 0;
         if (!waiting)
         {
             if (impl_->character && impl_->character_held)
@@ -945,6 +1301,7 @@ namespace encke::physics
             {
                 impl_->step(registry);
             }
+            taken = steps;
             impl_->evict();
         }
         else
@@ -952,8 +1309,10 @@ namespace encke::physics
             // Time spent waiting for ground is not simulated later.
             impl_->accumulator = 0.0;
         }
-        impl_->alpha = alpha;
+        impl_->alpha      = alpha;
+        impl_->last_steps = taken;
 
+        // In the frame of the space each body is in, which is its parent's.
         for (auto const [entity, rigid, transform] : registry.view<RigidBody, Transform>().each())
         {
             if (!rigid.added)
@@ -968,21 +1327,12 @@ namespace encke::physics
     void PhysicsWorld::add_character(entt::registry const& registry, f64vec3 const& feet)
     {
         remove_character();
-        impl_->character_up = up_at(registry, feet);
+        impl_->sync(registry, nullopt);
 
-        JPH::CharacterVirtualSettings settings;
-        settings.mShape                     = character_shape();
-        settings.mInnerBodyShape            = settings.mShape;
-        settings.mInnerBodyLayer            = kMoving;
-        settings.mMaxSlopeAngle             = JPH::DegreesToRadians(static_cast<f32>(config::kMaxSlopeDegrees));
-        settings.mMass                      = static_cast<f32>(config::kCharacterMass);
-        settings.mUp                        = to_jolt_vector(impl_->character_up);
-        // Contacts count as ground only on the bottom hemisphere, not the
-        // capsule's side.
-        settings.mSupportingVolume = JPH::Plane{JPH::Vec3::sAxisY(), -static_cast<f32>(config::kCharacterRadius)};
+        Space&        space = impl_->containing(feet);
+        f64vec3 const g     = space.world() ? gravity_at(registry, feet) : space.vector_to_world(space.gravity);
+        impl_->make_character(space, space.to_local(feet), space.vector_to_local(up_from(g)));
 
-        impl_->character = new JPH::CharacterVirtual{&settings, to_jolt(feet), to_jolt(upright(impl_->character_up)),
-                                                     0, impl_->system.get()};
         impl_->character_held     = true;
         impl_->character_input    = {};
         impl_->character_across   = JPH::Vec3::sZero();
@@ -992,7 +1342,8 @@ namespace encke::physics
 
     void PhysicsWorld::remove_character()
     {
-        impl_->character = nullptr;
+        impl_->character       = nullptr;
+        impl_->character_space = nullptr;
     }
 
     bool PhysicsWorld::has_character() const
@@ -1006,7 +1357,16 @@ namespace encke::physics
         {
             return;
         }
-        impl_->character->SetPosition(to_jolt(feet));
+        Space& space = impl_->containing(feet);
+        if (&space != impl_->character_space)
+        {
+            f64vec3 const up = impl_->character_space->vector_to_world(impl_->character_up);
+            impl_->make_character(space, space.to_local(feet), space.vector_to_local(up));
+        }
+        else
+        {
+            impl_->character->SetPosition(to_jolt(space.to_local(feet)));
+        }
         impl_->character->SetLinearVelocity(JPH::Vec3::sZero());
         impl_->character_across   = JPH::Vec3::sZero();
         impl_->character_feet     = feet;
@@ -1025,10 +1385,12 @@ namespace encke::physics
             return nullopt;
         }
         JPH::CharacterVirtual const& character = *impl_->character;
+        Space const&                 space     = *impl_->character_space;
+        f64vec3 const                feet      = glm::mix(impl_->character_previous, impl_->character_feet, impl_->alpha);
         return CharacterState{
-            .feet      = glm::mix(impl_->character_previous, impl_->character_feet, impl_->alpha),
-            .up        = impl_->character_up,
-            .velocity  = from_jolt_vector(character.GetLinearVelocity()),
+            .feet      = feet,
+            .up        = space.vector_to_world(impl_->character_up),
+            .velocity  = space.vector_to_world(from_jolt_vector(character.GetLinearVelocity())) + space.carried(feet),
             .on_ground = character.GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround,
             .held      = impl_->character_held,
         };
@@ -1036,8 +1398,8 @@ namespace encke::physics
 
     f64vec3 PhysicsWorld::up_at(entt::registry const& registry, f64vec3 const& point) const
     {
-        f64vec3 const g = gravity_at(registry, point);
-        return glm::length(g) > 0.0 ? -glm::normalize(g) : f64vec3{0.0, 1.0, 0.0};
+        Space const& space = impl_->containing(point);
+        return up_from(space.world() ? gravity_at(registry, point) : space.vector_to_world(space.gravity));
     }
 
     bool PhysicsWorld::idle() const
@@ -1078,6 +1440,16 @@ namespace encke::physics
         return impl_ ? static_cast<u32>(impl_->chunks.size()) : 0;
     }
 
+    u32 PhysicsWorld::ship_spaces() const
+    {
+        return impl_ ? static_cast<u32>(impl_->spaces.size() - 1) : 0;
+    }
+
+    bool PhysicsWorld::character_aboard() const
+    {
+        return impl_ && impl_->character && !impl_->character_space->world();
+    }
+
     void PhysicsWorld::collision_triangles(
         function<void(ShapeKind kind, span<f64vec3 const> triangles)> const& visit) const
     {
@@ -1086,55 +1458,61 @@ namespace encke::physics
             return;
         }
 
-        JPH::BodyIDVector ids;
-        impl_->system->GetBodies(ids);
-
-        JPH::BodyLockInterfaceNoLock const& locks = impl_->system->GetBodyLockInterfaceNoLock();
-        vector<f64vec3>                     points;
-        for (JPH::BodyID const id : ids)
+        vector<f64vec3> points;
+        for (std::unique_ptr<Space> const& space : impl_->spaces)
         {
-            JPH::BodyLockRead lock{locks, id};
-            if (!lock.Succeeded())
+            JPH::BodyIDVector ids;
+            space->system->GetBodies(ids);
+
+            JPH::BodyLockInterfaceNoLock const& locks = space->system->GetBodyLockInterfaceNoLock();
+            for (JPH::BodyID const id : ids)
             {
-                continue;
-            }
-            JPH::Body const& body = lock.GetBody();
-
-            ShapeKind const kind = body.IsStatic()           ? (body.GetUserData() == kStaticProp ? ShapeKind::Static
-                                                                                                  : ShapeKind::Ground)
-                                   : !body.IsInBroadPhase() ? ShapeKind::Held
-                                   : body.IsActive()        ? ShapeKind::Awake
-                                                            : ShapeKind::Asleep;
-
-            // Triangulated relative to the centre of mass, in f32, then
-            // placed in f64: a chunk's corner is millions of metres out.
-            // Only leaf shapes triangulate, so a compound, such as the
-            // character's offset inner capsule, is taken apart first.
-            JPH::RVec3 const centre = body.GetCenterOfMassPosition();
-            points.clear();
-
-            LeafShapes leaves;
-            body.GetTransformedShape().CollectTransformedShapes(JPH::AABox::sBiggest(), leaves);
-            for (JPH::TransformedShape const& leaf : leaves.shapes)
-            {
-                JPH::Shape::GetTrianglesContext context;
-                leaf.GetTrianglesStart(context, JPH::AABox::sBiggest(), centre);
-                constexpr int                  kBatch = 256;
-                array<JPH::Float3, 3 * kBatch> batch{};
-                for (;;)
+                JPH::BodyLockRead lock{locks, id};
+                if (!lock.Succeeded())
                 {
-                    int const count = leaf.GetTrianglesNext(context, kBatch, batch.data());
-                    if (count <= 0)
+                    continue;
+                }
+                JPH::Body const& body = lock.GetBody();
+
+                ShapeKind const kind = body.IsStatic()           ? (body.GetUserData() == kStaticProp ? ShapeKind::Static
+                                                                                                      : ShapeKind::Ground)
+                                       : !body.IsInBroadPhase() ? ShapeKind::Held
+                                       : body.IsActive()        ? ShapeKind::Awake
+                                                                : ShapeKind::Asleep;
+
+                // Triangulated relative to the centre of mass, in f32, then
+                // placed in f64: a chunk's corner is millions of metres out,
+                // and a ship's frame is carried into the world. Only leaf
+                // shapes triangulate, so a compound, such as the character's
+                // offset inner capsule, is taken apart first.
+                JPH::RVec3 const centre = body.GetCenterOfMassPosition();
+                points.clear();
+
+                LeafShapes leaves;
+                body.GetTransformedShape().CollectTransformedShapes(JPH::AABox::sBiggest(), leaves);
+                for (JPH::TransformedShape const& leaf : leaves.shapes)
+                {
+                    JPH::Shape::GetTrianglesContext context;
+                    leaf.GetTrianglesStart(context, JPH::AABox::sBiggest(), centre);
+                    constexpr int                  kBatch = 256;
+                    array<JPH::Float3, 3 * kBatch> batch{};
+                    for (;;)
                     {
-                        break;
-                    }
-                    for (size_t index = 0; index < static_cast<size_t>(3 * count); ++index)
-                    {
-                        points.push_back(from_jolt(centre) + f64vec3{batch[index].x, batch[index].y, batch[index].z});
+                        int const count = leaf.GetTrianglesNext(context, kBatch, batch.data());
+                        if (count <= 0)
+                        {
+                            break;
+                        }
+                        for (size_t index = 0; index < static_cast<size_t>(3 * count); ++index)
+                        {
+                            f64vec3 const local = from_jolt(centre) + f64vec3{batch[index].x, batch[index].y,
+                                                                              batch[index].z};
+                            points.push_back(space->to_world(local));
+                        }
                     }
                 }
+                visit(kind, points);
             }
-            visit(kind, points);
         }
     }
 

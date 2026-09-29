@@ -220,12 +220,14 @@ namespace encke
         if (mesh == cube_mesh)
         {
             registry.emplace<physics::StaticCollider>(
-                entity, physics::StaticCollider{.shape = physics::StaticCollider::Shape::Box, .mesh = nullptr});
+                entity, physics::StaticCollider{
+                            .shape = physics::StaticCollider::Shape::Box, .mesh = nullptr, .space = entt::null, .world = true});
         }
         else if (mesh == sphere_mesh)
         {
             registry.emplace<physics::StaticCollider>(
-                entity, physics::StaticCollider{.shape = physics::StaticCollider::Shape::Sphere, .mesh = nullptr});
+                entity, physics::StaticCollider{
+                            .shape = physics::StaticCollider::Shape::Sphere, .mesh = nullptr, .space = entt::null, .world = true});
         }
         return entity;
     }
@@ -362,6 +364,8 @@ namespace encke
                                    .shape = spawn.collision == Collision::Mesh ? physics::StaticCollider::Shape::Mesh
                                                                                : physics::StaticCollider::Shape::Hull,
                                    .mesh  = part.collision,
+                                   .space = spawn.collision_space,
+                                   .world = spawn.collide_in_world,
                                });
                 }
             }
@@ -386,9 +390,11 @@ namespace encke
                                                     .fit          = std::nullopt,
                                                     .rest_on_root = false,
                                                     .luminance    = spawn.luminance,
-                                                    .collision    = attachment.collision,
-                                                    .no_collision = {},
-                                                    .attachments  = {},
+                                                    .collision        = attachment.collision,
+                                                    .no_collision     = {},
+                                                    .collision_space  = spawn.collision_space,
+                                                    .collide_in_world = spawn.collide_in_world,
+                                                    .attachments      = {},
                                                 });
         }
     }
@@ -607,9 +613,11 @@ namespace encke
                       .fit          = kHelmetWidth,
                       .rest_on_root = true,
                       .luminance    = kVisorLuminance,
-                      .collision    = ModelSpawn::Collision::None,
-                      .no_collision = {},
-                      .attachments  = {},
+                      .collision        = ModelSpawn::Collision::None,
+                      .no_collision     = {},
+                      .collision_space  = entt::null,
+                      .collide_in_world = true,
+                      .attachments      = {},
                   });
         }
 
@@ -625,6 +633,15 @@ namespace encke
         // have joints and are left out, open or shut; so are the turrets,
         // which will turn and have no joint in the file yet. The seats are a
         // convex hull per part.
+        //
+        // The inside is the ship's own physics space (physics::ShipSpace),
+        // so what is aboard keeps simulating in the ship's frame once it
+        // flies. The hull collides in both spaces, the decks and seats only
+        // in the ship's. The volume is a guess until the file carries one:
+        // a cylinder a little wider than the decks, which reach 3.6 m from
+        // the axis, and inside the hull's outer wall, at least 3.9 m out;
+        // from under the drive deck's floor, 5.95 m up, to over the
+        // avionics deck's ceiling.
         {
             constexpr f64 kShipKeel = 0.12;
 
@@ -640,20 +657,27 @@ namespace encke
                                                 .fit          = std::nullopt,
                                                 .rest_on_root = false,
                                                 .luminance    = kShipLuminance,
-                                                .collision    = ModelSpawn::Collision::Mesh,
-                                                .no_collision = {"Turret_"},
-                                                .attachments  = {},
+                                                .collision        = ModelSpawn::Collision::Mesh,
+                                                .no_collision     = {"Turret_"},
+                                                .collision_space  = entt::null,
+                                                .collide_in_world = true,
+                                                .attachments      = {},
                                             });
+            registry.get<ModelSpawn>(ship).collision_space = ship;
+            registry.emplace<physics::ShipSpace>(ship, physics::ShipSpace{.radius = 4.1, .bottom = 5.0, .top = 30.0});
+
             spawn(registry.get<Transform>(ship).position, rotation_,
                   ModelSpawn{
-                      .model        = assets.load_model(asset_path("torchship/torchship_interior.gltf")),
-                      .scale        = 1.0,
-                      .fit          = std::nullopt,
-                      .rest_on_root = false,
-                      .luminance    = kShipLuminance,
-                      .collision    = ModelSpawn::Collision::Mesh,
-                      .no_collision = {},
-                      .attachments  = {
+                      .model            = assets.load_model(asset_path("torchship/torchship_interior.gltf")),
+                      .scale            = 1.0,
+                      .fit              = std::nullopt,
+                      .rest_on_root     = false,
+                      .luminance        = kShipLuminance,
+                      .collision        = ModelSpawn::Collision::Mesh,
+                      .no_collision     = {},
+                      .collision_space  = ship,
+                      .collide_in_world = false,
+                      .attachments      = {
                           {.node = "Seat_Pilot", .model = seat, .collision = ModelSpawn::Collision::Hulls},
                           {.node = "Seat_Tactical", .model = seat, .collision = ModelSpawn::Collision::Hulls},
                       },

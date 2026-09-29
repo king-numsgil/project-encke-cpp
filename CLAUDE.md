@@ -1656,7 +1656,8 @@ Known gaps:
 `physics::PhysicsWorld` runs Jolt (see *Dependencies* for how it is
 built): one `PhysicsSystem` for the scene, a fixed `config::kPhysicsHz`
 (60) steps a second, positions in f64 world space end to end. An entity
-with a `RigidBody` is a root whose `Transform` the world writes after
+with a `RigidBody` is a root, or a ship's child while aboard (see below),
+whose `Transform` the world writes after
 every step, interpolated between the last two steps by how far the wall
 clock is between them; under a scenario it steps exactly once a frame and
 draws the latest step. `update` runs after the pool's drain and before
@@ -1732,6 +1733,30 @@ draws the latest step. `update` runs after the pool's drain and before
   `Scene::update`, making a body for each `StaticCollider` without a
   `StaticBody` yet. Shapes are cached by mesh and scale, so instanced
   props build once.
+- **A ship's inside is a physics space of its own.** An entity with a
+  `ShipSpace` (`physics/components`) gets a second Jolt `PhysicsSystem`,
+  fixed to its frame, for what is aboard; the world's is the first of
+  `Impl::spaces`, and all of them step one after another each step, in
+  that order, sharing the job system and temp allocator. A ship's gravity
+  is one vector in its frame, the world's at the ship less the ship's
+  acceleration, set on its system before each step, so landed it is the
+  planet's and under thrust or in free fall it follows. The ship's pose,
+  velocity, spin and acceleration come from its entity's `WorldTransform`
+  across updates (`Impl::sync`), finite differences for now, since the
+  ship does not fly yet. The volume is a cylinder along the ship's +Y;
+  before every step (`Impl::transfer`) a body or the character whose
+  point has crossed it, by `kShipSpaceHysteresis` either way, is made
+  again in the other space with its pose and world velocity carried over
+  and its frame's velocity and spin taken off or added, and its Transform
+  reparented to the ship or back to the world. Bodies aboard are children
+  of the ship, their poses in its frame; terrain is built only for the
+  world's. A `StaticCollider` names the space it is fixed in and whether
+  it is in the world's too: the torchship's hull is in both, its decks
+  and seats in the ship's alone. `physics_world_test` hangs a turned ship
+  over the pole with a floor only in its space, drops one box inside the
+  volume and one beside it, and walks a character off the floor and out;
+  `scenarios/torchship.json` drops crates on D2 and walks out the cargo
+  door, byte-identical across runs.
 - **The collision view takes compound shapes apart first**
   (`CollectTransformedShapes`): Jolt triangulates only leaf shapes, and
   the character's offset inner capsule, a `RotatedTranslatedShape`, hit
@@ -1744,6 +1769,17 @@ Known gaps:
 - The torchship's hull is 128k triangles, past the collision view's
   `kMaxDebugLines`, so near it the view drops shapes.
 - The ship's decks are joined by ladders, and the character cannot climb.
+  The floor hatches are modelled open and have no colliders, so the deck
+  centres are holes down the ladder shaft.
+- The torchship's volume is a guess in `render/scene.cpp`, a cylinder of
+  4.1 m from 5 to 30 m up, until the file carries one.
+- Ship spaces: the ship's world body is its static hull, which would not
+  follow a flying ship; spin enters only the velocity carried across the
+  boundary, not the gravity aboard (no centrifugal or Coriolis term); a
+  teleported ship reads as one huge acceleration for an update; a ship
+  whose entity is destroyed keeps its space.
+- The ship's inside is drawn from outside, and the hull does not hide it
+  from the culler: it costs its draws wherever the ship is in view.
 - LOD 1 collision still lacks the octaves under 1 m that the drawn LOD 0
   ground has; a resting body can sink or hover by the centimetres they add.
   Not yet checked on the mountain belts' steeper rock, where those octaves
