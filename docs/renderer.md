@@ -70,6 +70,8 @@ or a landing site has its lights.
 - MAILBOX where offered, FIFO otherwise. A CPU limiter holds 60 fps on top
   (`App::limit_frame_rate`), sleeping with `SDL_DelayNS` to a deadline that
   advances by whole periods; MinGW's `sleep_for` lands on the 15.6 ms tick.
+  Its sleep pumps events at up to 120 Hz (`App::idle_until`), sub-frame
+  event stamping; `docs/input.md` has why.
 - Startup buffers are device-local, filled through `submit_immediate`, which
   waits on the queue. Per-frame uploads go through `StagingArena` instead:
   one per frame in flight, rewound after the slot's fence. Its size,

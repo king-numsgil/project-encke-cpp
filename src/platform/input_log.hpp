@@ -7,7 +7,8 @@
 // input_log.cpp.
 //
 // Times are `ns`, nanoseconds since the log started, from SDL's event
-// timestamps: when SDL pumped the device, once a frame, so quantised to it.
+// timestamps: when SDL pumped the device, so quantised to the pumps (see
+// App::idle_until).
 // `device` is SDL's instance id, which a `device` record introduces.
 
 namespace encke::input_log

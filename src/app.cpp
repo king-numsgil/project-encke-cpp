@@ -41,6 +41,11 @@ namespace encke
         // The frame limiter's rate, when it is on.
         constexpr f64 kFrameLimitHz = 60.0;
 
+        // Sub-frame event stamping: the most often the limiter's idle time
+        // pumps events, so input is stamped finer than the frame. A ceiling, not a rate: a frame
+        // with less idle time pumps less, down to the frame's own poll.
+        constexpr f64 kIdlePumpHz = 120.0;
+
         // Where each debug window first opens: beside the stats window and
         // clear of one another at the default 1280x720, so opening them all
         // does not stack them.
@@ -882,6 +887,46 @@ namespace encke
         return true;
     }
 
+    void App::idle_until(std::chrono::steady_clock::time_point deadline,
+                         std::chrono::steady_clock::time_point frame_start)
+    {
+        using clock = std::chrono::steady_clock;
+
+        // SDL_DelayNS, not std::this_thread::sleep_for: on Windows SDL waits
+        // on a high-resolution timer, where MinGW's sleep_for goes through
+        // Sleep() and the default 15.6 ms tick.
+        auto const sleep = [](clock::duration span) {
+            auto const ns = std::chrono::duration_cast<std::chrono::nanoseconds>(span).count();
+            if (ns > 0)
+            {
+                SDL_DelayNS(static_cast<u64>(ns));
+            }
+        };
+
+        auto const pump_period = std::chrono::duration_cast<clock::duration>(
+            std::chrono::duration<f64>(1.0 / kIdlePumpHz));
+
+        // Pumps fall on a grid from the frame's start, the deadline it woke
+        // at and polled, so they hold their rate rather than drifting by
+        // each wake's lateness. A slot the frame's work overran is pumped
+        // as soon as the work ends; a slot at or past the deadline is left
+        // to the next frame's poll, which pumps first.
+        clock::time_point next_pump = frame_start + pump_period;
+        clock::time_point now       = clock::now();
+        while (next_pump < deadline)
+        {
+            sleep(next_pump - now);
+            SDL_PumpEvents();
+
+            now = clock::now();
+            while (next_pump <= now)
+            {
+                next_pump += pump_period;
+            }
+        }
+        sleep(deadline - now);
+    }
+
     f64 App::limit_frame_rate()
     {
         using clock = std::chrono::steady_clock;
@@ -898,11 +943,7 @@ namespace encke
 
         if (next_frame_.has_value() && start < *next_frame_)
         {
-            // SDL_DelayNS, not std::this_thread::sleep_for: on Windows SDL
-            // waits on a high-resolution timer, where MinGW's sleep_for goes
-            // through Sleep() and the default 15.6 ms tick.
-            auto const wait = std::chrono::duration_cast<std::chrono::nanoseconds>(*next_frame_ - start);
-            SDL_DelayNS(static_cast<u64>(wait.count()));
+            idle_until(*next_frame_, *next_frame_ - period);
         }
 
         auto const woke = clock::now();

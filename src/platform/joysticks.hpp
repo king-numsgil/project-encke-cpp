@@ -43,8 +43,9 @@ namespace encke
     // The log is how input is examined away from the screen: JSONL (see
     // platform/input_log), one record per button edge, hat change and axis
     // move, stamped with SDL's event time. That is when SDL pumped the
-    // device, once a frame, not when the device reported: durations come out
-    // in whole frames. It opens with a `device` record per joystick,
+    // device, not when the device reported: as fine as the limiter's idle
+    // pumps (App::idle_until), else once a frame. It opens with a `device`
+    // record per joystick,
     // holding its state at that moment.
     class Joysticks
     {

@@ -116,6 +116,15 @@ namespace encke
         // returns the milliseconds slept.
         f64 limit_frame_rate();
 
+        // Sub-frame event stamping. The limiter's sleep: until `deadline`,
+        // pumping events on a grid of
+        // kIdlePumpHz from `frame_start`. Pumping only queues events, stamped
+        // with the time; Window::poll still takes them at the top of the
+        // frame. Uncapped, or when the frame's work leaves no idle slot,
+        // nothing pumps here and input is stamped once a frame.
+        void idle_until(std::chrono::steady_clock::time_point deadline,
+                        std::chrono::steady_clock::time_point frame_start);
+
         // Declaration order is destruction order reversed: UI, renderer,
         // swapchain, allocator, device, instance, window. The allocator must
         // outlive every buffer and image the renderer owns, and the UI's

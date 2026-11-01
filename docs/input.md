@@ -23,12 +23,23 @@ for looking at devices; no game code reads a joystick yet.
   default), as it does keyboard ones. Anything that watches events runs with
   the engine focused.
 - Event timestamps are SDL's, in nanoseconds, but **they are the pump's
-  time, not the device's**: SDL reads joysticks when events are pumped, once
-  a frame. Measured on the SOL-R 4 at the 60 Hz limiter, every press
-  duration was a multiple of 16.7 ms. Timing resolution is therefore the
-  frame: fine against tap and hold thresholds of a few hundred ms, and the
-  reason a pulse must be counted from events, since at a low frame rate one
-  falls inside a single pump.
+  time, not the device's**: SDL reads joysticks, and the OS's queue, when
+  events are pumped. Pumped once a frame, as at first, every press duration
+  on the SOL-R 4 at the 60 Hz limiter was a multiple of 16.7 ms.
+- **Sub-frame event stamping**: the limiter pumps in its idle time
+  (`App::idle_until`), on a grid of at
+  most 120 Hz from the frame's start. Pumping only queues events;
+  `Window::poll` still takes them all at the top of the frame, in order, so
+  ImGui and everything else sees what it did before with finer stamps. It
+  covers the keyboard and mouse as well as joysticks, on any SDL backend.
+- Where there is no idle time -- uncapped, or a frame whose work fills its
+  period, as in the sanitize build -- nothing pumps there and stamps fall
+  back to the frame. Against tap and hold thresholds of a few hundred ms
+  either is fine. A dedicated thread calling `SDL_UpdateJoysticks` would be
+  frame-independent everywhere but covers joysticks only, and only on
+  backends that poll; it was not chosen.
+- Pulses are counted from events whatever the stamps: at a low frame rate
+  one falls inside a single pump.
 
 ## The SOL-R 4 HOTAS
 
@@ -80,7 +91,7 @@ per line, tagged by `type` (`platform/input_log`, pinned by
   (`hat`, `value` by name), `removed`.
 
 Every event carries `ns`, nanoseconds since the log started from SDL's
-timestamps (pump time, so frame-quantised), and `device`, SDL's instance id, which a `device` record
+timestamps (pump time, see above), and `device`, SDL's instance id, which a `device` record
 introduces. An axis is logged when it has moved 512 raw (about 1.5%) from
 the value last logged, so resting noise stays out.
 
