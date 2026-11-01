@@ -169,6 +169,7 @@ add_library(encke_core OBJECT
     src/physics/physics_world.cpp
 
     src/platform/cpu.cpp
+    src/platform/input_probe.cpp
     src/platform/thread.cpp
     src/platform/window.cpp
     src/platform/worker_pool.cpp

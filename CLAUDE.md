@@ -83,7 +83,8 @@ src/
   main.cpp            entry point; constructs App and nothing else
   app.{hpp,cpp}       composition root: owns everything, runs the frame loop
   core/               pch, types prelude, log, the allocator hook, ASan options
-  platform/           window and events (SDL3), cpu topology, thread priority/names, worker pool
+  platform/           window and events (SDL3), cpu topology, thread priority/names, worker pool,
+                      the joystick probe (--input-probe)
   vulkan/             context, device, VMA allocator, bindless set, buffers, images, textures,
                       staging arena, swapchain, timestamps
   ui/                 ImGui layer, the forked ImGui Vulkan backend, stats and image windows

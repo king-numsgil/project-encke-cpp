@@ -1,6 +1,7 @@
 #include "core/pch.hpp"
 
 #include "app.hpp"
+#include "platform/input_probe.hpp"
 #include "terrain/benchmark.hpp"
 
 int main(int argc, char** argv)
@@ -20,6 +21,10 @@ int main(int argc, char** argv)
         {
             options.output = std::filesystem::path{argv[++i]};
             continue;
+        }
+        if (string_view{argv[i]} == "--input-probe")
+        {
+            return encke::run_input_probe();
         }
         if (string_view{argv[i]} == "--headless")
         {
