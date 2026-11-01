@@ -8,6 +8,7 @@
 #include "render/config.hpp"
 #include "render/pixels.hpp"
 #include "ui/image_window.hpp"
+#include "ui/input_window.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -200,7 +201,16 @@ namespace encke
         {
             return false;
         }
-        window_.set_event_hook([this](SDL_Event const& event) { ui_.process_event(event); });
+        window_.set_event_hook([this](SDL_Event const& event) {
+            ui_.process_event(event);
+            joysticks_.handle(event);
+        });
+
+        // Input logs land beside the executable, as imgui.ini does.
+        if (char const* const base = SDL_GetBasePath())
+        {
+            input_log_directory_ = std::filesystem::path{base};
+        }
 
         assets_.start();
         scene_.build_test_planet(assets_, config::kTerrainFinestLod);
@@ -460,6 +470,9 @@ namespace encke
                              renderer_.debug_window_image(window), swapchain_.extent(),
                              debug_window_position(index), controls);
             }
+
+            joysticks_.refresh();
+            input_window(joysticks_, show_input_window_, input_log_directory_);
         }
 
         ui_.end_frame();
@@ -935,6 +948,17 @@ namespace encke
             if (events.toggle_ui && !scripted)
             {
                 show_ui_ = !show_ui_;
+            }
+
+            // Asking for the window is asking to see it, as with the debug
+            // windows.
+            if (events.toggle_input_window && !scripted)
+            {
+                show_input_window_ = !show_input_window_;
+                if (show_input_window_)
+                {
+                    show_ui_ = true;
+                }
             }
 
             if (events.toggle_terrain_freeze && !scripted)

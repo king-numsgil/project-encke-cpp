@@ -13,7 +13,9 @@ namespace encke
 
     bool Window::init(char const* title, i32 width, i32 height)
     {
-        if (!SDL_Init(SDL_INIT_VIDEO))
+        // Joysticks report as SDL_EVENT_JOYSTICK_* through the same pump,
+        // including one ADDED event per device already connected.
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK))
         {
             log::sdl_error("SDL_Init");
             return false;
@@ -167,6 +169,10 @@ namespace encke
                 else if (event.key.key == SDLK_F6 && !event.key.repeat)
                 {
                     events.toggle_octree = true;
+                }
+                else if (event.key.key == SDLK_F7 && !event.key.repeat)
+                {
+                    events.toggle_input_window = true;
                 }
                 else if (event.key.key == SDLK_T && !event.key.repeat)
                 {

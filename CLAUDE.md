@@ -76,6 +76,7 @@ design changes: a new decision, a gap closed or found.
 | `docs/terrain.md` | noise and its bit-exactness, the FastNoise2 port, the example planet, the octree, geomorph and seams, modifiers, ground materials, surface maps and impostors |
 | `docs/physics.md` | stepping, determinism, terrain collision, static colliders, ship spaces, the walking character, camera control |
 | `docs/scene-and-assets.md` | the registry and the extract, transforms, assets and streaming, textures and UVs, glTF, the test scene |
+| `docs/input.md` | joysticks and the HOTAS, the probe, the device monitor and its JSONL log |
 | `docs/dependencies.md` | mimalloc and why it is built as it is, Jolt's build, glaze, ImGui, volk, and the rest's traps |
 
 ```
@@ -84,7 +85,7 @@ src/
   app.{hpp,cpp}       composition root: owns everything, runs the frame loop
   core/               pch, types prelude, log, the allocator hook, ASan options
   platform/           window and events (SDL3), cpu topology, thread priority/names, worker pool,
-                      the joystick probe (--input-probe)
+                      joysticks, their JSONL log and the probe (--input-probe)
   vulkan/             context, device, VMA allocator, bindless set, buffers, images, textures,
                       staging arena, swapchain, timestamps
   ui/                 ImGui layer, the forked ImGui Vulkan backend, stats and image windows

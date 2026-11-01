@@ -203,6 +203,7 @@ UI. You start on foot. X switches between walking and the jetpack.
 | F4 | cycle the wireframe: off, over the image, alone |
 | F5 | show collision shapes |
 | F6 | show the terrain chunks' boxes |
+| F7 | input devices: live joystick state, and the input log |
 | 1, 2 | clustered or brute-force shading |
 | 3 to 6 | debug views: lights per cluster, normals, motion vectors, shadow cascades |
 | T | cycle the tonemap curve |

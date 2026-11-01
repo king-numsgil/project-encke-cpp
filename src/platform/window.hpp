@@ -30,6 +30,9 @@ namespace encke
         bool toggle_collision = false;
         bool toggle_octree    = false;
 
+        // F7 pressed this frame: show or hide the input devices window.
+        bool toggle_input_window = false;
+
         // T pressed this frame: step to the next tonemap curve.
         bool cycle_tonemap = false;
 

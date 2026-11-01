@@ -169,7 +169,9 @@ add_library(encke_core OBJECT
     src/physics/physics_world.cpp
 
     src/platform/cpu.cpp
+    src/platform/input_log.cpp
     src/platform/input_probe.cpp
+    src/platform/joysticks.cpp
     src/platform/thread.cpp
     src/platform/window.cpp
     src/platform/worker_pool.cpp
@@ -204,6 +206,7 @@ add_library(encke_core OBJECT
     src/ui/image_window.cpp
     src/ui/imgui_layer.cpp
     src/ui/imgui_vulkan.cpp
+    src/ui/input_window.cpp
     src/ui/stats_window.cpp
 
     src/vulkan/allocator.cpp
@@ -472,6 +475,7 @@ add_executable(encke_tests
     tests/core/json_test.cpp
     tests/physics/jolt_test.cpp
     tests/physics/physics_world_test.cpp
+    tests/platform/input_log_test.cpp
     tests/render/camera_test.cpp
     tests/render/walk_camera_test.cpp
     tests/scenario/scenario_test.cpp

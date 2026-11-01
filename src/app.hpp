@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "assets/asset_manager.hpp"
+#include "platform/joysticks.hpp"
 #include "platform/window.hpp"
 #include "physics/physics_world.hpp"
 #include "platform/worker_pool.hpp"
@@ -129,6 +130,12 @@ namespace encke
 
         StatsWindow stats_;
         bool        show_ui_ = true;
+
+        // After the window, so its devices close before SDL quits. F7 shows
+        // them; nothing reads them as input yet.
+        Joysticks             joysticks_;
+        bool                  show_input_window_ = false;
+        std::filesystem::path input_log_directory_;
 
         array<bool, kDebugWindowCount> debug_windows_{};
         f32                            motion_gain_ = 5000.0f;
