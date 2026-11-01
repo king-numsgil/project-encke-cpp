@@ -101,8 +101,8 @@ From CPM, cached in `.cpm/`:
 | Package | Why not vcpkg |
 | --- | --- |
 | mimalloc 3.6.1 | it needs a define on MinGW that vcpkg's scrubbed environment cannot pass |
-| Dear ImGui v1.92.9b-docking | the vcpkg port links the Vulkan loader, which collides with volk |
-| ImPlot v1.0 | must build against the same ImGui |
+| Dear ImGui v1.93.0-docking | the vcpkg port links the Vulkan loader, which collides with volk |
+| ImPlot v1.1 | must build against the same ImGui |
 
 ## Building
 

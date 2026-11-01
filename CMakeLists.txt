@@ -110,14 +110,14 @@ endif()
 CPMAddPackage(
     NAME imgui
     GITHUB_REPOSITORY ocornut/imgui
-    GIT_TAG v1.92.9b-docking
+    GIT_TAG v1.93.0-docking
     DOWNLOAD_ONLY YES
 )
 
 CPMAddPackage(
     NAME implot
     GITHUB_REPOSITORY epezent/implot
-    GIT_TAG v1.0
+    GIT_TAG v1.1
     DOWNLOAD_ONLY YES
 )
 
@@ -144,8 +144,8 @@ target_include_directories(encke_imgui SYSTEM PUBLIC
     ${implot_SOURCE_DIR}
 )
 
-# Not IMGUI_DISABLE_OBSOLETE_FUNCTIONS: ImPlot v1.0 still calls the old
-# AddPolyline(flags, thickness) argument order, which that define deletes.
+# PUBLIC, so encke sees the same declarations the library was built with.
+target_compile_definitions(encke_imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 
 target_link_libraries(encke_imgui PUBLIC SDL3::SDL3)
 

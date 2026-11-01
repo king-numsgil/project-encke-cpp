@@ -92,7 +92,7 @@ or a landing site has its lights.
   vertex colours to linear and re-encodes when writing UNORM
   (`push.ui_encode_srgb`). Without the extension it blends in linear space;
   the `srgb_ui` scenario setting forces that path.
-- `ui/imgui_vulkan` is a fork of ImGui `v1.92.9b-docking`'s Vulkan backend,
+- `ui/imgui_vulkan` is a fork of ImGui `v1.93.0-docking`'s Vulkan backend,
   version-locked, with ImGui's MIT notice kept in both files. Upgrading means
   porting upstream's changes. It allocates through VMA, uses bindless
   textures (`ImTextureID` is a sampled-image handle plus one, since 0 is

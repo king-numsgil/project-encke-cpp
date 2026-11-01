@@ -1,6 +1,6 @@
 // Dear ImGui renderer backend for encke's Vulkan stack.
 //
-// Forked from backends/imgui_impl_vulkan.{h,cpp} of Dear ImGui v1.92.9b-docking
+// Forked from backends/imgui_impl_vulkan.{h,cpp} of Dear ImGui v1.93.0-docking
 // (https://github.com/ocornut/imgui), and version-locked there: upgrading ImGui
 // means re-reading upstream's changes to that file and porting what applies.
 // Changes from upstream:

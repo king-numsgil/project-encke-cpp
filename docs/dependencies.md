@@ -62,12 +62,12 @@ fuse multiply-adds. Its target adds `-mbmi -mlzcnt -mf16c`.
   Only `platform/cpu.cpp` includes it; debug builds print its topology trace.
 - **sdl3** needs its `vulkan` feature and **sdl3-image** its `jpeg` and `png`
   features requested explicitly; bare, they build without them.
-- **Dear ImGui** is the docking branch (`v1.92.9b-docking`), with ImPlot
-  `v1.0`, built into `encke_imgui` by CPM; the vcpkg port links
+- **Dear ImGui** is the docking branch (`v1.93.0-docking`), with ImPlot
+  `v1.1`, built into `encke_imgui` by CPM; the vcpkg port links
   `Vulkan::Vulkan`, which collides with volk. Docking and multi-viewport are
-  not enabled. `IMGUI_DISABLE_OBSOLETE_FUNCTIONS` cannot be set (ImPlot calls
-  the old `AddPolyline`). Their headers are `SYSTEM` and their sources build
-  with `-w`. `imgui.ini` lands beside the executable. Avoid
+  not enabled. `IMGUI_DISABLE_OBSOLETE_FUNCTIONS` is set, publicly, so a
+  renamed API is a compile error rather than a redirect. Their headers are
+  `SYSTEM` and their sources build with `-w`. `imgui.ini` lands beside the executable. Avoid
   `ImGuiTableFlags_SizingStretchProp` on a table with no measured content:
   UBSan catches the NaN it produces.
 - **volk** owns every Vulkan entry point: `VK_NO_PROTOTYPES` is global and

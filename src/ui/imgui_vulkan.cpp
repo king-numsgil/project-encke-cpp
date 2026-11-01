@@ -1,5 +1,5 @@
 // Dear ImGui renderer backend for encke's Vulkan stack. Forked from
-// backends/imgui_impl_vulkan.cpp of Dear ImGui v1.92.9b-docking; see
+// backends/imgui_impl_vulkan.cpp of Dear ImGui v1.93.0-docking; see
 // ui/imgui_vulkan.hpp for what changed and why.
 //
 // ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ namespace encke
 
     void ImGuiVulkan::record(ImDrawData const* draw_data, VkCommandBuffer command)
     {
-        if (draw_data == nullptr || draw_data->CmdListsCount == 0)
+        if (draw_data == nullptr || draw_data->CmdLists.Size == 0)
         {
             return;
         }
@@ -374,8 +374,10 @@ namespace encke
         ImVec2 const clip_offset = draw_data->DisplayPos;
         ImVec2 const clip_scale  = draw_data->FramebufferScale;
 
-        int const width  = static_cast<int>(draw_data->DisplaySize.x * clip_scale.x);
-        int const height = static_cast<int>(draw_data->DisplaySize.y * clip_scale.y);
+        // Rounded, not truncated: a fractional scale would otherwise lose
+        // the last row or column of pixels.
+        int const width  = static_cast<int>(draw_data->DisplaySize.x * clip_scale.x + 0.5f);
+        int const height = static_cast<int>(draw_data->DisplaySize.y * clip_scale.y + 0.5f);
         if (width <= 0 || height <= 0)
         {
             return;
