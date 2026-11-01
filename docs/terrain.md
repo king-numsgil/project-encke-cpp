@@ -73,11 +73,12 @@ own lattice split, and floor(o * f * L) is not L * floor(o * f).
 ### The FastNoise2 port
 
 `ports/fastnoise2` is a vcpkg overlay port, FastNoise2 v1.1.1 (so a released
-Node Editor encodes graphs this library decodes), with two patches:
+Node Editor encodes graphs this library decodes), with three patches:
 `lattice-offset.patch` (`SetLatticeOffset`, and `FASTNOISE2_FEATURE_SETS`
-passed to FastSIMD) and `fastsimd-mingw-clang.patch` (FastSIMD's
+passed to FastSIMD), `fastsimd-mingw-clang.patch` (FastSIMD's
 `-Wa,-muse-unaligned-vector-move` kept GCC-only; clang's integrated
-assembler rejects it).
+assembler rejects it) and `cstdlib-include.patch` (`SmartNode.cpp` calls
+`std::malloc` without `<cstdlib>`, which libc++ 23 no longer includes for it).
 
 - Its debug library builds at `-O2 -g`: FastSIMD is intrinsic wrappers that
   vanish only once inlined, and at `-O0` clang-sanitize meshed the planet

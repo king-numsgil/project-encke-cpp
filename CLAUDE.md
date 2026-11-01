@@ -100,7 +100,7 @@ shaders/              Slang: one file per pass family; lib/ holds what several s
 tests/                Catch2, mirroring src/
 scenarios/            scenario files, tracked; compare.ps1; out/ and reference/ gitignored
 docs/                 subsystem design; see above
-ports/                vcpkg overlay ports: fastnoise2 (two patches), joltphysics
+ports/                vcpkg overlay ports: fastnoise2 (three patches), joltphysics
 assets/               textures/ (ambientCG), models/, torchship/; binaries in Git LFS
 ```
 
@@ -207,7 +207,7 @@ files.
 ## Toolchain and build
 
 Windows host, **MSYS2 toolchains**, not MSVC: GCC 16.2.0 at
-`F:/msys2/ucrt64/bin`, Clang 22.1.8 at `F:/msys2/clang64/bin`, Ninja, vcpkg
+`F:/msys2/ucrt64/bin`, Clang 23.1.4 at `F:/msys2/clang64/bin`, Ninja, vcpkg
 triplet `x64-mingw-static`, `VCPKG_ROOT` in the environment
 (`F:/Programming/vcpkg`). The MSVC branches in `CMakeLists.txt` are
 untested.

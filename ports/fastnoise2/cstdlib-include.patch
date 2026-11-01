@@ -1,0 +1,11 @@
+diff --git a/src/FastNoise/SmartNode.cpp b/src/FastNoise/SmartNode.cpp
+--- a/src/FastNoise/SmartNode.cpp
++++ b/src/FastNoise/SmartNode.cpp
+@@ -6,6 +6,7 @@
+ #include <vector>
+ #include <list>
+ #include <cstring>
++#include <cstdlib>
+ #include <memory>
+ #include <algorithm>
+

@@ -5,6 +5,9 @@
 # lattice the 3D hash sees (the lattice split in src/terrain/detail_noise), and
 # a FASTNOISE2_FEATURE_SETS cache variable so only the SIMD level encke pins is
 # compiled.
+#
+# cstdlib-include.patch includes <cstdlib> in SmartNode.cpp, which calls
+# std::malloc and std::free; libc++ 23 stopped providing them transitively.
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO Auburn/FastNoise2
@@ -13,6 +16,7 @@ vcpkg_from_github(
     HEAD_REF master
     PATCHES
         lattice-offset.patch
+        cstdlib-include.patch
 )
 
 # FastNoise2 fetches FastSIMD through CPM at configure time. A port must not

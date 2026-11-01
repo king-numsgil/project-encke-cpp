@@ -63,7 +63,7 @@ if(ENCKE_USE_MIMALLOC)
     CPMAddPackage(
         NAME mimalloc
         GITHUB_REPOSITORY microsoft/mimalloc
-        VERSION 3.5.3
+        VERSION 3.6.1
         OPTIONS
             "MI_BUILD_SHARED OFF"
             "MI_BUILD_STATIC ON"
