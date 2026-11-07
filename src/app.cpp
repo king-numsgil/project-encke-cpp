@@ -140,6 +140,25 @@ namespace encke
 
         // The frame rate a scenario's flying and fixed steps assume.
         constexpr f64 kScenarioStepHz = 60.0;
+
+        // Where the user's own files go: one folder per user, outside any
+        // build, so a clean rebuild or another preset finds them.
+        // %APPDATA%\encke\ on Windows, ~/.local/share/encke/ on Linux. No
+        // organisation folder; SDL makes the folder if it is missing. The
+        // working directory if SDL cannot.
+        std::filesystem::path user_directory()
+        {
+            char* const path = SDL_GetPrefPath("", "encke");
+            if (path == nullptr)
+            {
+                log::sdl_error("SDL_GetPrefPath");
+                return std::filesystem::path{};
+            }
+            // UTF-8, which a narrow string is not on Windows.
+            std::filesystem::path const directory{std::u8string_view{reinterpret_cast<char8_t const*>(path)}};
+            SDL_free(path);
+            return directory;
+        }
     }
 
     App::~App()
@@ -200,18 +219,21 @@ namespace encke
         }
         bool const srgb_ui = !scenarios_.empty() && scenarios_.front().settings.srgb_ui.value_or(false);
 
-        // Before the window too: a binding file with a mistake stops the run.
-        if (!load_input())
-        {
-            return false;
-        }
-
         CpuInfo const cpu = query_cpu();
         log::info("cpu: %u physical cores, %u logical processors", cpu.physical_cores,
                   cpu.logical_processors);
 
-        // Must precede SDL_Init, which window_.init performs.
+        // Must precede SDL_Init, which window_.init performs, and every
+        // other SDL call: SDL caches some of what it allocates, such as the
+        // base path, and frees it at SDL_Quit with whatever allocator is
+        // installed then.
         if (!memory::install_sdl_allocator())
+        {
+            return false;
+        }
+
+        // Before the window too: a binding file with a mistake stops the run.
+        if (!load_input())
         {
             return false;
         }
@@ -246,6 +268,17 @@ namespace encke
         {
             return false;
         }
+        // Windows where they first open, not where the user left them: no
+        // imgui.ini under a scenario, read or written. ImGui reads it on the
+        // first frame, which has not been.
+        // Nor does the UI see the mouse or keys, or the cursor resting over a
+        // button would light it in a capture.
+        if (!scenarios_.empty())
+        {
+            ImGui::GetIO().IniFilename = nullptr;
+            ui_.set_input_blocked(true);
+        }
+
         // The input system first, so a joystick that has gone is let go of
         // by its identity before the device list forgets it. Typing into the
         // UI presses nothing.
@@ -305,6 +338,7 @@ namespace encke
             }
             scenario_defaults_ = scenario::Settings{
                 .ui            = false,
+                .stats         = true,
                 .taa           = taa_,
                 .geomorph      = renderer_.geomorph(),
                 .frame_limit   = limit_frames_,
@@ -326,7 +360,7 @@ namespace encke
         log::info("tonemap: %s (T cycles)", tonemap_name(renderer_.tonemap()));
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
                   debug_view_name(renderer_.debug_view()), kDebugKeyCount);
-        log::info("mouse: held for looking; hold Alt to free it for the UI");
+        log::info("mouse: held for looking; Alt frees it for the UI and takes it back");
         log::info("jetpack: WASD move, Space/Ctrl up/down, Q/E roll, Shift fast, C slow, wheel scales speed");
 
         // On foot from the start pose, unless a scenario chose already.
@@ -401,8 +435,9 @@ namespace encke
     void App::capture_mouse()
     {
         // Held in either movement, as in any first-person game; Alt lets go
-        // of it for the UI, and so does losing focus.
-        set_looking(focused_ && !input_.active(actions_.free_mouse));
+        // of it for the UI until pressed again, and losing focus lets go
+        // until the window has it back.
+        set_looking(focused_ && !mouse_free_);
     }
 
     void App::fly(f64 seconds)
@@ -462,96 +497,108 @@ namespace encke
 
     bool App::load_input()
     {
+        // A scenario runs the repo's bindings alone: what a user has bound
+        // must not change what it captures. With no path, the user's layer
+        // is empty and cannot be saved.
         std::filesystem::path const defaults = std::filesystem::path{ENCKE_ASSET_DIR} / "input" / "default.json";
-        optional<input::Layer> layer = input::load_layer(defaults);
-        if (!layer.has_value())
-        {
-            return false;
-        }
-        string source = defaults.string();
+        std::filesystem::path const user =
+            scenarios_.empty() ? user_directory() / "input.json" : std::filesystem::path{};
+        return bindings_.load(defaults, user) && apply_bindings();
+    }
 
-        // The user's edits, laid over the defaults.
-        if (char const* const base = SDL_GetBasePath())
-        {
-            std::filesystem::path const user = std::filesystem::path{base} / "input.json";
-            std::error_code             error;
-            if (std::filesystem::exists(user, error))
-            {
-                optional<input::Layer> const edits = input::load_layer(user);
-                if (!edits.has_value())
-                {
-                    return false;
-                }
-                input::merge(*layer, *edits);
-                source += " + " + user.string();
-                log::info("input: %s over the defaults", user.string().c_str());
-            }
-        }
-
-        optional<input::InputMap> map = input::compile(*layer, source);
+    bool App::apply_bindings()
+    {
+        applied_revision_ = bindings_.revision();
+        optional<input::InputMap> map = bindings_.compile();
         if (!map.has_value())
         {
             return false;
         }
-        input_.set_map(std::move(*map));
 
+        // Every id looked up in the new map before it replaces the old, so a
+        // failure leaves the engine running what it had.
         using input::ActionType;
-        bool ok          = true;
-        auto const need  = [&](input::ActionId& id, string_view name, ActionType type) {
-            optional<input::ActionId> const found = input_.require(name, type);
+        bool     ok = true;
+        Actions  actions{};
+        Contexts contexts{};
+        auto const need = [&](input::ActionId& id, string_view name, ActionType type) {
+            optional<input::ActionId> const found = map->require(name, type);
             ok                                    = ok && found.has_value();
             id                                    = found.value_or(input::ActionId{});
         };
         auto const want_context = [&](input::ContextId& id, string_view name) {
-            optional<input::ContextId> const found = input_.require_context(name);
+            optional<input::ContextId> const found = map->require_context(name);
             ok                                     = ok && found.has_value();
             id                                     = found.value_or(input::ContextId{});
         };
 
-        need(actions_.quit, "quit", ActionType::Bool);
-        need(actions_.toggle_ui, "toggle_ui", ActionType::Bool);
-        need(actions_.freeze_terrain, "freeze_terrain", ActionType::Bool);
-        need(actions_.copy_camera, "copy_camera", ActionType::Bool);
-        need(actions_.cycle_wireframe, "cycle_wireframe", ActionType::Bool);
-        need(actions_.toggle_collision, "toggle_collision", ActionType::Bool);
-        need(actions_.toggle_octree, "toggle_octree", ActionType::Bool);
-        need(actions_.toggle_input_window, "toggle_input_window", ActionType::Bool);
-        need(actions_.cycle_tonemap, "cycle_tonemap", ActionType::Bool);
-        need(actions_.free_mouse, "free_mouse", ActionType::Bool);
-        for (size_t key = 0; key < actions_.debug.size(); ++key)
+        need(actions.quit, "quit", ActionType::Bool);
+        need(actions.toggle_ui, "toggle_ui", ActionType::Bool);
+        need(actions.freeze_terrain, "freeze_terrain", ActionType::Bool);
+        need(actions.copy_camera, "copy_camera", ActionType::Bool);
+        need(actions.cycle_wireframe, "cycle_wireframe", ActionType::Bool);
+        need(actions.toggle_collision, "toggle_collision", ActionType::Bool);
+        need(actions.toggle_octree, "toggle_octree", ActionType::Bool);
+        need(actions.toggle_input_window, "toggle_input_window", ActionType::Bool);
+        need(actions.cycle_tonemap, "cycle_tonemap", ActionType::Bool);
+        need(actions.free_mouse, "free_mouse", ActionType::Bool);
+        for (size_t key = 0; key < actions.debug.size(); ++key)
         {
-            need(actions_.debug[key], "debug_" + std::to_string(key + 1), ActionType::Bool);
+            need(actions.debug[key], "debug_" + std::to_string(key + 1), ActionType::Bool);
         }
-        need(actions_.toggle_jetpack, "toggle_jetpack", ActionType::Bool);
-        need(actions_.look, "look", ActionType::Axis2D);
-        need(actions_.walk_move, "walk_move", ActionType::Axis2D);
-        need(actions_.sprint, "sprint", ActionType::Bool);
-        need(actions_.jump, "jump", ActionType::Bool);
-        need(actions_.fly_move, "fly_move", ActionType::Axis3D);
-        need(actions_.fly_roll, "fly_roll", ActionType::Axis1D);
-        need(actions_.fly_speed, "fly_speed", ActionType::Axis1D);
-        need(actions_.fly_fast, "fly_fast", ActionType::Bool);
-        need(actions_.fly_slow, "fly_slow", ActionType::Bool);
+        need(actions.toggle_jetpack, "toggle_jetpack", ActionType::Bool);
+        need(actions.look, "look", ActionType::Axis2D);
+        need(actions.walk_move, "walk_move", ActionType::Axis2D);
+        need(actions.sprint, "sprint", ActionType::Bool);
+        need(actions.jump, "jump", ActionType::Bool);
+        need(actions.fly_move, "fly_move", ActionType::Axis3D);
+        need(actions.fly_roll, "fly_roll", ActionType::Axis1D);
+        need(actions.fly_speed, "fly_speed", ActionType::Axis1D);
+        need(actions.fly_fast, "fly_fast", ActionType::Bool);
+        need(actions.fly_slow, "fly_slow", ActionType::Bool);
 
-        want_context(contexts_.engine, "engine");
-        want_context(contexts_.debug, "debug");
-        want_context(contexts_.on_foot, "on_foot");
-        want_context(contexts_.jetpack, "jetpack");
+        want_context(contexts.engine, "engine");
+        want_context(contexts.debug, "debug");
+        want_context(contexts.on_foot, "on_foot");
+        want_context(contexts.jetpack, "jetpack");
 
-        if (ok)
+        if (!ok)
         {
-            log::info("input: %zu actions in %zu contexts", input_.map().actions.size(),
-                      input_.map().contexts.size());
+            return false;
         }
-        return ok;
+
+        log::info("input: %zu actions in %zu contexts", map->actions.size(), map->contexts.size());
+        input_.set_map(std::move(*map));
+        actions_  = actions;
+        contexts_ = contexts;
+        enable_contexts(scenario_.has_value());
+        return true;
     }
 
     void App::enable_contexts(bool scripted)
     {
         input_.set_enabled(contexts_.engine, true);
         input_.set_enabled(contexts_.debug, !scripted);
-        input_.set_enabled(contexts_.on_foot, looking_ && movement_ == Movement::Walk);
-        input_.set_enabled(contexts_.jetpack, looking_ && movement_ == Movement::Jetpack);
+        // Every context the engine does not know is off, but the one the
+        // input window previews while it is open.
+        optional<string> const preview =
+            show_ui_ && show_input_window_ ? input_window_.preview_context() : nullopt;
+        optional<input::ContextId> const previewed =
+            preview.has_value() ? input_.map().find_context(*preview) : nullopt;
+        // Set once each: a change is what makes the system rebuild.
+        vector<bool> wanted(input_.map().contexts.size(), false);
+        wanted[contexts_.engine.index]  = true;
+        wanted[contexts_.debug.index]   = !scripted;
+        wanted[contexts_.on_foot.index] = looking_ && movement_ == Movement::Walk;
+        wanted[contexts_.jetpack.index] = looking_ && movement_ == Movement::Jetpack;
+        if (previewed.has_value())
+        {
+            wanted[previewed->index] = true;
+        }
+        for (u32 index = 0; index < wanted.size(); ++index)
+        {
+            input_.set_enabled(input::ContextId{index}, wanted[index]);
+        }
     }
 
     void App::handle_engine_actions()
@@ -561,14 +608,20 @@ namespace encke
             show_ui_ = !show_ui_;
         }
 
+        if (input_.fired(actions_.free_mouse))
+        {
+            mouse_free_ = !mouse_free_;
+        }
+
         // Asking for the window is asking to see it, as with the debug
-        // windows.
+        // windows, and to use it: the mouse is let go.
         if (input_.fired(actions_.toggle_input_window))
         {
             show_input_window_ = !show_input_window_;
             if (show_input_window_)
             {
-                show_ui_ = true;
+                show_ui_    = true;
+                mouse_free_ = true;
             }
         }
 
@@ -645,16 +698,19 @@ namespace encke
                  .queued = asset_worker.outstanding()},
             }};
 
-            stats_.draw(StatsWindow::Info{
-                .device       = device_.properties().deviceName,
-                .present_mode = swapchain_.present_mode_name(),
-                .extent       = swapchain_.extent(),
-                .limit_frames = &limit_frames_,
-                .limit_hz     = kFrameLimitHz,
-                .taa          = &taa_,
-                .threads      = threads,
-            });
-            renderer_.set_taa(taa_);
+            if (show_stats_)
+            {
+                stats_.draw(StatsWindow::Info{
+                    .device       = device_.properties().deviceName,
+                    .present_mode = swapchain_.present_mode_name(),
+                    .extent       = swapchain_.extent(),
+                    .limit_frames = &limit_frames_,
+                    .limit_hz     = kFrameLimitHz,
+                    .taa          = &taa_,
+                    .threads      = threads,
+                });
+                renderer_.set_taa(taa_);
+            }
 
             ImGui::SetNextWindowPos(ImVec2{10.0f, 460.0f}, ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Debug draw", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
@@ -693,10 +749,17 @@ namespace encke
             }
 
             joysticks_.refresh();
-            input_window(joysticks_, show_input_window_, input_log_directory_);
+            input_window_.draw(show_input_window_, joysticks_, input_log_directory_, input_, bindings_);
         }
 
         ui_.end_frame();
+
+        // An edit runs from the next frame. One that does not apply leaves
+        // the map running as it was; the log says why.
+        if (bindings_.revision() != applied_revision_ && !apply_bindings())
+        {
+            log::error("input: the edited bindings were not applied");
+        }
 
         // After the UI, which may have closed a window this frame: the
         // renderer must draw exactly the images the draw data samples.
@@ -745,6 +808,10 @@ namespace encke
         if (settings.ui.has_value())
         {
             show_ui_ = *settings.ui;
+        }
+        if (settings.stats.has_value())
+        {
+            show_stats_ = *settings.stats;
         }
         if (settings.taa.has_value())
         {
@@ -1105,6 +1172,7 @@ namespace encke
             {
                 log::info("scenario: handing over to the user");
                 scenario_.reset();
+                ui_.set_input_blocked(looking_);
                 return false;
             }
 
@@ -1294,7 +1362,11 @@ namespace encke
             // This frame's events as actions, in the contexts last frame left
             // enabled.
             input_.update();
-            if (input_.fired(actions_.quit))
+
+            // Pressing a key to bind it presses nothing else, Escape
+            // included.
+            bool const binding = show_ui_ && show_input_window_ && input_window_.capturing();
+            if (input_.fired(actions_.quit) && !binding)
             {
                 running = false;
                 continue;
@@ -1362,7 +1434,10 @@ namespace encke
                     continue;
                 }
             }
-            handle_engine_actions();
+            if (!binding)
+            {
+                handle_engine_actions();
+            }
 
             if (!scripted)
             {

@@ -1,5 +1,7 @@
 // The engine's default bindings: the bottom layer. A user's edits go in
-// input.json beside the executable, laid over this one; see docs/input.md.
+// input.json in the user's folder (%APPDATA%\encke\ on Windows), laid over
+// this one; see docs/input.md. F7's "Save as defaults" rewrites this file
+// without its comments.
 {
     "actions": {
         "quit":                { "description": "Quit" },
@@ -9,9 +11,9 @@
         "cycle_wireframe":     { "description": "Wireframe: off, over the image, alone" },
         "toggle_collision":    { "description": "Show or hide collision shapes" },
         "toggle_octree":       { "description": "Show or hide the octree's chunks" },
-        "toggle_input_window": { "description": "Show or hide the input devices window" },
+        "toggle_input_window": { "description": "Show or hide the input window: bindings and devices" },
         "cycle_tonemap":       { "description": "Next tonemap curve" },
-        "free_mouse":          { "description": "Let go of the mouse for the UI, while held" },
+        "free_mouse":          { "description": "Let go of the mouse for the UI, or take it back" },
         "debug_1":             { "description": "Shade clustered" },
         "debug_2":             { "description": "Shade brute force" },
         "debug_3":             { "description": "Show or hide lights per cluster" },
@@ -30,24 +32,24 @@
         "fly_roll":  { "type": "1d", "description": "Roll: + left" },
         "fly_speed": { "type": "1d", "description": "Scale the flying speed, in wheel notches" },
         "fly_fast":  { "description": "Fly fast, while held" },
-        "fly_slow":  { "description": "Fly slow, while held" }
+        "fly_slow":  { "description": "Fly slow, while held; not Alt, which frees the mouse" }
     },
 
     "contexts": {
-        // Always on, over everything, a scenario included.
         "engine": {
             "priority": 100,
+            "description": "Always on, over everything, a scenario included",
             "bindings": {
                 "quit":                [{ "control": "key:Escape", "trigger": { "type": "pressed" } }],
                 "copy_camera":         [{ "control": "key:F3", "trigger": { "type": "pressed" } }],
-                "free_mouse":          [{ "control": "key:Left Alt" }, { "control": "key:Right Alt" }]
+                "free_mouse":          [{ "control": "key:Left Alt", "trigger": { "type": "pressed" } },
+                                        { "control": "key:Right Alt", "trigger": { "type": "pressed" } }]
             }
         },
 
-        // The engine's switches: on, except under a scenario, where the
-        // keyboard must change nothing.
         "debug": {
             "priority": 90,
+            "description": "The engine's switches; off under a scenario, where the keyboard must change nothing",
             "bindings": {
                 "toggle_ui":           [{ "control": "key:F1", "trigger": { "type": "pressed" } }],
                 "freeze_terrain":      [{ "control": "key:F2", "trigger": { "type": "pressed" } }],
@@ -65,9 +67,9 @@
             }
         },
 
-        // On foot, while the mouse is held.
         "on_foot": {
             "priority": 10,
+            "description": "Walking, while the mouse is held",
             "bindings": {
                 "toggle_jetpack": [{ "control": "key:X", "trigger": { "type": "pressed" } }],
                 "look": [
@@ -85,9 +87,9 @@
             }
         },
 
-        // Flying the jetpack, while the mouse is held.
         "jetpack": {
             "priority": 10,
+            "description": "Flying the jetpack, while the mouse is held",
             "bindings": {
                 "toggle_jetpack": [{ "control": "key:X", "trigger": { "type": "pressed" } }],
                 "look": [
@@ -109,7 +111,6 @@
                 ],
                 "fly_speed": [{ "control": "mouse:wheel" }],
                 "fly_fast":  [{ "control": "key:Left Shift" }, { "control": "key:Right Shift" }],
-                // Alt frees the mouse, so slow is C.
                 "fly_slow":  [{ "control": "key:C" }]
             }
         }

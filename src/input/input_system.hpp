@@ -46,11 +46,6 @@ namespace encke::input
 
         InputMap const& map() const { return map_; }
 
-        // The ids the engine reads, looked up once. Logs and returns nothing
-        // if no layer declares it, or declares it with another type.
-        optional<ActionId>  require(string_view name, ActionType type) const;
-        optional<ContextId> require_context(string_view name) const;
-
         void set_enabled(ContextId context, bool enabled);
         bool enabled(ContextId context) const { return enabled_[context.index]; }
 

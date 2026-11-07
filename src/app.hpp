@@ -17,6 +17,7 @@
 #include "scenario/scenario.hpp"
 #include "terrain/planet.hpp"
 #include "ui/imgui_layer.hpp"
+#include "ui/input_window.hpp"
 #include "ui/stats_window.hpp"
 #include "vulkan/allocator.hpp"
 #include "vulkan/context.hpp"
@@ -108,8 +109,8 @@ namespace encke
         // UI ignores them: the mouse is held, hidden, reporting raw motion.
         void set_looking(bool looking);
 
-        // Looking unless Alt is down or the window lost focus, in either
-        // movement. Never under a scenario.
+        // Looking unless Alt has freed the mouse or the window lost focus,
+        // in either movement. Never under a scenario.
         void capture_mouse();
 
         void fly(f64 seconds);
@@ -122,10 +123,17 @@ namespace encke
         // looking, or a scenario's walk and action steps.
         void read_walk_input();
 
-        // The defaults, then the user's input.json beside the executable if
-        // there is one, compiled, and every action and context the engine
-        // reads looked up. False if any is missing.
+        // The defaults, then the user's input.json if there is one, in the
+        // user's folder (SDL_GetPrefPath: %APPDATA%\encke\ on Windows), run
+        // by apply_bindings(). False if either does not
+        // read or the result does not apply.
         bool load_input();
+
+        // What bindings_ holds now, compiled, checked for every action and
+        // context the engine reads, and swapped in. On any failure the map
+        // running stays, and false. Called when the editor changes
+        // anything.
+        bool apply_bindings();
 
         // What happens when one of the engine's actions fires.
         void handle_engine_actions();
@@ -170,16 +178,21 @@ namespace encke
         ImGuiLayer      ui_;
 
         StatsWindow stats_;
-        bool        show_ui_ = true;
+        bool        show_ui_    = true;
+        bool        show_stats_ = true;
 
         // After the window, so its devices close before SDL quits. F7 shows
-        // them; nothing binds them yet.
+        // them, and the bindings.
         Joysticks             joysticks_;
         bool                  show_input_window_ = false;
+        InputWindow           input_window_;
         std::filesystem::path input_log_directory_;
 
         // Every key, mouse and joystick event, as actions. The ids are looked
-        // up once, by load_input().
+        // up by apply_bindings(), again whenever the editor changes the map:
+        // an action added shifts the ids after it.
+        input::Bindings    bindings_;
+        u64                applied_revision_ = 0;
         input::InputSystem input_;
         struct Actions
         {
@@ -208,6 +221,8 @@ namespace encke
         Scene     scene_;
         FlyCamera fly_;
         bool      looking_ = false;
+        // Alt let go of the mouse, until Alt again; F7 opening lets go too.
+        bool mouse_free_ = false;
 
         // Walking unless a scenario says otherwise; X takes the jetpack.
         // walk_input_ is this frame's, from the keys or a walk step.

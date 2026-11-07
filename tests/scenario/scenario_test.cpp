@@ -10,7 +10,7 @@ namespace encke::scenario
     {
         string const text = R"({
             "name": "tour",
-            "settings": { "ui": false, "tonemap": "agx", "ev100": 13.5, "windows": ["normals"] },
+            "settings": { "ui": false, "stats": false, "tonemap": "agx", "ev100": 13.5, "windows": ["normals"] },
             "steps": [
                 // Comments are allowed: the files are written by hand.
                 { "op": "settle" },
@@ -31,6 +31,7 @@ namespace encke::scenario
 
         CHECK(scenario->name == "tour");
         CHECK(scenario->settings.ui == false);
+        CHECK(scenario->settings.stats == false);
         CHECK(scenario->settings.tonemap == Tonemap::AgX);
         CHECK(scenario->settings.ev100 == 13.5f);
         CHECK(scenario->settings.windows == vector<DebugWindow>{DebugWindow::Normals});

@@ -76,7 +76,7 @@ design changes: a new decision, a gap closed or found.
 | `docs/terrain.md` | noise and its bit-exactness, the FastNoise2 port, the example planet, the octree, geomorph and seams, modifiers, ground materials, surface maps and impostors |
 | `docs/physics.md` | stepping, determinism, terrain collision, static colliders, ship spaces, the walking character, camera control |
 | `docs/scene-and-assets.md` | the registry and the extract, transforms, assets and streaming, textures and UVs, glTF, the test scene |
-| `docs/input.md` | joysticks and the HOTAS, the probe, the device monitor and its JSONL log, the action layer: controls, bindings, modifiers, triggers, contexts, layered binding files |
+| `docs/input.md` | joysticks and the HOTAS, the probe, the device monitor and its JSONL log, the action layer: controls, bindings, modifiers, triggers, contexts, layered binding files; the bindings editor |
 | `docs/dependencies.md` | mimalloc and why it is built as it is, Jolt's build, glaze, ImGui, volk, and the rest's traps |
 
 ```
@@ -204,8 +204,11 @@ share a process, and an `interactive` one must come last.
   body asleep. `capture` does not settle; it discards TAA's history and
   captures one jitter cycle later. Put a `settle` before it.
 - A scenario pins animation at t = 0, hides the overlay, and ignores the
-  keyboard and mouse (the machine is shared). Physics steps once a frame
-  under a scenario. Steps run within a frame until one waits, before
+  keyboard and mouse (the machine is shared), the UI included. It neither
+  reads nor writes `imgui.ini`, so windows open where they first open, and
+  it runs the repo's bindings without the user's `input.json`. A capture showing
+  the overlay wants `"stats": false`: the frame stats are timings. Physics
+  steps once a frame under a scenario. Steps run within a frame until one waits, before
   anything that frame updates.
 - `fly` runs with the octree live, so its runs differ; `walk` counts physics
   steps. `spawn` drops a grid of boxes or spheres. `action` holds an action

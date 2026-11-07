@@ -18,28 +18,40 @@ namespace encke::input
         f32  lower  = 0.2f;
         f32  upper  = 1.0f;
         bool radial = false;
+
+        bool operator==(DeadZone const&) const = default;
     };
 
     // sign(x) |x|^exponent per component: above 1 softens the centre.
     struct Curve
     {
         f32 exponent = 2.0f;
+
+        bool operator==(Curve const&) const = default;
     };
 
     // Invert.
-    struct Negate {};
+    struct Negate
+    {
+        bool operator==(Negate const&) const = default;
+    };
 
     // Per component. A button as an axis is a button scaled.
     struct Scale
     {
         array<f32, 3> factor{{1.0f, 1.0f, 1.0f}};
+
+        bool operator==(Scale const&) const = default;
     };
 
-    // Which input component each output component takes, as letters:
-    // "yxz" puts x in y, so a key bound to a 2D action moves it forward.
+    // Where each input component goes, as letters: the first is where x
+    // goes. "yxz" puts x in y, so a key bound to a 2D action moves it
+    // forward.
     struct Swizzle
     {
         string order = "yxz";
+
+        bool operator==(Swizzle const&) const = default;
     };
 
     // Full output is reached at `input` of the travel, and full output is
@@ -48,6 +60,8 @@ namespace encke::input
     {
         f32 input  = 1.0f;
         f32 output = 1.0f;
+
+        bool operator==(Saturation const&) const = default;
     };
 
     enum class Half : u8
@@ -61,6 +75,8 @@ namespace encke::input
     struct Split
     {
         Half half = Half::Positive;
+
+        bool operator==(Split const&) const = default;
     };
 
     // An axis as a button: 1 from when its magnitude reaches `press` until
@@ -70,6 +86,8 @@ namespace encke::input
     {
         f32 press   = 0.5f;
         f32 release = 0.4f;
+
+        bool operator==(Threshold const&) const = default;
     };
 
     using Modifier = std::variant<DeadZone, Curve, Negate, Scale, Swizzle, Saturation, Split, Threshold>;

@@ -1,0 +1,13 @@
+// The input window's bindings editor over the start pose, opened by its
+// action as F7 would, showing on_foot's actions and their bindings. The
+// frame stats stay hidden: their timings differ on every run.
+{
+    "settings": { "ev100": 13, "stats": false },
+    "steps": [
+        { "op": "settle" },
+        { "op": "set", "ui": true },
+        { "op": "action", "action": "toggle_input_window" },
+        { "op": "wait", "frames": 2 },
+        { "op": "capture", "file": "bindings.png" }
+    ]
+}

@@ -10,18 +10,6 @@ namespace encke::input
 {
     namespace
     {
-        char const* type_name(ActionType type)
-        {
-            switch (type)
-            {
-            case ActionType::Bool:   return "bool";
-            case ActionType::Axis1D: return "1d";
-            case ActionType::Axis2D: return "2d";
-            case ActionType::Axis3D: return "3d";
-            }
-            return "?";
-        }
-
         // Components past the type's are zeroed.
         f32vec3 mask(ActionType type, f32vec3 value)
         {
@@ -70,33 +58,6 @@ namespace encke::input
         dispatch_.clear();
     }
 
-    optional<ActionId> InputSystem::require(string_view name, ActionType type) const
-    {
-        optional<ActionId> const action = map_.find_action(name);
-        if (!action.has_value())
-        {
-            log::error("input: no layer declares the action \"%.*s\"", static_cast<int>(name.size()), name.data());
-            return nullopt;
-        }
-        ActionType const declared = map_.actions[action->index].type;
-        if (declared != type)
-        {
-            log::error("input: the action \"%.*s\" is %s, and the engine reads it as %s",
-                       static_cast<int>(name.size()), name.data(), type_name(declared), type_name(type));
-            return nullopt;
-        }
-        return action;
-    }
-
-    optional<ContextId> InputSystem::require_context(string_view name) const
-    {
-        optional<ContextId> const context = map_.find_context(name);
-        if (!context.has_value())
-        {
-            log::error("input: no layer declares the context \"%.*s\"", static_cast<int>(name.size()), name.data());
-        }
-        return context;
-    }
 
     void InputSystem::set_enabled(ContextId context, bool enabled)
     {

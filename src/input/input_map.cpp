@@ -46,6 +46,36 @@ namespace encke::input
         return ContextId{static_cast<u32>(found - contexts.begin())};
     }
 
+    optional<ActionId> InputMap::require(string_view name, ActionType type) const
+    {
+        optional<ActionId> const action = find_action(name);
+        if (!action.has_value())
+        {
+            log::error("input: no layer declares the action \"%.*s\"", static_cast<int>(name.size()), name.data());
+            return nullopt;
+        }
+        ActionType const declared = actions[action->index].type;
+        if (declared != type)
+        {
+            string const is    = string{type_name(declared)};
+            string const wants = string{type_name(type)};
+            log::error("input: the action \"%.*s\" is %s, and the engine reads it as %s",
+                       static_cast<int>(name.size()), name.data(), is.c_str(), wants.c_str());
+            return nullopt;
+        }
+        return action;
+    }
+
+    optional<ContextId> InputMap::require_context(string_view name) const
+    {
+        optional<ContextId> const context = find_context(name);
+        if (!context.has_value())
+        {
+            log::error("input: no layer declares the context \"%.*s\"", static_cast<int>(name.size()), name.data());
+        }
+        return context;
+    }
+
     optional<InputMap> compile(Layer const& layer, string_view source)
     {
         InputMap map;
@@ -54,11 +84,12 @@ namespace encke::input
         // A std::map iterates by name, which find_action relies on.
         for (auto const& [name, action] : layer.actions)
         {
-            ok = check_all(action.modifiers, source, "action " + name) && ok;
+            vector<Modifier> const modifiers = action.modifiers.value_or(vector<Modifier>{});
+            ok = check_all(modifiers, source, "action " + name) && ok;
             map.actions.push_back(Action{.name        = name,
                                          .type        = action.type,
-                                         .description = action.description,
-                                         .modifiers   = action.modifiers});
+                                         .description = action.description.value_or(string{}),
+                                         .modifiers   = modifiers});
         }
 
         for (auto const& [name, context] : layer.contexts)
@@ -86,12 +117,13 @@ namespace encke::input
                         ok = false;
                         continue;
                     }
-                    ok = check_all(binding.modifiers, source, where) && ok;
+                    span<Modifier const> const modifiers = modifiers_of(binding);
+                    ok = check_all(modifiers, source, where) && ok;
                     compiled.bindings.push_back(Binding{.control   = *control,
                                                         .action    = *action,
-                                                        .modifiers = binding.modifiers,
-                                                        .trigger   = binding.trigger,
-                                                        .consume   = binding.consume});
+                                                        .modifiers = vector<Modifier>(modifiers.begin(), modifiers.end()),
+                                                        .trigger   = trigger_of(binding),
+                                                        .consume   = consumes(binding)});
                 }
             }
             map.contexts.push_back(std::move(compiled));

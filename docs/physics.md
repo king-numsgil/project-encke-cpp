@@ -177,8 +177,10 @@ X toggles between on foot, the default outside scenarios, and the jetpack. A
 scenario starts on the jetpack and walks with `"movement": "walk"`.
 
 The mouse is held in both movements (`App::capture_mouse`): relative mouse
-mode, and the UI gets `ImGuiConfigFlags_NoMouse | NoKeyboard`. Alt, or losing
-focus, lets go of it. Space is safe only because the UI is blocked while the
+mode, and the UI gets `ImGuiConfigFlags_NoMouse | NoKeyboard`. Alt lets go of
+it until Alt again (a toggle: held, it turned every key into an Alt chord and
+the UI's text fields got nothing), opening F7 lets go too, and losing focus
+lets go until focus returns. Space is safe only because the UI is blocked while the
 mouse is held: ImGui's keyboard navigation activates the focused widget on
 Space. Under a scenario it is never held.
 

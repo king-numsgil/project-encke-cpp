@@ -12,13 +12,22 @@ namespace encke::input
     inline constexpr f32 kActuation = 0.5f;
 
     // The value passes through every frame, and each press fires.
-    struct Down {};
+    struct Down
+    {
+        bool operator==(Down const&) const = default;
+    };
 
     // Fires on each press; the value passes only on a frame with one.
-    struct Pressed {};
+    struct Pressed
+    {
+        bool operator==(Pressed const&) const = default;
+    };
 
     // Fires on each release; the value passes only on a frame with one.
-    struct Released {};
+    struct Released
+    {
+        bool operator==(Released const&) const = default;
+    };
 
     using Trigger = std::variant<Down, Pressed, Released>;
 }

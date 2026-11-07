@@ -166,6 +166,8 @@ add_library(encke_core OBJECT
     src/core/memory.cpp
     src/core/sanitizers.cpp
 
+    src/input/bindings.cpp
+    src/input/capture.cpp
     src/input/control.cpp
     src/input/input_map.cpp
     src/input/input_system.cpp
@@ -480,6 +482,8 @@ include(Catch)
 
 add_executable(encke_tests
     tests/core/json_test.cpp
+    tests/input/bindings_test.cpp
+    tests/input/capture_test.cpp
     tests/input/control_test.cpp
     tests/input/input_system_test.cpp
     tests/input/layer_test.cpp

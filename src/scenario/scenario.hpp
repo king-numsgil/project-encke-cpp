@@ -17,6 +17,9 @@ namespace encke::scenario
     struct Settings
     {
         optional<bool>    ui;            // the overlay; captures want it off
+        // The frame stats window, within the overlay: timings, which differ
+        // on every run, so a capture of the overlay wants it off.
+        optional<bool>    stats;
         optional<bool>    taa;
         optional<bool>    geomorph;      // off draws every chunk at its own vertices
         optional<bool>    frame_limit;   // the 60 fps CPU limiter

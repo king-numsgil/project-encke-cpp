@@ -269,10 +269,11 @@ namespace encke::input
     TEST_CASE("the engine's ids are refused by name and by type", "[input]")
     {
         InputSystem const input = running(kWalk);
-        CHECK(input.require("move", ActionType::Axis2D).has_value());
-        CHECK_FALSE(input.require("move", ActionType::Axis3D).has_value());
-        CHECK_FALSE(input.require("teleport", ActionType::Bool).has_value());
-        CHECK(input.require_context("on_foot").has_value());
-        CHECK_FALSE(input.require_context("flying").has_value());
+        InputMap const&   map   = input.map();
+        CHECK(map.require("move", ActionType::Axis2D).has_value());
+        CHECK_FALSE(map.require("move", ActionType::Axis3D).has_value());
+        CHECK_FALSE(map.require("teleport", ActionType::Bool).has_value());
+        CHECK(map.require_context("on_foot").has_value());
+        CHECK_FALSE(map.require_context("flying").has_value());
     }
 }

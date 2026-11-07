@@ -96,7 +96,7 @@ focus.
 
 ## The device monitor and its log
 
-F7 opens "Input devices": every joystick live, axes as bars with their raw
+F7 opens "Input"; its Devices tab shows every joystick live, axes as bars with their raw
 value and the range reached since it was opened, buttons lit while held
 with their press count on hover, hats by direction.
 
@@ -174,7 +174,8 @@ never devices; everything an action is bound to is data.
   an ImGui field drops key presses but not releases, so F-keys and Escape do
   nothing while a text field has focus.
 - **Layers** (`input/layer`): `assets/input/default.json`, then
-  `input.json` beside the executable if present. A layer's action replaces
+  `input.json` in the user's folder if present (see the editor's saving,
+  below). A layer's action replaces
   the one below by name; within a context, an action's binding list
   replaces the one below whole, and an empty list unbinds; a context's
   priority carries through unless restated. Mods will be more layers on the
@@ -188,7 +189,62 @@ never devices; everything an action is bound to is data.
   Under a scenario the jetpack is not flown from actions, since flying
   integrates wall-clock time; the `fly` op moves the camera instead.
 
-## Plan: the rest of the action layer and its editor
+## The editor
+
+F7 opens "Input", whose Bindings tab edits the bindings and whose Devices
+tab is the device monitor above. `scenarios/input_editor.json` captures it.
+
+- **The model** (`input/bindings`) holds the defaults and the user's layer.
+  An edit replaces one action's binding list in one context and goes to the
+  user's layer; a list equal to the defaults' leaves no entry there, so the
+  user's file holds only what differs and a later change to the defaults
+  still reaches everything the user left alone. Bindings are normalized
+  first (`normalized`), so a default stated out loud compares equal.
+- **Files** leave defaults out: absent modifiers, trigger and consume read
+  as none, `down` and true, and are not written. Contexts carry a
+  `description`, since a saved file keeps no comments. `save_layer` writes a
+  temporary file and renames it over the old.
+- **Saving**: Save writes the user's layer to `input.json` in the user's
+  folder, `SDL_GetPrefPath("", "encke")`: `%APPDATA%\encke\` on Windows,
+  `~/.local/share/encke/` on Linux, shared by every build and preset and
+  untouched by a clean one. Save as defaults writes the merged layer to
+  `assets/input/default.json` in the source tree and empties the user's
+  layer, its file too: how the repo's defaults are authored.
+- **Applying**: the engine compiles after every edit and checks the new map
+  still has every action and context it reads (`App::apply_bindings`,
+  through `InputMap::require`) before swapping it in; on any failure the
+  old map keeps running. Ids are looked up again each time, since a new
+  action shifts the ids after it by name.
+- **Press-to-bind** (`input/capture`) takes the first key, joystick button
+  or hat press, or an axis once it has moved half its range from where it
+  first reported, since a resting throttle is noisy. The mouse is never
+  taken, or clicking `+` would bind the click; mouse controls are typed.
+  Escape cancels. While it waits, the engine acts on no action, so Escape
+  does not quit and F-keys toggle nothing.
+- **Components**: a control's value enters in x, and on a 2D or 3D action
+  each binding picks the component it drives, x, y or z. The pick is a
+  swizzle last in the binding's chain (`component_of`, `set_component`),
+  shown as `-> y` and not listed with the other modifiers. Press-to-bind
+  gives an axis the first component no other axis binding of that action
+  takes, so three axes bound in a row are x, y and z; a button stays on x,
+  since two buttons are usually one component's two directions.
+- **Live**: each action's value is the engine's. A gameplay context is off
+  while the mouse is free for the UI, and a context the engine does not
+  know is never on, so their actions read zero; Preview keeps the selected
+  context on while the window is open (walking too, on foot). Each binding
+  lights while its control is held, whatever is enabled.
+- New actions and contexts go to the user's layer, and only those can be
+  deleted (right-click an action's name; "delete context"): the defaults
+  hold everything the engine reads. An action goes with its bindings in
+  every context. Bound here only hides the defaults' actions this context
+  does not touch; the user's own always show.
+- Under a scenario the user's layer is not read, and the UI takes no mouse
+  or keys: a capture must not depend on what this machine has bound, or
+  on where the cursor rests.
+- Not yet: curves in ImPlot, control groups, detent calibration, editing
+  an action's own modifiers or a context's priority.
+
+## Plan: the rest of the action layer
 
 Agreed in design, not built.
 
@@ -219,18 +275,15 @@ Agreed in design, not built.
 - **Commands per physics step**: actions are sampled into a command per
   step, not read per frame. Jolt is deterministic given the same calls, so
   recorded commands replay, and later carry multiplayer.
-- **The editor** writes the user's layer, holding only what differs from
-  the defaults, and compiles again. `InputSystem::frame_events` is there
-  for press-to-bind. It is ImGui: the device monitor as its first panel, an action
-  list, press-to-bind capture (an axis must move by a margin, since a
-  resting throttle is noisy), curve editing in ImPlot with the live input
-  as a point on the curve, and the control groups above.
+- **The editor**, past its first version: curve editing in ImPlot with the
+  live input as a point on the curve, and the control groups above.
 - **Tests** replay recorded logs (`input-*.jsonl`) through the mapping
   layer, so arbitration is checked against real hands' timing.
 - LEDs and backlights, if ever wanted, go through `SDL_hid_*`, outside the
   action layer.
 
 Order: actions and bindings with modifiers and plain pressed and released
-(built), then the torchship's flight controls on them, then tap, hold,
-chords and arbitration once there is flying to test them against. Finish
-the control map from a narrated log session before binding defaults.
+(built), a first editor (built), then the HOTAS bound with it and the
+torchship's flight controls on those actions, then tap, hold, chords and
+arbitration once there is flying to test them against, then curves and
+control groups in the editor.

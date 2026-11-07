@@ -55,6 +55,12 @@ namespace encke::input
 
         optional<ActionId>  find_action(string_view name) const;
         optional<ContextId> find_context(string_view name) const;
+
+        // The ids the engine reads, looked up once per map. Logs and
+        // returns nothing if no layer declares it, or declares it with
+        // another type.
+        optional<ActionId>  require(string_view name, ActionType type) const;
+        optional<ContextId> require_context(string_view name) const;
     };
 
     // Logs every mistake, naming `source`, and refuses the whole map if there

@@ -176,8 +176,8 @@ build\gcc-debug\encke_tests.exe "[camera]"     # one tag
 executable; textures and models are read from `assets/` in the source tree,
 whose path is baked in at configure time.
 
-The mouse is captured, as in any first-person game; hold Alt to free it for the
-UI. You start on foot. X switches between walking and the jetpack.
+The mouse is captured, as in any first-person game; Alt frees it for the UI and
+Alt again takes it back. Opening F7 frees it too. You start on foot. X switches between walking and the jetpack.
 
 | Walking | |
 | --- | --- |
@@ -203,15 +203,16 @@ UI. You start on foot. X switches between walking and the jetpack.
 | F4 | cycle the wireframe: off, over the image, alone |
 | F5 | show collision shapes |
 | F6 | show the terrain chunks' boxes |
-| F7 | input devices: live joystick state, and the input log |
+| F7 | input: the bindings editor, live joystick state, and the input log |
 | 1, 2 | clustered or brute-force shading |
 | 3 to 6 | debug views: lights per cluster, normals, motion vectors, shadow cascades |
 | T | cycle the tonemap curve |
 | Escape | quit |
 
-These are the defaults in `assets/input/default.json`. To rebind, put an
-`input.json` beside the executable in the same shape: it names only the
-actions it changes, and replaces their bindings (see `docs/input.md`).
+These are the defaults in `assets/input/default.json`. To rebind, use F7's
+Bindings tab, which saves to `%APPDATA%\encke\input.json`: it holds only
+what differs from the defaults, and every build reads it (see
+`docs/input.md`).
 
 `encke --headless` runs the terrain benchmark without opening a window, and
 `encke --sweep [n]` measures every level of detail over n random chunks.
