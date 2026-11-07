@@ -84,8 +84,34 @@ From the first mapping log (a guided session, 120 s):
   lever. Axes 3, 4 (resting at +32767), 6 (resting at -3008) and 7 never
   moved.
 
+From binding it in the editor (the author's first `ship` context, kept in
+their own `input.json`):
+
+- Stick axis 5 is the twist: it moves, where the first log never saw it.
+  Stick axis 2 is then the base's mini-throttle, a slider, which fits it
+  resting at -32768.
+- Throttle axis 2 is the main lever.
+- Stick buttons 23 and 24 are the trigger's two stages; pulling through to
+  stage 2 holds stage 1 as well.
+- The mini-stick (stick 3 and 4) and the thumb stick (throttle 0 and 1)
+  are as the log had them.
+- The kit is new and every axis rests at +0.00 in the editor's live
+  values, so no binding has a dead zone yet. Revisit as it wears.
+
+What binding it showed is missing:
+
+- A lever runs -1 to 1, so `thrust` bound straight is full reverse at
+  idle. No modifier maps -1..1 to 0..1: `scale` has no offset and `split`
+  loses half the travel. It wants a `range` modifier.
+- `look` is a per-frame delta, made for the mouse's pixels. A stick holds a
+  value, so a stick on `look` turns by the same amount every frame, faster
+  the higher the frame rate. A stick wants a rate action (radians per
+  second, times the frame's time) beside the mouse's delta one: an engine
+  change, not a binding.
+
 Open: the order the session followed, to name each index; what stick 19
-and 40 to 43 are; which axis is the lever and where its detents sit.
+and 40 to 43 are; where the lever's detents sit; which pair is the
+thumbwheel.
 
 ## The probe
 
