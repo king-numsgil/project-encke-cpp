@@ -5,6 +5,7 @@
 #include "core/log.hpp"
 #include "core/memory.hpp"
 #include "input/sdl_input.hpp"
+#include "physics/components.hpp"
 #include "platform/cpu.hpp"
 #include "render/config.hpp"
 #include "render/pixels.hpp"
@@ -153,20 +154,51 @@ namespace encke
         log::init();
         log::info("allocator: %s", memory::backend_name());
 
-        // First, so a mistake in the file stops the run before a window opens.
-        if (options.scenario.has_value())
+        // First, so a mistake in a file stops the run before a window opens.
+        for (std::filesystem::path const& file : options.scenarios)
         {
-            scenario_ = scenario::load(*options.scenario);
-            if (!scenario_.has_value())
+            optional<scenario::Scenario> loaded = scenario::load(file);
+            if (!loaded.has_value())
             {
                 return false;
             }
-            scenario_output_ = options.output.value_or(options.scenario->parent_path() / "out" /
-                                                       scenario_->name);
-            log::info("scenario \"%s\": %zu steps, captures to %s", scenario_->name.c_str(),
-                      scenario_->steps.size(), scenario_output_.string().c_str());
+            std::filesystem::path const output =
+                !options.output.has_value()       ? file.parent_path() / "out" / loaded->name
+                : options.scenarios.size() == 1 ? *options.output
+                                                  : *options.output / loaded->name;
+            log::info("scenario \"%s\": %zu steps, captures to %s", loaded->name.c_str(), loaded->steps.size(),
+                      output.string().c_str());
+            scenarios_.push_back(std::move(*loaded));
+            scenario_outputs_.push_back(output);
         }
-        bool const srgb_ui = scenario_.has_value() && scenario_->settings.srgb_ui.value_or(false);
+
+        // Several share one start, so what is chosen at startup must agree,
+        // and only the last may hand over to the user.
+        for (size_t index = 1; index < scenarios_.size(); ++index)
+        {
+            scenario::Settings const& first = scenarios_.front().settings;
+            scenario::Settings const& other = scenarios_[index].settings;
+            if (other.srgb_ui.value_or(false) != first.srgb_ui.value_or(false) ||
+                other.collision_lod != first.collision_lod)
+            {
+                log::error("scenario \"%s\": srgb_ui and collision_lod differ from \"%s\"'s; run it on its own",
+                           scenarios_[index].name.c_str(), scenarios_.front().name.c_str());
+                return false;
+            }
+        }
+        for (size_t index = 0; index + 1 < scenarios_.size(); ++index)
+        {
+            for (scenario::Step const& step : scenarios_[index].steps)
+            {
+                if (std::holds_alternative<scenario::Interactive>(step))
+                {
+                    log::error("scenario \"%s\" hands over to the user, so it must run last",
+                               scenarios_[index].name.c_str());
+                    return false;
+                }
+            }
+        }
+        bool const srgb_ui = !scenarios_.empty() && scenarios_.front().settings.srgb_ui.value_or(false);
 
         // Before the window too: a binding file with a mistake stops the run.
         if (!load_input())
@@ -241,8 +273,8 @@ namespace encke
         // hyperthreads beside the terrain workers and this thread. Jolt's
         // step is mostly pointer chasing and branches, which shares a core
         // with the terrain's SIMD better than more SIMD would.
-        u32 const collision_lod = scenario_.has_value()
-                                      ? scenario_->settings.collision_lod.value_or(config::kCollisionLod)
+        u32 const collision_lod = !scenarios_.empty()
+                                      ? scenarios_.front().settings.collision_lod.value_or(config::kCollisionLod)
                                       : config::kCollisionLod;
         physics_.init(cpu.logical_processors > cpu.physical_cores
                           ? cpu.logical_processors - cpu.physical_cores
@@ -262,13 +294,34 @@ namespace encke
         // The limiter stays on: physics and flying advance one 60 Hz step a
         // frame so runs match, which is real time only at 60 fps. A scenario
         // nobody watches can turn it off and run faster to the same images.
-        if (scenario_.has_value())
-        {
-            fixed_time_ = 0.0;
-            show_ui_    = false;
-            apply_settings(scenario_->settings);
-        }
         renderer_.set_taa(taa_);
+        if (!scenarios_.empty())
+        {
+            start_camera_ = scene_.registry.get<Transform>(scene_.camera);
+            auto const ships = scene_.registry.view<physics::ShipSpace const, Transform const>();
+            for (entt::entity const entity : ships)
+            {
+                start_poses_.emplace_back(entity, ships.get<Transform const>(entity));
+            }
+            scenario_defaults_ = scenario::Settings{
+                .ui            = false,
+                .taa           = taa_,
+                .geomorph      = renderer_.geomorph(),
+                .frame_limit   = limit_frames_,
+                .tonemap       = renderer_.tonemap(),
+                .ev100         = nullopt,
+                .shading       = renderer_.debug_view(),
+                .windows       = vector<DebugWindow>{},
+                .time          = 0.0,
+                .wireframe     = renderer_.wireframe(),
+                .collision     = false,
+                .octree        = false,
+                .movement      = Movement::Jetpack,
+                .srgb_ui       = nullopt,
+                .collision_lod = nullopt,
+            };
+            start_scenario(0);
+        }
 
         log::info("tonemap: %s (T cycles)", tonemap_name(renderer_.tonemap()));
         log::info("debug view: %s (keys 1-2 shade, 3-%u toggle windows, F1 toggles the UI)",
@@ -755,6 +808,71 @@ namespace encke
         }
     }
 
+    void App::start_scenario(size_t index)
+    {
+        scenario_index_  = index;
+        scenario_        = scenarios_[index];
+        scenario_output_ = scenario_outputs_[index];
+        step_index_      = 0;
+        step_frames_     = 0;
+        step_started_    = false;
+        scenario_failed_ = false;
+        log::info("scenario \"%s\" (%zu of %zu)", scenario_->name.c_str(), index + 1, scenarios_.size());
+
+        fixed_time_ = 0.0;
+        show_ui_    = false;
+        apply_settings(scenario_->settings);
+    }
+
+    void App::reset_for_next_scenario()
+    {
+        if (movement_ != Movement::Jetpack)
+        {
+            set_movement(Movement::Jetpack);
+        }
+
+        // Physics from nothing, as at startup: the ships back where the
+        // scene put them, the spawned bodies gone, then the scene taken in
+        // again. The ground is built again around what needs it.
+        physics_.rebuild(scene_.registry, pool_);
+        for (entt::entity const entity : spawned_)
+        {
+            if (scene_.registry.valid(entity))
+            {
+                scene_.registry.destroy(entity);
+            }
+        }
+        spawned_.clear();
+        for (auto const& [entity, pose] : start_poses_)
+        {
+            scene_.registry.get<Transform>(entity) = pose;
+        }
+        propagate_transforms(scene_.registry);
+        physics_.add_static_colliders(scene_.registry);
+        terrain_.set_frozen(false);
+        frozen_pose_.reset();
+        scene_.registry.get<Transform>(scene_.camera) = start_camera_;
+
+        renderer_.set_fixed_ev100(nullopt);
+        apply_settings(scenario_defaults_);
+    }
+
+    bool App::finish_scenario()
+    {
+        if (scenario_failed_)
+        {
+            log::error("scenario \"%s\" failed", scenario_->name.c_str());
+            failed_scenarios_.push_back(scenario_->name);
+        }
+        if (scenario_index_ + 1 >= scenarios_.size())
+        {
+            return false;
+        }
+        reset_for_next_scenario();
+        start_scenario(scenario_index_ + 1);
+        return true;
+    }
+
     void App::collect_debug_lines()
     {
         debug_lines_.clear();
@@ -814,6 +932,7 @@ namespace encke
                     f64vec3 const axis = glm::normalize(f64vec3{std::sin(turn * 1.3), 1.0, std::cos(turn * 0.7)});
 
                     entt::entity const entity = scene_.registry.create();
+                    spawned_.push_back(entity);
                     scene_.registry.emplace<Transform>(
                         entity, Transform{
                                     .position = scene_.to_world(first + f64vec3{x, y, z} * spacing),
@@ -1237,7 +1356,7 @@ namespace encke
             if (scripted)
             {
                 capturing = tick_scenario();
-                if (scenario_.has_value() && step_index_ >= scenario_->steps.size())
+                if (scenario_.has_value() && step_index_ >= scenario_->steps.size() && !finish_scenario())
                 {
                     running = false;
                     continue;
@@ -1369,9 +1488,15 @@ namespace encke
         // Everything below unwinds through destructors; they must not run
         // while the GPU is still reading the resources they free.
         device_.wait_idle();
-        if (scenario_failed_)
+        if (!failed_scenarios_.empty())
         {
-            log::error("scenario failed");
+            string names;
+            for (string const& name : failed_scenarios_)
+            {
+                names += (names.empty() ? "" : ", ") + name;
+            }
+            log::error("%zu of %zu scenarios failed: %s", failed_scenarios_.size(), scenarios_.size(),
+                       names.c_str());
             return EXIT_FAILURE;
         }
         log::info("shutting down");

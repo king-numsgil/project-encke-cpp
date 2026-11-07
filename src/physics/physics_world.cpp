@@ -127,6 +127,50 @@ namespace encke::physics
             return JPH::BodyID{body.body};
         }
 
+        // A view's entities by their index, oldest first. A storage
+        // iterates newest first, so pieces taken in two batches as a model
+        // loads would come in another order than the same pieces taken at
+        // once, and Jolt's results depend on the order bodies are made in.
+        template<class View>
+        vector<entt::entity> in_entity_order(View const& view)
+        {
+            vector<entt::entity> entities(view.begin(), view.end());
+            std::ranges::sort(entities, {}, [](entt::entity e) { return entt::to_entity(e); });
+            return entities;
+        }
+
+        struct Pose
+        {
+            f64vec3 position{0.0};
+            f64quat rotation{1.0, 0.0, 0.0, 0.0};
+        };
+
+        // An entity's pose in its ship's frame. Composed down the parent
+        // chain when the ship is an ancestor, so it comes out the same to the
+        // last bit wherever the ship stands; else its WorldTransform taken
+        // into the ship's, which rounds differently as the ship moves.
+        Pose pose_in_ship(entt::registry const& registry, entt::entity entity, entt::entity ship)
+        {
+            Pose         pose;
+            entt::entity at = entity;
+            while (at != ship)
+            {
+                Transform const* const local = registry.try_get<Transform>(at);
+                if (local == nullptr || local->parent == entt::null)
+                {
+                    WorldTransform const& world  = registry.get<WorldTransform>(entity);
+                    WorldTransform const& frame  = registry.get<WorldTransform>(ship);
+                    f64quat const         undo   = glm::conjugate(frame.rotation);
+                    return Pose{.position = undo * (world.position - frame.position),
+                                .rotation = undo * world.rotation};
+                }
+                pose.position = local->position + local->rotation * pose.position;
+                pose.rotation = local->rotation * pose.rotation;
+                at            = local->parent;
+            }
+            return pose;
+        }
+
         // Jolt's allocations go where everything else's do.
         void install_allocator()
         {
@@ -401,6 +445,7 @@ namespace encke::physics
             static_shapes;
 
         u32 lod         = config::kCollisionLod;
+        u32 threads     = 0;
         f64 accumulator = 0.0;
         u32 held        = 0;
         u32 dynamic     = 0;
@@ -547,26 +592,25 @@ namespace encke::physics
         // Every ShipShape not yet taken in, into its ship: a Volume piece as
         // planes in the ship's frame, a Hull piece as a convex shape placed
         // in it. Then a body for every ship with hull pieces and none yet.
-        // Poses are relative to the ship's WorldTransform, so they hold
+        // Poses are in the ship's frame (pose_in_ship), so they hold
         // wherever the ship is.
         void take_shapes(entt::registry& registry)
         {
             vector<entt::entity> taken;
-            for (auto const [entity, piece, world_transform] :
-                 registry.view<ShipShape const, WorldTransform const>(entt::exclude<ShipShapeTaken>).each())
+            for (entt::entity const entity :
+                 in_entity_order(registry.view<ShipShape const, WorldTransform const>(entt::exclude<ShipShapeTaken>)))
             {
-                Space* const space = find(piece.ship);
+                ShipShape const&      piece           = registry.get<ShipShape>(entity);
+                WorldTransform const& world_transform = registry.get<WorldTransform>(entity);
+                Space* const          space           = find(piece.ship);
                 if (space == nullptr || piece.ship == entt::null)
                 {
                     continue;
                 }
                 taken.push_back(entity);
 
-                WorldTransform const& ship     = registry.get<WorldTransform>(piece.ship);
-                f64quat const         undo     = glm::conjugate(ship.rotation);
-                f64vec3 const         position = undo * (world_transform.position - ship.position);
-                f64quat const         rotation = undo * world_transform.rotation;
-                f64vec3 const         scale{world_transform.scale};
+                auto const [position, rotation] = pose_in_ship(registry, entity, piece.ship);
+                f64vec3 const scale{world_transform.scale};
 
                 if (piece.role == ShipShape::Role::Volume)
                 {
@@ -1352,8 +1396,9 @@ namespace encke::physics
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
         impl_       = std::make_unique<Impl>();
-        impl_->live = true;
-        impl_->lod  = collision_lod;
+        impl_->live    = true;
+        impl_->lod     = collision_lod;
+        impl_->threads = threads;
 
         impl_->broad_phase.MapObjectToBroadPhaseLayer(kStatic, JPH::BroadPhaseLayer{0});
         impl_->broad_phase.MapObjectToBroadPhaseLayer(kMoving, JPH::BroadPhaseLayer{1});
@@ -1395,6 +1440,30 @@ namespace encke::physics
         impl_->add(registry, entity, new JPH::SphereShape{radius}, static_cast<f64>(radius));
     }
 
+    void PhysicsWorld::rebuild(entt::registry& registry, WorkerPool& pool)
+    {
+        if (!impl_)
+        {
+            return;
+        }
+
+        // A chunk's job holds the Impl and its samplers; its completion
+        // counts it built.
+        while (impl_->building > 0)
+        {
+            pool.drain();
+            SDL_DelayNS(1'000'000);
+        }
+
+        u32 const threads = impl_->threads;
+        u32 const lod     = impl_->lod;
+        impl_.reset();
+        registry.clear<RigidBody>();
+        registry.clear<StaticBody>();
+        registry.clear<ShipShapeTaken>();
+        init(threads, lod);
+    }
+
     void PhysicsWorld::add_static_colliders(entt::registry& registry)
     {
         if (!impl_)
@@ -1408,9 +1477,11 @@ namespace encke::physics
         vector<entt::entity> made;
         u32                  bodies = 0;
         u32                  failed = 0;
-        for (auto const [entity, collider, world] :
-             registry.view<StaticCollider const, WorldTransform const>(entt::exclude<StaticBody>).each())
+        for (entt::entity const entity :
+             in_entity_order(registry.view<StaticCollider const, WorldTransform const>(entt::exclude<StaticBody>)))
         {
+            StaticCollider const& collider = registry.get<StaticCollider>(entity);
+            WorldTransform const& world    = registry.get<WorldTransform>(entity);
             made.push_back(entity);
             JPH::ShapeRefC const shape = impl_->static_shape(collider, world.scale);
             if (shape == nullptr)
@@ -1419,17 +1490,16 @@ namespace encke::physics
                 continue;
             }
 
-            // In a ship's frame, relative to the ship's WorldTransform from
-            // the same update, which is where the ship's body may not be.
+            // In a ship's frame, composed down from the ship, so it does not
+            // depend on where the ship's body stood when the part arrived.
             auto const add = [&](Space& space) {
                 f64vec3 position = world.position;
                 f64quat rotation = world.rotation;
                 if (!space.world())
                 {
-                    WorldTransform const& ship = registry.get<WorldTransform>(space.ship);
-                    f64quat const         undo = glm::conjugate(ship.rotation);
-                    position                   = undo * (world.position - ship.position);
-                    rotation                   = undo * world.rotation;
+                    Pose const pose = pose_in_ship(registry, entity, space.ship);
+                    position        = pose.position;
+                    rotation        = pose.rotation;
                 }
                 JPH::BodyCreationSettings settings{shape, to_jolt(position), to_jolt(rotation),
                                                    JPH::EMotionType::Static, kStatic};

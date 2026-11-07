@@ -38,6 +38,16 @@ creation and removal included. Collision chunks come back from the pool in
 whatever order they finish, so a built chunk becomes a body only once every
 chunk asked for is back, and then all in grid order (`Impl::add_built`);
 eviction is in grid order too. Everything else is created in registry order.
+Static colliders and ship shapes are taken in entity order
+(`in_entity_order`), not the storage's newest-first: a model's parts arrive
+in batches as it loads, and newest-first per batch is another order than
+newest-first over all of them at once, which a physics rebuild between
+merged scenarios does. A part's pose in its ship's frame is composed down
+the parent chain from the ship (`pose_in_ship`), not taken out of the two
+WorldTransforms, which rounds differently depending on where the ship stood
+when the part arrived. Both were ways a run's physics depended on asset
+timing; with them gone, a scenario after `PhysicsWorld::rebuild` captures
+the same as one in a fresh process.
 `boxes.json` twice is byte-identical with Jolt on four threads; the first
 run without `add_built` differed. `physics_world_test` drops a box twice and
 compares to the bit.

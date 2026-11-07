@@ -75,6 +75,17 @@ namespace encke::physics
         // A dynamic sphere, its diameter the Transform's scale on x.
         void add_sphere(entt::registry& registry, entt::entity entity);
 
+        // Starts over as init() left it: every body, space, ground chunk and
+        // the character gone, and the RigidBody, StaticBody and
+        // ShipShapeTaken components it put on entities removed, so the next
+        // add_static_colliders() takes the scene in again. Waits for ground
+        // chunks still building, draining `pool`. Removing bodies one by one
+        // would leave Jolt in a state a fresh run never has, and what steps
+        // next would differ from one in its last bits; a stack of falling
+        // boxes makes that visible. A ship's root keeps the Transform the
+        // world last wrote; put it back first for a fresh start.
+        void rebuild(entt::registry& registry, WorkerPool& pool);
+
         // Static bodies for every StaticCollider in the registry that has
         // none yet, at its WorldTransform, in the registry's order, which is
         // the same on every run: in the world's space, its ship's, or both,

@@ -195,6 +195,7 @@ namespace encke
         // Off draws every mesh at its own vertices, morph targets ignored: to
         // compare against, since off is what terrain looked like before.
         void set_geomorph(bool on) { geomorph_ = on; }
+        bool geomorph() const { return geomorph_; }
 
         void      set_wireframe(Wireframe wireframe) { wireframe_ = wireframe; }
         Wireframe wireframe() const { return wireframe_; }

@@ -14,7 +14,7 @@ int main(int argc, char** argv)
     {
         if (string_view{argv[i]} == "--scenario" && i + 1 < argc)
         {
-            options.scenario = std::filesystem::path{argv[++i]};
+            options.scenarios.emplace_back(argv[++i]);
             continue;
         }
         if (string_view{argv[i]} == "--out" && i + 1 < argc)

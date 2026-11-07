@@ -180,6 +180,16 @@ exit code 1 if a step failed. Files live in `scenarios/`; captures go to
 image. `-Accept` promotes out to reference; `-A x.png -B y.png` compares two
 files.
 
+`--scenario` can be given more than once: the files run in turn in one
+process, so startup and the first settle are paid once. Between files
+`App::reset_for_next_scenario` restores the settings, the camera and the
+ships' poses from before the first, destroys spawned bodies and rebuilds
+physics from nothing; the octree and the assets stay. A file's captures
+come out the same merged as alone. `scenarios\run.ps1 [names]` runs every
+non-interactive scenario that way, then compare.ps1; `-Separate` runs one
+process per file. Files whose `srgb_ui` or `collision_lod` differ cannot
+share a process, and an `interactive` one must come last.
+
 - **Verify visible changes with a scenario, not by eye.** Run the covering
   scenarios before a change (accepting captures if there is no reference)
   and after it. An unexpected diff is a regression until explained; an
@@ -203,7 +213,10 @@ files.
   so walking by it is not reproducible where `walk` is.
 - Positions are in the test scene's frame: metres from the middle of the
   floor, +Y its up.
-- Two runs of a scenario are byte-identical; keep it that way.
+- Two runs of a scenario are byte-identical; keep it that way. Two known
+  exceptions: `debug_views/cluster_heat.png` shows the frame stats, which
+  are timings, and `torchship/deck.png` varies by a few hundred faint
+  pixels between runs, cause not found.
 - **Do not run a scenario ending in `interactive` unattended**: it never
   quits (`boxes.json` is one).
 - Clustered against brute force (`debug_views.json`) is the check for any

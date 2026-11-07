@@ -27,9 +27,12 @@ namespace encke
 {
     struct AppOptions
     {
-        // `--scenario path`: run that file's steps, then quit.
-        optional<std::filesystem::path> scenario;
-        // `--out dir`: where its captures go; by default out/<name> beside it.
+        // `--scenario path`, once or more: run each file's steps in turn, in
+        // one process, then quit.
+        vector<std::filesystem::path> scenarios;
+        // `--out dir`: where captures go. With one scenario, the folder
+        // itself; with several, <dir>/<name> for each. By default
+        // out/<name> beside each file.
         optional<std::filesystem::path> output;
     };
 
@@ -58,6 +61,21 @@ namespace encke
         };
 
         void apply_settings(scenario::Settings const& settings);
+
+        // Makes scenarios_[index] the one running: the scenario baseline
+        // (animation pinned, no overlay), then its settings.
+        void start_scenario(size_t index);
+
+        // Between two scenarios in one run: as close to a fresh start as the
+        // world allows. Spawned bodies go, the character goes, the terrain
+        // thaws, the camera returns to its start pose and every setting to
+        // what it was before the first scenario. The octree, the assets and
+        // the ground already built stay, which is the point.
+        void reset_for_next_scenario();
+
+        // The current scenario has run out of steps: records whether it
+        // failed, and starts the next. False when there is none.
+        bool finish_scenario();
 
         // Runs the scenario's steps until one has to wait for a frame, before
         // anything this frame is updated. Returns whether this frame is to
@@ -218,6 +236,19 @@ namespace encke
         // Pins animation so captures are comparable; a scenario always does.
         optional<f64> fixed_time_;
 
+        // Every scenario asked for, and where each one's captures go.
+        vector<scenario::Scenario>    scenarios_;
+        vector<std::filesystem::path> scenario_outputs_;
+        size_t                        scenario_index_ = 0;
+
+        // What reset_for_next_scenario() returns to: the settings, the camera
+        // and every ship's root as they were before the first scenario, and
+        // the bodies scenarios have spawned since.
+        scenario::Settings                          scenario_defaults_;
+        Transform                                   start_camera_;
+        vector<std::pair<entt::entity, Transform>> start_poses_;
+        vector<entt::entity>                        spawned_;
+
         // The scenario being run, while it runs. Steps run in order; the
         // current one has seen `step_frames_` frames before this one.
         optional<scenario::Scenario> scenario_;
@@ -226,6 +257,7 @@ namespace encke
         u32                          step_frames_  = 0;
         bool                         step_started_ = false;
         bool                         scenario_failed_ = false;
+        vector<string>               failed_scenarios_;
 
         // The physics step a walk step ends at.
         u64 walk_until_ = 0;
