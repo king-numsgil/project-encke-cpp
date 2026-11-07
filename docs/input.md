@@ -100,9 +100,12 @@ their own `input.json`):
 
 What binding it showed is missing:
 
-- A lever runs -1 to 1, so `thrust` bound straight is full reverse at
-  idle. No modifier maps -1..1 to 0..1: `scale` has no offset and `split`
-  loses half the travel. It wants a `range` modifier.
+- The lever runs -1 to 1. The author's driver puts a detent at 50%, which
+  reads 0, with forward thrust above it and reverse below, as in Elite
+  Dangerous; bound straight, that is the intended mapping. A setup with
+  idle at the bottom of the travel wants 0 to 1 instead, and no modifier
+  gives that: `scale` has no offset and `split` loses half the travel. It
+  would want a `range` modifier.
 - `look` is a per-frame delta, made for the mouse's pixels. A stick holds a
   value, so a stick on `look` turns by the same amount every frame, faster
   the higher the frame rate. A stick wants a rate action (radians per
