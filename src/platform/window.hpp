@@ -2,54 +2,22 @@
 
 namespace encke
 {
-    // What the event pump saw this frame. Consumed and discarded each tick.
+    // What the event pump saw this frame about the window. Consumed and
+    // discarded each tick. Input is not here: it reaches the game as
+    // actions (input/).
     struct FrameEvents
     {
+        // The window was closed.
         bool quit_requested = false;
 
         // The drawable changed size. Once a swapchain exists this is the
         // signal to recreate it; the new size is Window::pixel_size().
         bool resized = false;
 
-        // Digit key 1..9 pressed this frame, as 0..8; -1 when none. Drives
-        // the renderer's debug views.
-        i32 debug_view = -1;
-
-        // F1 pressed this frame: show or hide the UI overlay.
-        bool toggle_ui = false;
-
-        // F2 pressed this frame: freeze or thaw the terrain octree.
-        bool toggle_terrain_freeze = false;
-
-        // F3 pressed this frame: copy the camera's pose.
-        bool copy_camera = false;
-
-        // F4: step the wireframe (off, over the image, alone). F5: show or
-        // hide collision shapes. F6: show or hide the octree's chunks.
-        bool cycle_wireframe  = false;
-        bool toggle_collision = false;
-        bool toggle_octree    = false;
-
-        // F7 pressed this frame: show or hide the input devices window.
-        bool toggle_input_window = false;
-
-        // T pressed this frame: step to the next tonemap curve.
-        bool cycle_tonemap = false;
-
-        // X pressed this frame: walk, or take the jetpack.
-        bool toggle_jetpack = false;
-
         // The window gained or lost keyboard focus this frame. Losing it
         // lets go of the mouse.
         bool focus_gained = false;
         bool focus_lost   = false;
-
-        // Mouse motion this frame, in pixels, +x right and +y down. Raw deltas
-        // while relative mode is on.
-        f32vec2 mouse_delta{0.0f};
-
-        // Wheel notches this frame, positive away from the user.
-        f32 wheel = 0.0f;
     };
 
     class Window

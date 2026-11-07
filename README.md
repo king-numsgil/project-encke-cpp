@@ -209,6 +209,10 @@ UI. You start on foot. X switches between walking and the jetpack.
 | T | cycle the tonemap curve |
 | Escape | quit |
 
+These are the defaults in `assets/input/default.json`. To rebind, put an
+`input.json` beside the executable in the same shape: it names only the
+actions it changes, and replaces their bindings (see `docs/input.md`).
+
 `encke --headless` runs the terrain benchmark without opening a window, and
 `encke --sweep [n]` measures every level of detail over n random chunks.
 

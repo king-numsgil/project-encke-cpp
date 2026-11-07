@@ -2,8 +2,10 @@
 
 The goal is a flight sim's input: a HOTAS and other many-button devices,
 bound to actions through an editor, with tap, hold, chords, two-stage
-triggers and encoders. What exists so far is the device layer and the tools
-for looking at devices; no game code reads a joystick yet.
+triggers and encoders. What exists: the device layer, the tools for looking
+at devices, and the action layer with plain pressed, released and held
+triggers. The keyboard and mouse drive the engine through it; no default
+binding names a joystick yet.
 
 ## Devices
 
@@ -117,21 +119,79 @@ the value last logged, so resting noise stays out.
 The probe prints the same `device` record: `describe_joystick` builds it
 for both.
 
-## Plan: the action layer and its editor
+## The action layer
 
-Agreed in design, not built. Unreal's Enhanced Input is the nearest prior
-art and its split is the one to follow.
+`src/input/`, on Unreal's Enhanced Input split. Game code reads actions,
+never devices; everything an action is bound to is data.
 
-- **Actions** are named, typed outputs (bool, 1D, 2D, 3D): `pitch`,
-  `throttle`, `fire_primary`, `gear_toggle`. Game code reads actions, never
-  devices.
-- **Bindings** map a device control to an action through modifiers (dead
-  zone, response curve, invert, saturation, split axis, axis as button,
-  button as axis) and triggers (pressed, released, tap, hold, double tap,
-  chord, sequence).
-- **Contexts** group bindings by situation (on foot, flying, editor,
-  engine) and stack by priority. The F-keys in `Window::poll` become the
-  engine context.
+- **Controls** (`input/control`) are one thing on one device, named as
+  text in files: `key:W` and `key:Left Shift` (SDL's scancode names, so
+  physical positions), `mouse:x`, `mouse:wheel`, `mouse:left`,
+  `joy:044f:0422:button:36`, `joy:044f:0447:axis:2`,
+  `joy:044f:0422:hat:0:up`. A hat is four buttons. `#n` after the product
+  (`joy:044f:0422#1:...`) picks the n-th of identical devices in the order
+  they were opened; when one of two is unplugged the other's index can
+  shift.
+- **Control events** carry a value (0 or 1, an axis's -1 to 1, a mouse
+  delta) and SDL's stamp. `input/sdl_input` makes them from SDL events; the
+  system itself never sees SDL, so tests and replayed logs push events the
+  same way.
+- **Actions** are named and typed: bool, 1d, 2d, 3d. A layer declares them;
+  the engine looks the ones it reads up by name and type once
+  (`InputSystem::require`, in `App::load_input`) and refuses to start if
+  one is missing. A mod can declare actions the engine never reads.
+- **Bindings** map a control to an action through a chain of modifiers,
+  then a trigger. A control's value enters in x. Modifiers
+  (`input/modifiers`): `dead_zone` (axial, or radial on an action),
+  `curve` (an exponent for now; ImPlot points later), `negate`, `scale`,
+  `swizzle` (which component x goes to: WASD into a 2D action), `saturation`,
+  `split` (one half of an axis as 0 to 1), `threshold` (an axis as a button,
+  with hysteresis). Each is a struct in a tagged variant, so adding one is a
+  struct, a case and a name.
+- **Triggers** (`input/triggers`): a binding is actuated at magnitude 0.5.
+  `down` passes its value every frame and fires on each press, `pressed`
+  and `released` fire on the edge and pass their value only that frame.
+  Tap, hold, chords and sequences join the same variant.
+- **Every event goes through its bindings in order**, so an encoder's
+  press and release inside one frame fires once, three clicks fire three
+  times, and each fire keeps its event's stamp (`ActionState::fired_ns`).
+  Mouse deltas are summed over the frame first.
+- **Combining**: an axis action sums its bindings, then applies its own
+  modifiers; it is active while nonzero, so A and D together leave it idle.
+  A bool action is active while a binding is actuated or it fired this
+  frame.
+- **Contexts** run by priority, highest first. A binding with `consume`
+  (the default) hides its control from lower contexts while its own is
+  enabled; bindings within one context all see it. Enabling a context
+  starts its bindings from their controls' current values without an edge,
+  so a held key does not press. The engine's: `engine` (Escape, F3, Alt),
+  always on; `debug` (the other F-keys, T, 1 to 6), off under a scenario;
+  `on_foot` and `jetpack`, while the mouse is held. Contexts change for the
+  next frame's update.
+- **Focus**: losing it releases every button, key and hat (SDL drops
+  joystick events in the background, so their releases never come); axes
+  keep their values. Unplugging a joystick zeroes its controls. Typing into
+  an ImGui field drops key presses but not releases, so F-keys and Escape do
+  nothing while a text field has focus.
+- **Layers** (`input/layer`): `assets/input/default.json`, then
+  `input.json` beside the executable if present. A layer's action replaces
+  the one below by name; within a context, an action's binding list
+  replaces the one below whole, and an empty list unbinds; a context's
+  priority carries through unless restated. Mods will be more layers on the
+  stack. `compile` (`input/input_map`) checks the merged result and refuses
+  it whole on any mistake: an undeclared action, a control that does not
+  parse, a modifier out of range. Comments are allowed, unknown keys are
+  not.
+- **Scenarios**: the `action` op holds an action at a value for some
+  frames; a bool action fires on the first. `walk` injects `walk_move`,
+  `sprint` and `jump`. Injection overrides the devices for that frame.
+  Under a scenario the jetpack is not flown from actions, since flying
+  integrates wall-clock time; the `fly` op moves the camera instead.
+
+## Plan: the rest of the action layer and its editor
+
+Agreed in design, not built.
+
 - **Device identity** is vendor:product; the path only tells identical
   devices apart. No serial on the SOL-R 4.
 - **Control groups** the editor declares over raw indices, since the
@@ -159,12 +219,9 @@ art and its split is the one to follow.
 - **Commands per physics step**: actions are sampled into a command per
   step, not read per frame. Jolt is deterministic given the same calls, so
   recorded commands replay, and later carry multiplayer.
-- **Scenarios** get an op that injects action values, so flight is tested
-  without a HOTAS, as the keyboard is ignored now.
-- **Files**: bindings in JSON through glaze, comments allowed as in
-  scenarios; defaults in the repo, the user's edits in a file layered on
-  top.
-- **The editor** is ImGui: the device monitor as its first panel, an action
+- **The editor** writes the user's layer, holding only what differs from
+  the defaults, and compiles again. `InputSystem::frame_events` is there
+  for press-to-bind. It is ImGui: the device monitor as its first panel, an action
   list, press-to-bind capture (an axis must move by a margin, since a
   resting throttle is noisy), curve editing in ImPlot with the live input
   as a point on the curve, and the control groups above.
@@ -174,6 +231,6 @@ art and its split is the one to follow.
   action layer.
 
 Order: actions and bindings with modifiers and plain pressed and released
-first, then the torchship's flight controls on them, then tap, hold,
+(built), then the torchship's flight controls on them, then tap, hold,
 chords and arbitration once there is flying to test them against. Finish
 the control map from a narrated log session before binding defaults.

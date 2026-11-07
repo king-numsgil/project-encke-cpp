@@ -1,0 +1,117 @@
+// The engine's default bindings: the bottom layer. A user's edits go in
+// input.json beside the executable, laid over this one; see docs/input.md.
+{
+    "actions": {
+        "quit":                { "description": "Quit" },
+        "toggle_ui":           { "description": "Show or hide the overlay" },
+        "freeze_terrain":      { "description": "Freeze or thaw the terrain octree" },
+        "copy_camera":         { "description": "Copy the camera's pose as scenario steps" },
+        "cycle_wireframe":     { "description": "Wireframe: off, over the image, alone" },
+        "toggle_collision":    { "description": "Show or hide collision shapes" },
+        "toggle_octree":       { "description": "Show or hide the octree's chunks" },
+        "toggle_input_window": { "description": "Show or hide the input devices window" },
+        "cycle_tonemap":       { "description": "Next tonemap curve" },
+        "free_mouse":          { "description": "Let go of the mouse for the UI, while held" },
+        "debug_1":             { "description": "Shade clustered" },
+        "debug_2":             { "description": "Shade brute force" },
+        "debug_3":             { "description": "Show or hide lights per cluster" },
+        "debug_4":             { "description": "Show or hide normals" },
+        "debug_5":             { "description": "Show or hide motion vectors" },
+        "debug_6":             { "description": "Show or hide shadow cascades" },
+
+        "toggle_jetpack": { "description": "Walk, or take the jetpack" },
+        "look":           { "type": "2d", "description": "Turn: pixels, +x right, +y down" },
+
+        "walk_move": { "type": "2d", "description": "Walk: x right, y forward" },
+        "sprint":    { "description": "Sprint" },
+        "jump":      { "description": "Jump" },
+
+        "fly_move":  { "type": "3d", "description": "Fly: x right, y up, z forward" },
+        "fly_roll":  { "type": "1d", "description": "Roll: + left" },
+        "fly_speed": { "type": "1d", "description": "Scale the flying speed, in wheel notches" },
+        "fly_fast":  { "description": "Fly fast, while held" },
+        "fly_slow":  { "description": "Fly slow, while held" }
+    },
+
+    "contexts": {
+        // Always on, over everything, a scenario included.
+        "engine": {
+            "priority": 100,
+            "bindings": {
+                "quit":                [{ "control": "key:Escape", "trigger": { "type": "pressed" } }],
+                "copy_camera":         [{ "control": "key:F3", "trigger": { "type": "pressed" } }],
+                "free_mouse":          [{ "control": "key:Left Alt" }, { "control": "key:Right Alt" }]
+            }
+        },
+
+        // The engine's switches: on, except under a scenario, where the
+        // keyboard must change nothing.
+        "debug": {
+            "priority": 90,
+            "bindings": {
+                "toggle_ui":           [{ "control": "key:F1", "trigger": { "type": "pressed" } }],
+                "freeze_terrain":      [{ "control": "key:F2", "trigger": { "type": "pressed" } }],
+                "cycle_wireframe":     [{ "control": "key:F4", "trigger": { "type": "pressed" } }],
+                "toggle_collision":    [{ "control": "key:F5", "trigger": { "type": "pressed" } }],
+                "toggle_octree":       [{ "control": "key:F6", "trigger": { "type": "pressed" } }],
+                "toggle_input_window": [{ "control": "key:F7", "trigger": { "type": "pressed" } }],
+                "cycle_tonemap":       [{ "control": "key:T", "trigger": { "type": "pressed" } }],
+                "debug_1": [{ "control": "key:1", "trigger": { "type": "pressed" } }],
+                "debug_2": [{ "control": "key:2", "trigger": { "type": "pressed" } }],
+                "debug_3": [{ "control": "key:3", "trigger": { "type": "pressed" } }],
+                "debug_4": [{ "control": "key:4", "trigger": { "type": "pressed" } }],
+                "debug_5": [{ "control": "key:5", "trigger": { "type": "pressed" } }],
+                "debug_6": [{ "control": "key:6", "trigger": { "type": "pressed" } }]
+            }
+        },
+
+        // On foot, while the mouse is held.
+        "on_foot": {
+            "priority": 10,
+            "bindings": {
+                "toggle_jetpack": [{ "control": "key:X", "trigger": { "type": "pressed" } }],
+                "look": [
+                    { "control": "mouse:x" },
+                    { "control": "mouse:y", "modifiers": [{ "type": "swizzle", "order": "yxz" }] }
+                ],
+                "walk_move": [
+                    { "control": "key:D" },
+                    { "control": "key:A", "modifiers": [{ "type": "negate" }] },
+                    { "control": "key:W", "modifiers": [{ "type": "swizzle", "order": "yxz" }] },
+                    { "control": "key:S", "modifiers": [{ "type": "negate" }, { "type": "swizzle", "order": "yxz" }] }
+                ],
+                "sprint": [{ "control": "key:Left Shift" }, { "control": "key:Right Shift" }],
+                "jump":   [{ "control": "key:Space" }]
+            }
+        },
+
+        // Flying the jetpack, while the mouse is held.
+        "jetpack": {
+            "priority": 10,
+            "bindings": {
+                "toggle_jetpack": [{ "control": "key:X", "trigger": { "type": "pressed" } }],
+                "look": [
+                    { "control": "mouse:x" },
+                    { "control": "mouse:y", "modifiers": [{ "type": "swizzle", "order": "yxz" }] }
+                ],
+                "fly_move": [
+                    { "control": "key:D" },
+                    { "control": "key:A", "modifiers": [{ "type": "negate" }] },
+                    { "control": "key:Space", "modifiers": [{ "type": "swizzle", "order": "yxz" }] },
+                    { "control": "key:Left Ctrl", "modifiers": [{ "type": "negate" }, { "type": "swizzle", "order": "yxz" }] },
+                    { "control": "key:Right Ctrl", "modifiers": [{ "type": "negate" }, { "type": "swizzle", "order": "yxz" }] },
+                    { "control": "key:W", "modifiers": [{ "type": "swizzle", "order": "zyx" }] },
+                    { "control": "key:S", "modifiers": [{ "type": "negate" }, { "type": "swizzle", "order": "zyx" }] }
+                ],
+                "fly_roll": [
+                    { "control": "key:Q" },
+                    { "control": "key:E", "modifiers": [{ "type": "negate" }] }
+                ],
+                "fly_speed": [{ "control": "mouse:wheel" }],
+                "fly_fast":  [{ "control": "key:Left Shift" }, { "control": "key:Right Shift" }],
+                // Alt frees the mouse, so slow is C.
+                "fly_slow":  [{ "control": "key:C" }]
+            }
+        }
+    }
+}

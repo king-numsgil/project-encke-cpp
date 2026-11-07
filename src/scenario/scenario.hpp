@@ -96,7 +96,8 @@ namespace encke::scenario
 
     // Walks the character for `frames` physics steps, one a frame, as the
     // keys would: `move` is right and forward, each -1 to 1, relative to
-    // where it faces; `jump` and `sprint` held throughout. A frame waiting
+    // where it faces; `jump` and `sprint` held throughout. It drives the
+    // walk_move, jump and sprint actions, as `action` steps would. A frame waiting
     // for new ground takes no step and does not count, so the walk goes as
     // far on every run. Fails unless the movement is walk. Put a `settle`
     // after it to wait for the character to stand still.
@@ -106,6 +107,18 @@ namespace encke::scenario
         u32           frames = 60;
         bool          jump   = false;
         bool          sprint = false;
+    };
+
+    // Holds an action at `value` for `frames` frames, in place of the
+    // devices, which a scenario ignores: one number for a bool or 1D action,
+    // up to three for the rest. A bool action fires on the first frame, so
+    // `{ "op": "action", "action": "toggle_jetpack" }` presses X once. The
+    // action is looked up when the step runs; an unknown one fails it.
+    struct Action
+    {
+        string      action;
+        vector<f32> value{1.0f};
+        u32         frames = 1;
     };
 
     enum class Shape
@@ -142,7 +155,7 @@ namespace encke::scenario
     struct Interactive {};
 
     using Step = std::variant<Settle, Capture, Camera, Fly, Wait, FreezeTerrain, ThawTerrain,
-                              Interactive, Settings, Spawn, Walk>;
+                              Interactive, Settings, Spawn, Walk, Action>;
 
     struct Scenario
     {

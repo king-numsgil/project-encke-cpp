@@ -106,6 +106,29 @@ namespace encke::scenario
         CHECK_FALSE(parse(R"({ "settings": { "movement": "fly" } })", "test"));
     }
 
+    TEST_CASE("an action step reads its action, value and frames", "[scenario]")
+    {
+        optional<Scenario> const scenario = parse(R"({ "steps": [
+            { "op": "action", "action": "toggle_jetpack" },
+            { "op": "action", "action": "fly_move", "value": [0, 0, 1], "frames": 30 }
+        ] })", "test");
+        REQUIRE(scenario.has_value());
+
+        Action const& press = std::get<Action>(scenario->steps[0]);
+        CHECK(press.action == "toggle_jetpack");
+        CHECK(press.value == vector<f32>{1.0f});
+        CHECK(press.frames == 1);
+
+        Action const& fly = std::get<Action>(scenario->steps[1]);
+        CHECK(fly.value == vector<f32>{0.0f, 0.0f, 1.0f});
+        CHECK(fly.frames == 30);
+        CHECK(op_name(scenario->steps[1]) == "action");
+
+        CHECK_FALSE(parse(R"({ "steps": [{ "op": "action" }] })", "test"));
+        CHECK_FALSE(parse(R"({ "steps": [{ "op": "action", "action": "a", "value": [] }] })", "test"));
+        CHECK_FALSE(parse(R"({ "steps": [{ "op": "action", "action": "a", "value": [1, 2, 3, 4] }] })", "test"));
+    }
+
     TEST_CASE("a scenario with a mistake in it is refused", "[scenario]")
     {
         // An unknown op, a misspelt field, a bad enum name, a path out of the

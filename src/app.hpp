@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "assets/asset_manager.hpp"
+#include "input/input_system.hpp"
 #include "platform/joysticks.hpp"
 #include "platform/window.hpp"
 #include "physics/physics_world.hpp"
@@ -93,14 +94,27 @@ namespace encke
         // movement. Never under a scenario.
         void capture_mouse();
 
-        void fly(FrameEvents const& events, f64 seconds);
+        void fly(f64 seconds);
 
         // On foot, a character standing where the camera is, or the jetpack,
         // flying from where the character's eyes were.
         void set_movement(Movement movement);
 
-        // While looking, the keys and the mouse fill walk_input_.
-        void read_walk_input(FrameEvents const& events);
+        // The walking actions into walk_input_: the keys and the mouse while
+        // looking, or a scenario's walk and action steps.
+        void read_walk_input();
+
+        // The defaults, then the user's input.json beside the executable if
+        // there is one, compiled, and every action and context the engine
+        // reads looked up. False if any is missing.
+        bool load_input();
+
+        // What happens when one of the engine's actions fires.
+        void handle_engine_actions();
+
+        // For the next update: the engine always; its switches except under
+        // a scenario; on foot or the jetpack while looking.
+        void enable_contexts(bool scripted);
 
         // Writes the frame the renderer just captured to `path` as a PNG.
         bool save_capture(std::filesystem::path const& path);
@@ -141,10 +155,30 @@ namespace encke
         bool        show_ui_ = true;
 
         // After the window, so its devices close before SDL quits. F7 shows
-        // them; nothing reads them as input yet.
+        // them; nothing binds them yet.
         Joysticks             joysticks_;
         bool                  show_input_window_ = false;
         std::filesystem::path input_log_directory_;
+
+        // Every key, mouse and joystick event, as actions. The ids are looked
+        // up once, by load_input().
+        input::InputSystem input_;
+        struct Actions
+        {
+            input::ActionId quit, toggle_ui, freeze_terrain, copy_camera, cycle_wireframe, toggle_collision,
+                toggle_octree, toggle_input_window, cycle_tonemap, free_mouse;
+            array<input::ActionId, 6> debug;   // keys 1 to 6
+
+            input::ActionId toggle_jetpack, look;
+            input::ActionId walk_move, sprint, jump;
+            input::ActionId fly_move, fly_roll, fly_speed, fly_fast, fly_slow;
+        };
+        Actions actions_{};
+        struct Contexts
+        {
+            input::ContextId engine, debug, on_foot, jetpack;
+        };
+        Contexts contexts_{};
 
         array<bool, kDebugWindowCount> debug_windows_{};
         f32                            motion_gain_ = 5000.0f;

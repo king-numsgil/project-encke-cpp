@@ -166,6 +166,13 @@ add_library(encke_core OBJECT
     src/core/memory.cpp
     src/core/sanitizers.cpp
 
+    src/input/control.cpp
+    src/input/input_map.cpp
+    src/input/input_system.cpp
+    src/input/layer.cpp
+    src/input/modifiers.cpp
+    src/input/sdl_input.cpp
+
     src/physics/physics_world.cpp
 
     src/platform/cpu.cpp
@@ -473,6 +480,10 @@ include(Catch)
 
 add_executable(encke_tests
     tests/core/json_test.cpp
+    tests/input/control_test.cpp
+    tests/input/input_system_test.cpp
+    tests/input/layer_test.cpp
+    tests/input/modifiers_test.cpp
     tests/physics/jolt_test.cpp
     tests/physics/physics_world_test.cpp
     tests/platform/input_log_test.cpp

@@ -60,7 +60,7 @@ struct glz::meta<encke::scenario::Step>
     static constexpr std::string_view tag = "op";
     static constexpr auto ids = std::array{"settle", "capture", "camera", "fly", "wait",
                                            "freeze_terrain", "thaw_terrain", "interactive", "set",
-                                           "spawn", "walk"};
+                                           "spawn", "walk", "action"};
 };
 
 namespace encke::scenario
@@ -87,6 +87,15 @@ namespace encke::scenario
                                    "output folder, got \"%s\"",
                                    static_cast<int>(source.size()), source.data(), index,
                                    capture->file.c_str());
+                        ok = false;
+                    }
+                }
+                else if (Action const* const action = std::get_if<Action>(&step))
+                {
+                    if (action->action.empty() || action->value.empty() || action->value.size() > 3)
+                    {
+                        log::error("%.*s: step %zu: action wants an action's name and one to three values",
+                                   static_cast<int>(source.size()), source.data(), index);
                         ok = false;
                     }
                 }

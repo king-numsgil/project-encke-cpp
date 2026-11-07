@@ -1,0 +1,14 @@
+// Actions injected in place of the devices: the scenario starts on the
+// jetpack, presses toggle_jetpack as X would, and walks, which fails the
+// run unless the press put the character on its feet.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "settle" },
+        { "op": "action", "action": "toggle_jetpack" },
+        { "op": "settle" },
+        { "op": "walk", "move": [0, 1], "frames": 90 },
+        { "op": "settle" },
+        { "op": "capture", "file": "walked.png" }
+    ]
+}

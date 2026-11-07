@@ -4,6 +4,7 @@
 
 #include "core/log.hpp"
 #include "core/memory.hpp"
+#include "input/sdl_input.hpp"
 #include "platform/cpu.hpp"
 #include "render/config.hpp"
 #include "render/pixels.hpp"
@@ -28,6 +29,7 @@ namespace encke
         // toggle one visualisation window each.
         constexpr u32 kShadingModeCount = 2;
         constexpr u32 kDebugKeyCount    = kShadingModeCount + kDebugWindowCount;
+        static_assert(kDebugKeyCount == 6, "one debug_<n> action per key, in App::Actions and the bindings");
 
         // The motion gain slider's range. Motion is per-frame displacement:
         // the top end suits an uncapped couple of thousand frames a second,
@@ -166,6 +168,12 @@ namespace encke
         }
         bool const srgb_ui = scenario_.has_value() && scenario_->settings.srgb_ui.value_or(false);
 
+        // Before the window too: a binding file with a mistake stops the run.
+        if (!load_input())
+        {
+            return false;
+        }
+
         CpuInfo const cpu = query_cpu();
         log::info("cpu: %u physical cores, %u logical processors", cpu.physical_cores,
                   cpu.logical_processors);
@@ -206,8 +214,12 @@ namespace encke
         {
             return false;
         }
+        // The input system first, so a joystick that has gone is let go of
+        // by its identity before the device list forgets it. Typing into the
+        // UI presses nothing.
         window_.set_event_hook([this](SDL_Event const& event) {
             ui_.process_event(event);
+            input::translate(event, joysticks_, !ui_.wants_text(), input_);
             joysticks_.handle(event);
         });
 
@@ -269,6 +281,7 @@ namespace encke
         {
             set_movement(Movement::Walk);
         }
+        enable_contexts(scenario_.has_value());
 
         return true;
     }
@@ -336,37 +349,25 @@ namespace encke
     {
         // Held in either movement, as in any first-person game; Alt lets go
         // of it for the UI, and so does losing focus.
-        bool const alt = window_.key_down(SDL_SCANCODE_LALT) || window_.key_down(SDL_SCANCODE_RALT);
-        set_looking(focused_ && !alt);
+        set_looking(focused_ && !input_.active(actions_.free_mouse));
     }
 
-    void App::fly(FrameEvents const& events, f64 seconds)
+    void App::fly(f64 seconds)
     {
+        // Not flown at all, rather than flown by nothing: an update with no
+        // input still renormalises the rotation.
         if (!looking_)
         {
             return;
         }
 
-        auto axis = [this](SDL_Scancode positive, SDL_Scancode negative) {
-            return (window_.key_down(positive) ? 1.0 : 0.0) - (window_.key_down(negative) ? 1.0 : 0.0);
-        };
-
-        auto const either = [this](SDL_Scancode left, SDL_Scancode right) {
-            return window_.key_down(left) || window_.key_down(right);
-        };
-
-        f64 const strafe_up = (window_.key_down(SDL_SCANCODE_SPACE) ? 1.0 : 0.0) -
-                              (either(SDL_SCANCODE_LCTRL, SDL_SCANCODE_RCTRL) ? 1.0 : 0.0);
-
         FlyInput const input{
-            .look  = events.mouse_delta,
-            .move  = f64vec3{axis(SDL_SCANCODE_D, SDL_SCANCODE_A), strafe_up,
-                             axis(SDL_SCANCODE_W, SDL_SCANCODE_S)},
-            .roll  = axis(SDL_SCANCODE_Q, SDL_SCANCODE_E),
-            .wheel = events.wheel,
-            .fast  = either(SDL_SCANCODE_LSHIFT, SDL_SCANCODE_RSHIFT),
-            // Alt frees the mouse, so slow is C.
-            .slow  = window_.key_down(SDL_SCANCODE_C),
+            .look  = input_.axis2(actions_.look),
+            .move  = f64vec3{input_.axis3(actions_.fly_move)},
+            .roll  = static_cast<f64>(input_.axis1(actions_.fly_roll)),
+            .wheel = input_.axis1(actions_.fly_speed),
+            .fast  = input_.active(actions_.fly_fast),
+            .slow  = input_.active(actions_.fly_slow),
         };
 
         if (Transform* const camera = scene_.registry.try_get<Transform>(scene_.camera))
@@ -396,23 +397,185 @@ namespace encke
         log::info("movement: walking (X takes the jetpack); WASD, Shift sprints, Space jumps");
     }
 
-    void App::read_walk_input(FrameEvents const& events)
+    void App::read_walk_input()
     {
-        if (!looking_)
+        walk_input_ = WalkInput{
+            .look   = input_.axis2(actions_.look),
+            .move   = f64vec2{input_.axis2(actions_.walk_move)},
+            .sprint = input_.active(actions_.sprint),
+            .jump   = input_.active(actions_.jump),
+        };
+    }
+
+    bool App::load_input()
+    {
+        std::filesystem::path const defaults = std::filesystem::path{ENCKE_ASSET_DIR} / "input" / "default.json";
+        optional<input::Layer> layer = input::load_layer(defaults);
+        if (!layer.has_value())
         {
-            return;
+            return false;
+        }
+        string source = defaults.string();
+
+        // The user's edits, laid over the defaults.
+        if (char const* const base = SDL_GetBasePath())
+        {
+            std::filesystem::path const user = std::filesystem::path{base} / "input.json";
+            std::error_code             error;
+            if (std::filesystem::exists(user, error))
+            {
+                optional<input::Layer> const edits = input::load_layer(user);
+                if (!edits.has_value())
+                {
+                    return false;
+                }
+                input::merge(*layer, *edits);
+                source += " + " + user.string();
+                log::info("input: %s over the defaults", user.string().c_str());
+            }
         }
 
-        auto axis = [this](SDL_Scancode positive, SDL_Scancode negative) {
-            return (window_.key_down(positive) ? 1.0 : 0.0) - (window_.key_down(negative) ? 1.0 : 0.0);
+        optional<input::InputMap> map = input::compile(*layer, source);
+        if (!map.has_value())
+        {
+            return false;
+        }
+        input_.set_map(std::move(*map));
+
+        using input::ActionType;
+        bool ok          = true;
+        auto const need  = [&](input::ActionId& id, string_view name, ActionType type) {
+            optional<input::ActionId> const found = input_.require(name, type);
+            ok                                    = ok && found.has_value();
+            id                                    = found.value_or(input::ActionId{});
+        };
+        auto const want_context = [&](input::ContextId& id, string_view name) {
+            optional<input::ContextId> const found = input_.require_context(name);
+            ok                                     = ok && found.has_value();
+            id                                     = found.value_or(input::ContextId{});
         };
 
-        walk_input_ = WalkInput{
-            .look   = events.mouse_delta,
-            .move   = f64vec2{axis(SDL_SCANCODE_D, SDL_SCANCODE_A), axis(SDL_SCANCODE_W, SDL_SCANCODE_S)},
-            .sprint = window_.key_down(SDL_SCANCODE_LSHIFT) || window_.key_down(SDL_SCANCODE_RSHIFT),
-            .jump   = window_.key_down(SDL_SCANCODE_SPACE),
-        };
+        need(actions_.quit, "quit", ActionType::Bool);
+        need(actions_.toggle_ui, "toggle_ui", ActionType::Bool);
+        need(actions_.freeze_terrain, "freeze_terrain", ActionType::Bool);
+        need(actions_.copy_camera, "copy_camera", ActionType::Bool);
+        need(actions_.cycle_wireframe, "cycle_wireframe", ActionType::Bool);
+        need(actions_.toggle_collision, "toggle_collision", ActionType::Bool);
+        need(actions_.toggle_octree, "toggle_octree", ActionType::Bool);
+        need(actions_.toggle_input_window, "toggle_input_window", ActionType::Bool);
+        need(actions_.cycle_tonemap, "cycle_tonemap", ActionType::Bool);
+        need(actions_.free_mouse, "free_mouse", ActionType::Bool);
+        for (size_t key = 0; key < actions_.debug.size(); ++key)
+        {
+            need(actions_.debug[key], "debug_" + std::to_string(key + 1), ActionType::Bool);
+        }
+        need(actions_.toggle_jetpack, "toggle_jetpack", ActionType::Bool);
+        need(actions_.look, "look", ActionType::Axis2D);
+        need(actions_.walk_move, "walk_move", ActionType::Axis2D);
+        need(actions_.sprint, "sprint", ActionType::Bool);
+        need(actions_.jump, "jump", ActionType::Bool);
+        need(actions_.fly_move, "fly_move", ActionType::Axis3D);
+        need(actions_.fly_roll, "fly_roll", ActionType::Axis1D);
+        need(actions_.fly_speed, "fly_speed", ActionType::Axis1D);
+        need(actions_.fly_fast, "fly_fast", ActionType::Bool);
+        need(actions_.fly_slow, "fly_slow", ActionType::Bool);
+
+        want_context(contexts_.engine, "engine");
+        want_context(contexts_.debug, "debug");
+        want_context(contexts_.on_foot, "on_foot");
+        want_context(contexts_.jetpack, "jetpack");
+
+        if (ok)
+        {
+            log::info("input: %zu actions in %zu contexts", input_.map().actions.size(),
+                      input_.map().contexts.size());
+        }
+        return ok;
+    }
+
+    void App::enable_contexts(bool scripted)
+    {
+        input_.set_enabled(contexts_.engine, true);
+        input_.set_enabled(contexts_.debug, !scripted);
+        input_.set_enabled(contexts_.on_foot, looking_ && movement_ == Movement::Walk);
+        input_.set_enabled(contexts_.jetpack, looking_ && movement_ == Movement::Jetpack);
+    }
+
+    void App::handle_engine_actions()
+    {
+        if (input_.fired(actions_.toggle_ui))
+        {
+            show_ui_ = !show_ui_;
+        }
+
+        // Asking for the window is asking to see it, as with the debug
+        // windows.
+        if (input_.fired(actions_.toggle_input_window))
+        {
+            show_input_window_ = !show_input_window_;
+            if (show_input_window_)
+            {
+                show_ui_ = true;
+            }
+        }
+
+        if (input_.fired(actions_.freeze_terrain))
+        {
+            terrain_.set_frozen(!terrain_.frozen());
+            frozen_pose_ = terrain_.frozen() ? optional<scenario::Camera>{camera_step()} : nullopt;
+            log::info("terrain: %s", terrain_.frozen() ? "frozen" : "thawed");
+        }
+
+        // The pose as scenario steps, on the clipboard and in the log.
+        // Frozen, they settle where the terrain froze, freeze it and move
+        // to the camera, so the octree shows what was on screen.
+        if (input_.fired(actions_.copy_camera))
+        {
+            string const current = scenario::to_json(camera_step());
+            string const text =
+                frozen_pose_.has_value()
+                    ? scenario::to_json(*frozen_pose_) + ",\n" + scenario::to_json(scenario::Settle{}) + ",\n" +
+                          scenario::to_json(scenario::FreezeTerrain{}) + ",\n" + current + ","
+                    : current + ",";
+            SDL_SetClipboardText(text.c_str());
+            log::info("camera:\n%s", text.c_str());
+        }
+
+        if (input_.fired(actions_.toggle_jetpack))
+        {
+            set_movement(movement_ == Movement::Walk ? Movement::Jetpack : Movement::Walk);
+        }
+
+        if (input_.fired(actions_.cycle_wireframe))
+        {
+            auto const next =
+                static_cast<Wireframe>((static_cast<u32>(renderer_.wireframe()) + 1u) % kWireframeCount);
+            renderer_.set_wireframe(next);
+            log::info("wireframe: %s", wireframe_name(next));
+        }
+        if (input_.fired(actions_.toggle_collision))
+        {
+            show_collision_ = !show_collision_;
+        }
+        if (input_.fired(actions_.toggle_octree))
+        {
+            show_octree_ = !show_octree_;
+        }
+
+        if (input_.fired(actions_.cycle_tonemap))
+        {
+            auto const next = static_cast<Tonemap>((static_cast<u32>(renderer_.tonemap()) + 1u) % kTonemapCount);
+            renderer_.set_tonemap(next);
+            log::info("tonemap: %s", tonemap_name(next));
+        }
+
+        for (u32 key = 0; key < kDebugKeyCount; ++key)
+        {
+            if (input_.fired(actions_.debug[key]))
+            {
+                on_debug_key(key);
+            }
+        }
     }
 
     void App::draw_ui()
@@ -771,9 +934,30 @@ namespace encke
                     {
                         return StepResult::Done;
                     }
-                    walk_input_ = WalkInput{.move   = f64vec2{s.move[0], s.move[1]},
-                                            .sprint = s.sprint,
-                                            .jump   = s.jump};
+                    input_.inject(actions_.walk_move,
+                                  f32vec3{static_cast<f32>(s.move[0]), static_cast<f32>(s.move[1]), 0.0f});
+                    input_.inject(actions_.sprint, f32vec3{s.sprint ? 1.0f : 0.0f, 0.0f, 0.0f});
+                    input_.inject(actions_.jump, f32vec3{s.jump ? 1.0f : 0.0f, 0.0f, 0.0f});
+                    return StepResult::Running;
+                }
+                else if constexpr (std::is_same_v<S, scenario::Action>)
+                {
+                    optional<input::ActionId> const action = input_.map().find_action(s.action);
+                    if (!action.has_value())
+                    {
+                        log::error("scenario: no action \"%s\"", s.action.c_str());
+                        return StepResult::Failed;
+                    }
+                    if (step_frames_ >= s.frames)
+                    {
+                        return StepResult::Done;
+                    }
+                    f32vec3 value{0.0f};
+                    for (size_t axis = 0; axis < s.value.size(); ++axis)
+                    {
+                        value[axis] = s.value[axis];
+                    }
+                    input_.inject(*action, value);
                     return StepResult::Running;
                 }
                 else
@@ -982,86 +1166,22 @@ namespace encke
                 continue;
             }
 
-            // While a scenario runs, the keyboard and mouse change nothing:
-            // the machine is shared, and a stray key would change a capture.
+            // While a scenario runs, the keyboard and mouse change nothing
+            // but quitting and copying the camera: the machine is shared,
+            // and a stray key would change a capture. Only the engine
+            // context is enabled under one.
             bool const scripted = scenario_.has_value();
 
-            if (events.toggle_ui && !scripted)
+            // This frame's events as actions, in the contexts last frame left
+            // enabled.
+            input_.update();
+            if (input_.fired(actions_.quit))
             {
-                show_ui_ = !show_ui_;
-            }
-
-            // Asking for the window is asking to see it, as with the debug
-            // windows.
-            if (events.toggle_input_window && !scripted)
-            {
-                show_input_window_ = !show_input_window_;
-                if (show_input_window_)
-                {
-                    show_ui_ = true;
-                }
-            }
-
-            if (events.toggle_terrain_freeze && !scripted)
-            {
-                terrain_.set_frozen(!terrain_.frozen());
-                frozen_pose_ = terrain_.frozen() ? optional<scenario::Camera>{camera_step()} : nullopt;
-                log::info("terrain: %s", terrain_.frozen() ? "frozen" : "thawed");
-            }
-
-            // The pose as scenario steps, on the clipboard and in the log.
-            // Frozen, they settle where the terrain froze, freeze it and move
-            // to the camera, so the octree shows what was on screen.
-            if (events.copy_camera)
-            {
-                string const current = scenario::to_json(camera_step());
-                string const text =
-                    frozen_pose_.has_value()
-                        ? scenario::to_json(*frozen_pose_) + ",\n" +
-                              scenario::to_json(scenario::Settle{}) + ",\n" +
-                              scenario::to_json(scenario::FreezeTerrain{}) + ",\n" + current + ","
-                        : current + ",";
-                SDL_SetClipboardText(text.c_str());
-                log::info("camera:\n%s", text.c_str());
+                running = false;
+                continue;
             }
 
             focused_ = events.focus_gained || (focused_ && !events.focus_lost);
-
-            if (events.toggle_jetpack && !ui_.wants_text() && !scripted)
-            {
-                set_movement(movement_ == Movement::Walk ? Movement::Jetpack : Movement::Walk);
-            }
-
-            if (events.cycle_wireframe && !scripted)
-            {
-                auto const next = static_cast<Wireframe>((static_cast<u32>(renderer_.wireframe()) + 1u) %
-                                                         kWireframeCount);
-                renderer_.set_wireframe(next);
-                log::info("wireframe: %s", wireframe_name(next));
-            }
-            if (events.toggle_collision && !scripted)
-            {
-                show_collision_ = !show_collision_;
-            }
-            if (events.toggle_octree && !scripted)
-            {
-                show_octree_ = !show_octree_;
-            }
-
-            if (events.cycle_tonemap && !ui_.wants_text() && !scripted)
-            {
-                auto const next = static_cast<Tonemap>(
-                    (static_cast<u32>(renderer_.tonemap()) + 1u) % kTonemapCount);
-                renderer_.set_tonemap(next);
-                log::info("tonemap: %s", tonemap_name(next));
-            }
-
-            // A digit typed into a UI text field is not a view switch.
-            if (events.debug_view >= 0 && static_cast<u32>(events.debug_view) < kDebugKeyCount &&
-                !ui_.wants_text() && !scripted)
-            {
-                on_debug_key(static_cast<u32>(events.debug_view));
-            }
 
             if (window_.minimized())
             {
@@ -1110,6 +1230,8 @@ namespace encke
             // Flown first, by the user or the scenario: the camera is an
             // entity, and Scene::update is what composes its world transform
             // for this frame.
+            // A scenario's steps inject actions, so they run before the
+            // actions are acted on.
             bool capturing = false;
             walk_input_    = {};
             if (scripted)
@@ -1121,18 +1243,21 @@ namespace encke
                     continue;
                 }
             }
-            else
+            handle_engine_actions();
+
+            if (!scripted)
             {
                 capture_mouse();
                 if (movement_ == Movement::Jetpack)
                 {
-                    fly(events, delta);
-                }
-                else
-                {
-                    read_walk_input(events);
+                    fly(delta);
                 }
             }
+            if (movement_ == Movement::Walk)
+            {
+                read_walk_input();
+            }
+            enable_contexts(scenario_.has_value());
             assets_.update();
             // Finished terrain chunks become meshes here, and the octree picks
             // the chunks this camera wants and swaps them in and out, all

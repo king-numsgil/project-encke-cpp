@@ -133,61 +133,8 @@ namespace encke
                 events.focus_gained = true;
                 break;
 
-            case SDL_EVENT_MOUSE_MOTION:
-                events.mouse_delta += f32vec2{event.motion.xrel, event.motion.yrel};
-                break;
-
-            case SDL_EVENT_MOUSE_WHEEL:
-                events.wheel += event.wheel.y;
-                break;
-
-            case SDL_EVENT_KEY_DOWN:
-                if (event.key.key == SDLK_ESCAPE)
-                {
-                    events.quit_requested = true;
-                }
-                else if (event.key.key == SDLK_F1 && !event.key.repeat)
-                {
-                    events.toggle_ui = true;
-                }
-                else if (event.key.key == SDLK_F2 && !event.key.repeat)
-                {
-                    events.toggle_terrain_freeze = true;
-                }
-                else if (event.key.key == SDLK_F3 && !event.key.repeat)
-                {
-                    events.copy_camera = true;
-                }
-                else if (event.key.key == SDLK_F4 && !event.key.repeat)
-                {
-                    events.cycle_wireframe = true;
-                }
-                else if (event.key.key == SDLK_F5 && !event.key.repeat)
-                {
-                    events.toggle_collision = true;
-                }
-                else if (event.key.key == SDLK_F6 && !event.key.repeat)
-                {
-                    events.toggle_octree = true;
-                }
-                else if (event.key.key == SDLK_F7 && !event.key.repeat)
-                {
-                    events.toggle_input_window = true;
-                }
-                else if (event.key.key == SDLK_T && !event.key.repeat)
-                {
-                    events.cycle_tonemap = true;
-                }
-                else if (event.key.key == SDLK_X && !event.key.repeat)
-                {
-                    events.toggle_jetpack = true;
-                }
-                else if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9 && !event.key.repeat)
-                {
-                    events.debug_view = static_cast<i32>(event.key.key - SDLK_1);
-                }
-                break;
-
+            // Keys, the mouse and joysticks reach the game as actions,
+            // through the hook (input/sdl_input).
             default:
                 break;
             }

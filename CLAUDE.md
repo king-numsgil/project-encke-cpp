@@ -76,7 +76,7 @@ design changes: a new decision, a gap closed or found.
 | `docs/terrain.md` | noise and its bit-exactness, the FastNoise2 port, the example planet, the octree, geomorph and seams, modifiers, ground materials, surface maps and impostors |
 | `docs/physics.md` | stepping, determinism, terrain collision, static colliders, ship spaces, the walking character, camera control |
 | `docs/scene-and-assets.md` | the registry and the extract, transforms, assets and streaming, textures and UVs, glTF, the test scene |
-| `docs/input.md` | joysticks and the HOTAS, the probe, the device monitor and its JSONL log |
+| `docs/input.md` | joysticks and the HOTAS, the probe, the device monitor and its JSONL log, the action layer: controls, bindings, modifiers, triggers, contexts, layered binding files |
 | `docs/dependencies.md` | mimalloc and why it is built as it is, Jolt's build, glaze, ImGui, volk, and the rest's traps |
 
 ```
@@ -88,6 +88,8 @@ src/
                       joysticks, their JSONL log and the probe (--input-probe)
   vulkan/             context, device, VMA allocator, bindless set, buffers, images, textures,
                       staging arena, swapchain, timestamps
+  input/              the action layer: controls, modifiers, triggers, binding layers, the
+                      compiled map, the input system, SDL events as control events
   ui/                 ImGui layer, the forked ImGui Vulkan backend, stats and image windows
   world/              Transform and WorldTransform; Star, Body, Atmosphere
   assets/             handles, AssetManager, the asset worker, Model
@@ -103,7 +105,8 @@ tests/                Catch2, mirroring src/
 scenarios/            scenario files, tracked; compare.ps1; out/ and reference/ gitignored
 docs/                 subsystem design; see above
 ports/                vcpkg overlay ports: fastnoise2 (three patches), joltphysics
-assets/               textures/ (ambientCG), models/, torchship/; binaries in Git LFS
+assets/               textures/ (ambientCG), models/, torchship/, input/ (default bindings);
+                      binaries in Git LFS
 ```
 
 **Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
@@ -195,7 +198,9 @@ files.
   under a scenario. Steps run within a frame until one waits, before
   anything that frame updates.
 - `fly` runs with the octree live, so its runs differ; `walk` counts physics
-  steps. `spawn` drops a grid of boxes or spheres.
+  steps. `spawn` drops a grid of boxes or spheres. `action` holds an action
+  at a value for some frames, in place of the devices; it counts frames,
+  so walking by it is not reproducible where `walk` is.
 - Positions are in the test scene's frame: metres from the middle of the
   floor, +Y its up.
 - Two runs of a scenario are byte-identical; keep it that way.
