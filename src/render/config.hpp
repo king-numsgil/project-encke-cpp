@@ -133,6 +133,11 @@ namespace encke::config
     inline constexpr f64 kGroundResponse = 12.0;
     inline constexpr f64 kAirResponse    = 1.0;
 
+    // Standing and asked nothing, slower than this along the ground, m/s, it
+    // stops dead. The easing alone only halves its speed every few steps, so
+    // it would creep for ever by ever less.
+    inline constexpr f64 kStopSpeed = 1.0e-3;
+
     // Steepest ground it walks up, and the steps it climbs and snaps down.
     inline constexpr f64 kMaxSlopeDegrees = 50.0;
     inline constexpr f64 kStepUp          = 0.4;

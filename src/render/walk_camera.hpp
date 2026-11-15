@@ -46,11 +46,15 @@ namespace encke
         void place(Transform& camera, f64vec3 const& feet, f64vec3 const& up);
 
     private:
-        // Carries the heading onto `up` by the least turn.
+        // Carries the heading onto `up` by the least turn. Not when `up` is
+        // the one it was last levelled to: each turn and normalize rounds,
+        // and a heading rounded once a frame while standing still turned
+        // with how many frames a scenario's settle took.
         void level(f64vec3 const& up);
 
         // +Y the character's up, -Z its facing along the ground.
         f64quat heading_{1.0, 0.0, 0.0, 0.0};
         f64     pitch_ = 0.0;
+        f64vec3 levelled_up_{0.0};
     };
 }

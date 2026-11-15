@@ -148,13 +148,21 @@ Every tuning number is in `render/config.hpp`.
   centimetre in two seconds. Without it, it holds to a tenth of a millimetre.
 - Its up is gravity's, per step, set as Jolt's up and the capsule's rotation.
   The walk camera carries its heading onto each new up by the least turn, so
-  it stays level walking round a planet.
+  it stays level walking round a planet. It turns only when the up or the
+  mouse changes: levelled and normalized every frame regardless, the
+  heading rounded once a frame, and a capture's view turned with how many
+  frames its settle took.
 - Its ground is built like a body's, and it is held until that is built.
 - Bodies bump into it through a kinematic inner capsule (`mInnerBodyShape`),
   and it pushes them by its `kCharacterMass`. The inner body is left out of
   the gravity loop (Jolt asserts on a kinematic body's inverse mass) and of
   the awake count; `idle()` asks instead that the character stand still on
   the ground, asked nothing.
+- Standing and asked nothing, it stops dead below `kStopSpeed`. The easing
+  alone never reaches zero, and `idle()` once took anything under 1 mm/s
+  as still: the character crept on by micrometres a step, and a capture's
+  eye moved with how many frames the octree and streaming took to settle,
+  so `torchship/deck.png` changed with the machine's load.
 - A `camera` step, walking, teleports the character under the new eye. The
   `walk` step counts physics steps, not frames: a frame waiting on ground
   takes no step, and counting frames made a long walk end elsewhere when the

@@ -38,8 +38,9 @@ namespace encke
             along             = (glm::dot(forward, up) > 0.0 ? -top : top) - up * glm::dot(top, up);
         }
 
-        heading_ = look_rotation(along, up);
-        pitch_   = std::clamp(std::asin(std::clamp(glm::dot(forward, up), -1.0, 1.0)), -kPitchLimit, kPitchLimit);
+        heading_     = look_rotation(along, up);
+        levelled_up_ = up;
+        pitch_  = std::clamp(std::asin(std::clamp(glm::dot(forward, up), -1.0, 1.0)), -kPitchLimit, kPitchLimit);
     }
 
     f64vec3 WalkCamera::steer(WalkInput const& input, f64vec3 const& up)
@@ -51,7 +52,10 @@ namespace encke
         f64 const yaw = -static_cast<f64>(input.look.x) * kLookRadiansPerPixel;
         pitch_        = std::clamp(pitch_ - static_cast<f64>(input.look.y) * kLookRadiansPerPixel, -kPitchLimit,
                                    kPitchLimit);
-        heading_      = glm::normalize(heading_ * glm::angleAxis(yaw, f64vec3{0.0, 1.0, 0.0}));
+        if (yaw != 0.0)
+        {
+            heading_ = glm::normalize(heading_ * glm::angleAxis(yaw, f64vec3{0.0, 1.0, 0.0}));
+        }
 
         f64vec3 direction = heading_ * f64vec3{input.move.x, 0.0, -input.move.y};
         f64 const length  = glm::length(direction);
@@ -74,7 +78,12 @@ namespace encke
 
     void WalkCamera::level(f64vec3 const& up)
     {
+        if (up == levelled_up_)
+        {
+            return;
+        }
         f64vec3 const current = heading_ * f64vec3{0.0, 1.0, 0.0};
         heading_              = glm::normalize(glm::rotation(current, up) * heading_);
+        levelled_up_          = up;
     }
 }

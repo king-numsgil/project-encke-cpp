@@ -881,6 +881,11 @@ namespace encke::physics
             {
                 f32 const ease = std::min(1.0f, dt * static_cast<f32>(config::kGroundResponse));
                 character_across += (wanted - character_across) * ease;
+                if (glm::length(move) == 0.0 &&
+                    character_across.Length() < static_cast<f32>(config::kStopSpeed))
+                {
+                    character_across = JPH::Vec3::sZero();
+                }
                 next = ground + character_across;
                 if (character_input.jump)
                 {
@@ -1738,17 +1743,18 @@ namespace encke::physics
             return true;
         }
 
-        // Standing: on the ground, asked nothing, and no longer sliding
-        // along it. Its velocity across is what eases, so that is what
-        // settles; the fall into the ground each step is not motion.
+        // Standing: on the ground, asked nothing, and stopped dead along it
+        // (kStopSpeed). Below that speed it was still creeping, by
+        // micrometres a step, so a capture's eye depended on how many frames
+        // the terrain and the assets took to settle. The fall into the
+        // ground each step is not motion.
         bool standing = true;
         if (impl_->character)
         {
-            f32 const across = impl_->character_across.Length();
             standing = !impl_->character_held &&
                        impl_->character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround &&
                        glm::length(impl_->character_input.move) == 0.0 && !impl_->character_input.jump &&
-                       across < 1.0e-3f;
+                       impl_->character_across.IsNearZero(0.0f);
         }
 
         return standing && impl_->held == 0 && impl_->building == 0 && impl_->awake_bodies() == 0;

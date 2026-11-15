@@ -216,12 +216,13 @@ share a process, and an `interactive` one must come last.
   so walking by it is not reproducible where `walk` is.
 - Positions are in the test scene's frame: metres from the middle of the
   floor, +Y its up.
-- Two runs of a scenario are byte-identical; keep it that way. Two known
-  exceptions: `debug_views/cluster_heat.png` shows the frame stats, which
-  are timings, and `torchship/deck.png` varies by a few thousand faint
-  pixels with frame timing: a 5 ms sleep a frame reproduces it, so
-  anything that changes the CPU's time per frame can move it. Cause within
-  the scenario not found.
+- Two runs of a scenario are byte-identical; keep it that way. The one
+  known exception is `debug_views/cluster_heat.png`, which shows the frame
+  stats, which are timings. A capture that changes with the machine's load
+  means something still moving when `settle` passes: settle's frame count
+  depends on the terrain and asset workers, so anything it lets through
+  still in motion lands wherever that count leaves it. A 5 ms sleep a frame
+  is a quick way to test for it.
 - **Do not run a scenario ending in `interactive` unattended**: it never
   quits (`boxes.json` is one).
 - Clustered against brute force (`debug_views.json`) is the check for any
