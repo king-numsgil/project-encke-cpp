@@ -30,7 +30,9 @@ namespace encke::gpu
         f32vec4 env_sky;             // linear rgb radiance above the horizon
         f32vec4 env_ground;          // linear rgb radiance below it
         u32vec4 counts;             // x light count, y cascade count, z max objects
-        f32vec4 shadow;              // x shadow distance, y fade start, z normal offset (texels)
+        f32vec4 shadow;              // x shadow distance, y fade start, z normal offset (texels),
+                                     // w 1 to take a pixel's cascade as the first whose map holds
+                                     // it, 0 by its view depth against each cascade's far
 
         // Auto-exposure; see render/config.hpp for what each one means.
         f32vec4 exposure_range;      // x log2 min luminance, y log2 range, z low, w high percentile
@@ -68,6 +70,14 @@ namespace encke::gpu
         // x the DebugVertex buffer, two per line, or ~0 with none. yzw
         // unused.
         u32vec4 debug;
+
+        // The sensor's view, which every view screen (objects flagged 8)
+        // shows. A direction in the sensor's frame to its clip space,
+        // unjittered, by rotation alone: the view is at infinity.
+        f32mat4 screen_projection;
+        // x the sensor's display image, sampled, or ~0 when it was not
+        // drawn this frame; y a linear clamped sampler. zw unused.
+        u32vec4 screen_images;
     };
 
     // One end of a debug line, in view space like everything else. The
@@ -172,8 +182,9 @@ namespace encke::gpu
         f32vec4 morph;
         // A terrain chunk's: x coarser neighbours, y finer; z flags, 1 to
         // morph, 2 to blend the terrain palette, 4 to shade from its body's
-        // surface map instead, 0 for anything not terrain; w the bindless
-        // TerrainVertex buffer.
+        // surface map instead, none of these for anything not terrain; 8,
+        // not terrain, to show the sensor's view (Frame::screen); w the
+        // bindless TerrainVertex buffer.
         u32vec4 morph_masks;
         // Terrain: xyz Geomorph::period_offset, added to mesh positions for
         // the triplanar rock and the cube-projected UVs; w Geomorph::face.
@@ -185,6 +196,12 @@ namespace encke::gpu
         // above it that the map's heights run across. w the body's radius,
         // which an impostor is the sphere of.
         f32vec4 surface_map;
+        // A view screen's own (ViewScreen), with flag 8: x azimuth at u = 0,
+        // positive to the viewer's left; y elevation at v = 0; z the
+        // elevation span down to v = 1, all radians; w the luminance of
+        // display white, cd/m^2. Per screen, beside whatever else each
+        // screen shows of its own.
+        f32vec4 screen;
     };
 
     inline constexpr u32 kNoTexture = ~0u;
@@ -243,12 +260,12 @@ namespace encke::gpu
         u32 tonemap;
     };
 
-    static_assert(sizeof(Frame) == 432);
+    static_assert(sizeof(Frame) == 512);
     static_assert(sizeof(DebugVertex) == 16);
     static_assert(sizeof(TerrainMaterial) == 48);
     static_assert(sizeof(Atmosphere) == 160);
     static_assert(sizeof(Light) == 64);
     static_assert(sizeof(ShadowView) == 96);
-    static_assert(sizeof(Object) == 384);
+    static_assert(sizeof(Object) == 400);
     static_assert(sizeof(Push) == 124,"must fit the 128-byte guaranteed minimum");
 }

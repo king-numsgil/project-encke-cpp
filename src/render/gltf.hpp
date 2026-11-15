@@ -77,6 +77,7 @@ namespace encke
         optional<u32> mesh;     // into GltfModel::meshes
         bool          moving = false;   // has a `joint` in its extras
         NodeShape     shape;            // from a `physics` in its extras
+        optional<DomeScreen> dome;      // from `"screen": "dome"` in its extras
     };
 
     struct GltfModel

@@ -147,6 +147,13 @@ namespace encke
         // late.
         entt::entity camera = entt::null;
 
+        // The sensor camera view screens (ViewScreen) show: an entity with a
+        // Transform and a Camera, of which its pose and near plane are read.
+        // Its +Z is what a screen shows straight ahead, its +Y up. How wide
+        // it looks comes from the screen it feeds, the one nearest the
+        // camera. Null with none.
+        entt::entity sensor = entt::null;
+
         // Exposure as EV100: the fixed value when auto-exposure is off, and
         // where it starts when on. The scene is lit by a real-magnitude sun,
         // so it is set for daylight.

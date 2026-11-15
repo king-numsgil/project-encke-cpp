@@ -76,10 +76,35 @@ public uint cascade_of(float distance, GpuFrame frame)
     return count;
 }
 
+// The first cascade whose map holds a view-space position, two texels in
+// from its edge for the filter, or the cascade count when none does. For a
+// view other than the one the cascades were fitted to, whose depths say
+// nothing about them.
+public uint cascade_holding(float3 position, GpuFrame frame)
+{
+    uint count = frame.counts.y;
+    for (uint cascade = 0; cascade < count; ++cascade)
+    {
+        GpuShadowView view = load_shadow_view(cascade);
+        float4        clip = mul(view.view_to_clip, float4(position, 1.0f));
+        float2        uv   = ndc_to_uv(clip.xy / clip.w);
+
+        uint width;
+        uint height;
+        g_textures[NonUniformResourceIndex(view.image.x)].GetDimensions(width, height);
+        float2 margin = 2.0f / float2(width, height);
+        if (all(uv >= margin) && all(uv <= 1.0f - margin))
+        {
+            return cascade;
+        }
+    }
+    return count;
+}
+
 public float sun_visibility(float3 position, float3 normal, GpuFrame frame)
 {
     float distance = -position.z;
-    uint  cascade  = cascade_of(distance, frame);
+    uint  cascade  = frame.shadow.w > 0.5f ? cascade_holding(position, frame) : cascade_of(distance, frame);
     if (cascade >= frame.counts.y)
     {
         return 1.0f;

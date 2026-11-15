@@ -1,0 +1,32 @@
+// The bridge's view domes, D6, both showing the one sensor at the bow. The
+// pilot's:
+// from the dome's design eye, 0.632 m over its hinge, looking ahead along
+// the ship's +Z at the dome's middle elevation, then from above the seat's
+// right, where the whole dome is in view. The ship's frame is the
+// scene's, its origin 0.12 m under the floor at (1.3218, 43.607), so the
+// eye, (0, 26.712, 1.459) in the ship, is (1.3218, 26.592, 45.066) here.
+// Then from the field, where the dome is out of range and the sensor is
+// not drawn.
+{
+    "settings": { "ev100": 13 },
+    "steps": [
+        { "op": "camera", "position": [1.3218, 26.592, 45.066], "target": [1.3218, 26.86, 46.066] },
+        { "op": "settle" },
+        { "op": "capture", "file": "eye.png" },
+
+        { "op": "camera", "position": [2.6, 27.5, 44.4], "target": [1.3218, 26.9, 45.8] },
+        { "op": "settle" },
+        { "op": "capture", "file": "beside.png" },
+
+        // The tactical dome, turned half round from the pilot's, its eye at
+        // (0, 26.712, -1.459) in the ship, looking along -Z: the same
+        // picture, laid out the same way on its screen.
+        { "op": "camera", "position": [1.3218, 26.592, 42.148], "target": [1.3218, 26.86, 41.148] },
+        { "op": "settle" },
+        { "op": "capture", "file": "tactical.png" },
+
+        { "op": "camera", "position": [-6, 1.7, 4], "target": [1.3218, 14, 43.607] },
+        { "op": "settle" },
+        { "op": "capture", "file": "field.png" }
+    ]
+}

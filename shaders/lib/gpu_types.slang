@@ -22,7 +22,8 @@ public struct GpuFrame
     public float4   env_sky;         // linear rgb radiance above the horizon
     public float4   env_ground;      // linear rgb radiance below it
     public uint4    counts;          // x light count, y cascade count, z max objects
-    public float4   shadow;          // x shadow distance, y fade start, z normal offset (texels)
+    public float4   shadow;          // x shadow distance, y fade start, z normal offset (texels),
+                                     // w 1 = cascade by which map holds the pixel, 0 by view depth
     public float4   exposure_range;  // x log2 min luminance, y log2 range, z low, w high percentile
     public float4   exposure_adapt;  // x frame seconds, y speed brighter, z darker, w compensation EV
     public float4   exposure_limits; // x min EV100, y max EV100, z 1 = jump to target, w EV100 to start from
@@ -36,6 +37,8 @@ public struct GpuFrame
     public float4   post;            // x CAS sharpness in tonemap, 0 skips it
     public uint4    terrain;         // x GpuTerrainMaterial buffer or ~0; y surface map face size, z border
     public uint4    debug;           // x GpuDebugVertex buffer, two per line, or ~0 with none
+    public float4x4 screen_projection; // sensor-frame direction -> sensor clip, unjittered
+    public uint4    screen_images;   // x sensor display image (sampled) or ~0, y linear clamped sampler
 };
 
 // One end of a debug line: view-space position, colour as sRGB bytes, red
@@ -113,13 +116,16 @@ public struct GpuObject
     public float4   texture_scale;     // xyz scale / tile width (m), w tile width / height
     public float4   morph;             // x start distance, y 1 / (end - start), z extent, w voxel (m)
     public uint4    morph_masks;       // terrain: x coarser neighbours, y finer, z flags (1 morph,
-                                       // 2 terrain palette, 4 surface map, 0 not terrain),
+                                       // 2 terrain palette, 4 surface map, none not terrain;
+                                       // 8 a view screen, not terrain),
                                        // w TerrainVertex buffer
     public float4   period_offset;     // terrain: xyz added to mesh positions for triplanar
                                        // and cube-projected UVs, w the cube face (0 x, 1 y, 2 z)
     public float4   surface_map;       // surface map: xyz chunk corner (body space = mesh + this), or
                                        // an impostor's xy lowest height and span; w body radius;
                                        // textures.x albedo, textures.z normal, roughness, height
+    public float4   screen;            // view screen (flag 8): x azimuth at u 0, y elevation at v 0,
+                                       // z elevation span (rad), w luminance of display white
 };
 
 // See TerrainVertex in render/mesh.hpp.
@@ -177,9 +183,9 @@ public struct Push
 };
 
 // Byte strides must match sizeof() on the C++ side.
-public static const uint kFrameStride      = 432;
+public static const uint kFrameStride      = 512;
 public static const uint kLightStride      = 64;
 public static const uint kShadowViewStride = 96;
-public static const uint kObjectStride     = 384;
+public static const uint kObjectStride     = 400;
 public static const uint kTerrainVertexStride = 20;
 public static const uint kMatrixStride     = 64;

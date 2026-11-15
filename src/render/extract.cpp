@@ -13,6 +13,7 @@ namespace encke
     {
         list.objects.clear();
         list.lights.clear();
+        list.sensor.reset();
 
         // Per-frame, so once each per run.
         static bool warned_objects = false;
@@ -35,6 +36,16 @@ namespace encke
             log::warn("extract: the scene's camera has no Transform or Camera; drawing from "
                       "the last one");
             warned_camera = true;
+        }
+
+        if (registry.valid(scene.sensor) && registry.all_of<WorldTransform, Camera>(scene.sensor))
+        {
+            WorldTransform const& sensor = registry.get<WorldTransform>(scene.sensor);
+            list.sensor = SensorFeed{
+                .position = sensor.position,
+                .rotation = sensor.rotation,
+                .lens     = registry.get<Camera>(scene.sensor),
+            };
         }
 
         list.star         = starlight_at(registry, list.camera.position);
@@ -64,8 +75,9 @@ namespace encke
             f64vec3 const          centre = (min + max) * 0.5;
             f64vec3 const          extent = (max - min) * 0.5;
 
-            Geomorph const* const geomorph = registry.try_get<Geomorph>(entity);
-            BodyMap const* const  body_map = registry.try_get<BodyMap>(entity);
+            Geomorph const* const   geomorph = registry.try_get<Geomorph>(entity);
+            BodyMap const* const    body_map = registry.try_get<BodyMap>(entity);
+            ViewScreen const* const screen   = list.sensor.has_value() ? registry.try_get<ViewScreen>(entity) : nullptr;
 
             list.objects.push_back(RenderObject{
                 .entity        = entity,
@@ -76,6 +88,7 @@ namespace encke
                 .renderable    = renderable,
                 .geomorph      = geomorph != nullptr ? optional<Geomorph>{*geomorph} : nullopt,
                 .body_map      = body_map != nullptr ? optional<BodyMap>{*body_map} : nullopt,
+                .screen        = screen != nullptr ? optional<ViewScreen>{*screen} : nullopt,
             });
         }
 

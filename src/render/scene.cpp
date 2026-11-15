@@ -390,6 +390,14 @@ namespace encke
                                                         .emissive  = part.emissive * spawn.luminance,
                                                         .metallic  = part.metallic,
                                                     });
+                if (node.dome.has_value())
+                {
+                    registry.emplace<ViewScreen>(drawn, ViewScreen{
+                                                            .azimuth        = node.dome->azimuth,
+                                                            .elevation_low  = node.dome->elevation_low,
+                                                            .elevation_high = node.dome->elevation_high,
+                                                        });
+                }
                 if (solid[index] != 0 && part.collision != nullptr)
                 {
                     registry.emplace<physics::StaticCollider>(
@@ -437,6 +445,7 @@ namespace encke
     {
         registry.clear();
         ground_.reset();
+        sensor = entt::null;
 
         MeshHandle cube;
         MeshHandle sphere;
@@ -717,6 +726,20 @@ namespace encke
                           },
                       });
             registry.get<Transform>(interior).parent = ship;
+
+            // The sensor the bridge's view domes show, at the bow: 10 cm
+            // past the tip of the spike the hull ends in, 35.3 m up the ship,
+            // clear of the hull. It looks along the direction of travel, the
+            // ship's +Y, with the ship's -Z its up: the pilot's view lying
+            // back in the seat for a burn, head toward -Z, eyes toward the
+            // bow. The dome's middle is then 15 degrees off the bow, toward -Z.
+            constexpr f64 kSensorHeight = 35.4;
+            sensor = registry.create();
+            registry.emplace<Transform>(
+                sensor, Transform{.position = f64vec3{0.0, kSensorHeight, 0.0},
+                                  .rotation = glm::angleAxis(-0.5 * kPi, f64vec3{1.0, 0.0, 0.0}),
+                                  .parent   = ship});
+            registry.emplace<Camera>(sensor);
         }
 
         // Crates, the small one stacked across the other two.

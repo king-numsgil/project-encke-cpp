@@ -27,9 +27,10 @@ namespace encke
         f64vec3 bounds_centre{0.0};
         f64     bounds_radius = 0.0;
 
-        Renderable         renderable;
-        optional<Geomorph> geomorph;
-        optional<BodyMap>  body_map;
+        Renderable           renderable;
+        optional<Geomorph>   geomorph;
+        optional<BodyMap>    body_map;
+        optional<ViewScreen> screen;   // when the scene has a sensor to show
     };
 
     struct RenderLight
@@ -37,6 +38,16 @@ namespace encke
         f64vec3 position{0.0};                 // world
         f64vec3 direction{0.0, 0.0, -1.0};     // world, unit; the entity's -Z
         Light   light;
+    };
+
+    // The scene's sensor camera, which every view screen (RenderObject::
+    // screen) shows. The renderer works out how wide it looks from the
+    // screens.
+    struct SensorFeed
+    {
+        f64vec3 position{0.0};                  // world
+        f64quat rotation{1.0, 0.0, 0.0, 0.0};   // world, its frame: +Z ahead, +Y up, +X left
+        Camera  lens;                           // its fov is not read
     };
 
     // Everything the renderer reads of a scene in one frame. An object's
@@ -56,6 +67,9 @@ namespace encke
 
         // The atmosphere the camera sees, if any.
         optional<AtmosphereView> atmosphere;
+
+        // Nullopt without a sensor.
+        optional<SensorFeed> sensor;
     };
 
     // Replaces `list` with the scene's active camera, what lights it from

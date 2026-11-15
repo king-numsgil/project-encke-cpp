@@ -21,6 +21,7 @@ Orchestrated in `render/renderer.cpp`, then the UI:
 | Pass | Kind | Does |
 | --- | --- | --- |
 | shadows | raster | depth only: the sun's cascades, then each chosen spot's map |
+| sensor | all | when a view screen is near: the sensor's G-buffer to exposure, tonemapped into its display |
 | G-buffer | raster | albedo/ao, octahedral normal, roughness/metallic, motion, depth; emissive seeds HDR |
 | sky ambient | compute | with air: LUTs when it changed, the environment around the camera, the sky-view LUT |
 | clusters | compute | one thread per froxel, every light against its view-space AABB |
@@ -60,6 +61,45 @@ or a landing site has its lights.
   RG16F storing `uv_previous - uv_current` through `ndc_to_uv`. Motion is
   per-frame displacement, so it scales with frame time; uncapped it sits
   near fp16's smallest normal, which is expected.
+
+## Views and the sensor
+
+A view is one camera through the pipeline from the G-buffer to exposure:
+its targets, per-frame buffers (frame, objects, lights, shadow lookups,
+air, draws) and what it keeps between frames (last frame's models and
+view, TAA history and jitter, adapted EV100). `Renderer::View`. The main
+view is the swapchain's size and goes on to the debug views, tonemap,
+debug draw and the UI. Shadow maps, the LUTs, the cluster lists, the
+ambient buffer, the sky-view LUT and the exposure histogram are shared and
+used by one view after the other; the barriers that covered last frame's
+reads cover the previous view's the same way.
+
+The sensor view feeds view screens (`ViewScreen`, the bridge's domes), one
+render for all of them. It is drawn only in a frame where some screen
+object is resident, in the main frustum and within `kSensorRange`;
+otherwise every screen draws its own flat material. The frustum test sees
+no walls, so it is also drawn from the decks below the bridge. It runs before the main view at a
+fixed `kSensorWidth` by `kSensorHeight`, is culled against its own
+projection, has its own TAA and auto-exposure, and is tonemapped into a
+display image in the swapchain's format, which the main G-buffer samples.
+
+- A screen is a display, not a window: a texel's angles (`DomeScreen`)
+  are a direction in the sensor's frame, not the screen's. That is what
+  lets screens turned any way share the render: the pilot's and the
+  tactical dome, turned half round from it, show the same picture laid out
+  the same way, starboard on the right of both. `sensor_camera` points the
+  sensor at the middle of every screen's elevations, seen or not, so the
+  picture does not change as screens come into view, and widens a flat
+  projection over every screen's edges. The main frame carries direction
+  -> sensor clip (`Frame::screen_projection`), unjittered.
+- What is a screen's own goes in its object (`Object::screen`): its angles
+  and its white, `kViewScreenLuminance`, emitted over near-black glass so
+  cabin lights still reflect in it. A per-screen HUD goes there too.
+- Shadows are planned from the main camera. The sensor's frame sets
+  `shadow.w`, which picks a pixel's cascade by which map holds it rather
+  than by view depth; outside every cascade it is unshadowed.
+- A sensor that skipped frames drops its history and last frame's models.
+- GPU timings put the whole sensor view in one "sensor" section.
 
 ## Frames in flight and uploads
 
@@ -290,3 +330,17 @@ agree; only validation checks.
   set the exposure.
 - No specular antialiasing beyond TAA; no reactive mask for transparency.
 - Motion vectors ignore the terrain geomorph.
+- One sensor a scene. While it is drawn the GPU does about twice the work.
+- The sensor's flat projection spends far more pixels per degree at a
+  dome's edges than its middle, which is about half as sharp per degree
+  as the main view at 1080p.
+- No cascades are fitted to the sensor; past what the main camera's
+  cascades hold, its view is unshadowed.
+- No HUD on view screens. Planned: a texture per screen in the dome's
+  angular UV space (2:1, square angular texels, as `SCREENS.md` suggests),
+  added as emission over the sensor's view in the G-buffer shader. Crisp
+  whatever the sensor's resolution, its own per screen, and clear of the
+  sensor's exposure and TAA, its handle beside the angles in
+  `Object::screen`'s record. Drawing into the sensor's display instead was
+  rejected: as coarse and uneven as the sensor's pixels, curved lines of
+  constant elevation, and one HUD for every screen sharing the render.

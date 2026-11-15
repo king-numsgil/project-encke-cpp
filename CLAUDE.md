@@ -218,8 +218,10 @@ share a process, and an `interactive` one must come last.
   floor, +Y its up.
 - Two runs of a scenario are byte-identical; keep it that way. Two known
   exceptions: `debug_views/cluster_heat.png` shows the frame stats, which
-  are timings, and `torchship/deck.png` varies by a few hundred faint
-  pixels between runs, cause not found.
+  are timings, and `torchship/deck.png` varies by a few thousand faint
+  pixels with frame timing: a 5 ms sleep a frame reproduces it, so
+  anything that changes the CPU's time per frame can move it. Cause within
+  the scenario not found.
 - **Do not run a scenario ending in `interactive` unattended**: it never
   quits (`boxes.json` is one).
 - Clustered against brute force (`debug_views.json`) is the check for any

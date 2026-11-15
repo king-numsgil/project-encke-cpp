@@ -40,7 +40,53 @@ namespace encke
         {
             bool      moving = false;   // a `joint`: a part that turns or slides
             NodeShape shape;            // a `physics` shape, never drawn
+            optional<DomeScreen> dome;  // a `"screen": "dome"`
         };
+
+        // Two numbers of an extras array, or nullopt.
+        optional<f64vec2> read_pair(simdjson::dom::object const& extras, char const* key)
+        {
+            simdjson::dom::array array;
+            if (extras[key].get(array) != simdjson::SUCCESS || array.size() != 2)
+            {
+                return nullopt;
+            }
+            f64vec2 pair{0.0};
+            glm::length_t index = 0;
+            for (simdjson::dom::element const value : array)
+            {
+                if (value.get(pair[index++]) != simdjson::SUCCESS)
+                {
+                    return nullopt;
+                }
+            }
+            return pair;
+        }
+
+        // A view dome's angular extent: `fov_deg` across and `el_deg`, its
+        // bottom and top elevations, in degrees.
+        void read_dome(simdjson::dom::object const& extras, std::size_t index, NodeExtras& out)
+        {
+            std::string_view screen;
+            if (extras["screen"].get(screen) != simdjson::SUCCESS || screen != "dome")
+            {
+                return;
+            }
+            optional<f64vec2> const fov       = read_pair(extras, "fov_deg");
+            optional<f64vec2> const elevation = read_pair(extras, "el_deg");
+            if (!fov.has_value() || !elevation.has_value() || fov->x <= 0.0 || fov->x >= 180.0 ||
+                elevation->x >= elevation->y)
+            {
+                log::warn("gltf: node %zu is a dome screen without a usable fov_deg and el_deg; drawn plain", index);
+                return;
+            }
+            constexpr f64 kRadians = 3.14159265358979323846 / 180.0;
+            out.dome = DomeScreen{
+                .azimuth        = 0.5 * fov->x * kRadians,
+                .elevation_low  = elevation->x * kRadians,
+                .elevation_high = elevation->y * kRadians,
+            };
+        }
 
         // Reads the extras of every node that has them, by node index.
         // `user` is a vector<NodeExtras>, grown to the nodes as they are met.
@@ -60,6 +106,7 @@ namespace encke
 
             simdjson::dom::element joint;
             out.moving = (*extras)["joint"].get(joint) == simdjson::SUCCESS;
+            read_dome(*extras, index, out);
 
             std::string_view physics;
             if ((*extras)["physics"].get(physics) != simdjson::SUCCESS)
@@ -597,6 +644,7 @@ namespace encke
             {
                 node.moving = extras[source_index].moving;
                 node.shape  = extras[source_index].shape;
+                node.dome   = extras[source_index].dome;
             }
             locals.push_back(to_glm(fastgltf::getTransformMatrix(source)));
             if (source.meshIndex.has_value())

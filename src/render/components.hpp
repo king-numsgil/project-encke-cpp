@@ -93,6 +93,20 @@ namespace encke
         array<f32, 5>            roughness;
     };
 
+    // Beside a Renderable whose mesh is a view dome (DomeScreen): it shows
+    // the scene's sensor camera (Scene::sensor), each texel the view along
+    // its direction taken in the sensor's frame, +Z ahead, +Y up, +X the
+    // viewer's left. A display, not a window: what is straight ahead on the
+    // screen is the sensor's ahead, however the screen is turned. u runs
+    // from `azimuth` on the viewer's left to -`azimuth`, v from
+    // `elevation_high` down to `elevation_low`; radians.
+    struct ViewScreen
+    {
+        f64 azimuth        = 0.0;
+        f64 elevation_low  = 0.0;
+        f64 elevation_high = 0.0;
+    };
+
     // A point light at the entity's world position, or a spot facing the
     // entity's -Z when cos_outer is above -1. Only spots cast shadows;
     // casts_shadow on a point light is ignored. The entity's scale is not

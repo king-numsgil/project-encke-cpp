@@ -208,14 +208,23 @@ namespace encke
         // Temporal antialiasing. Turning it on starts from an empty history.
         void set_taa(bool on)
         {
-            history_valid_ = history_valid_ && on;
-            taa_           = on;
+            main_.history_valid   = main_.history_valid && on;
+            sensor_.history_valid = sensor_.history_valid && on;
+            taa_                  = on;
         }
         bool taa() const { return taa_; }
 
         // Discards the history and restarts the jitter sequence, so the next
-        // frames are the same whatever came before: for captures.
-        void reset_taa() { history_valid_ = false; }
+        // frames are the same whatever came before: for captures. The
+        // sensor's too.
+        void reset_taa()
+        {
+            main_.history_valid   = false;
+            sensor_.history_valid = false;
+        }
+
+        // Whether the last frame drew the sensor view for a view screen.
+        bool sensor_drawn() const { return sensor_drawn_; }
 
         // What terrain chunks blend; nullopt draws them with their own
         // Renderable's material alone.
@@ -238,31 +247,147 @@ namespace encke
         f64 blocked_ms() const { return blocked_ms_; }
 
     private:
-        // Rewritten by the CPU every frame, so one set per frame in flight.
+        // Shared by every view and rewritten by the CPU every frame, so one
+        // set per frame in flight.
         struct FrameResources
+        {
+            Buffer shadow_matrices;
+            Buffer terrain;      // gpu::TerrainMaterial, kTerrainMaterialCount
+            Buffer debug_lines;  // gpu::DebugVertex, two per line, kMaxDebugLines
+
+            // VkDrawIndexedIndirectCommand: shadow view v's casters at
+            // v * kMaxObjects.
+            Buffer shadow_draws;
+
+            u32 shadow_matrices_handle = BindlessSet::kInvalid;
+            u32 terrain_handle         = BindlessSet::kInvalid;
+            u32 debug_lines_handle     = BindlessSet::kInvalid;
+        };
+
+        // A view's own per-frame buffers, one set per frame in flight: all
+        // of them in its view space.
+        struct ViewBuffers
         {
             Buffer frame;
             Buffer objects;
             Buffer lights;
             Buffer shadow_views;
-            Buffer shadow_matrices;
             Buffer atmosphere;   // gpu::Atmosphere
-            Buffer terrain;      // gpu::TerrainMaterial, kTerrainMaterialCount
-            Buffer debug_lines;  // gpu::DebugVertex, two per line, kMaxDebugLines
 
-            // VkDrawIndexedIndirectCommand: the G-buffer's at 0, then shadow
-            // view v's at (1 + v) * kMaxObjects.
+            // VkDrawIndexedIndirectCommand: the G-buffer's, then impostors.
             Buffer draws;
 
-            u32 frame_handle           = BindlessSet::kInvalid;
-            u32 objects_handle         = BindlessSet::kInvalid;
-            u32 lights_handle          = BindlessSet::kInvalid;
-            u32 shadow_views_handle    = BindlessSet::kInvalid;
-            u32 shadow_matrices_handle = BindlessSet::kInvalid;
-            u32 atmosphere_handle      = BindlessSet::kInvalid;
-            u32 terrain_handle         = BindlessSet::kInvalid;
-            u32 debug_lines_handle     = BindlessSet::kInvalid;
+            u32 frame_handle        = BindlessSet::kInvalid;
+            u32 objects_handle      = BindlessSet::kInvalid;
+            u32 lights_handle       = BindlessSet::kInvalid;
+            u32 shadow_views_handle = BindlessSet::kInvalid;
+            u32 atmosphere_handle   = BindlessSet::kInvalid;
         };
+
+        // One camera's frame through the pipeline, G-buffer to exposure:
+        // its targets, its buffers, and what it keeps from frame to frame.
+        // The main view is the swapchain's size and goes on to tonemap into
+        // it; the sensor view is config::kSensorWidth by kSensorHeight and
+        // tonemaps into the display image view screens sample. Shadow maps,
+        // the atmosphere's LUTs, the cluster lists and the exposure histogram
+        // are shared, used by one view after the other.
+        struct View
+        {
+            char const* name = "main";
+            VkExtent2D  extent{0, 0};
+
+            Image albedo;
+            Image normal;
+            Image material;
+            Image motion;
+            Image depth;
+            Image hdr;
+
+            u32 albedo_handle      = BindlessSet::kInvalid;
+            u32 normal_handle      = BindlessSet::kInvalid;
+            u32 material_handle    = BindlessSet::kInvalid;
+            u32 motion_handle      = BindlessSet::kInvalid;
+            u32 depth_handle       = BindlessSet::kInvalid;
+            u32 hdr_storage_handle = BindlessSet::kInvalid;
+            u32 hdr_sampled_handle = BindlessSet::kInvalid;
+
+            array<ViewBuffers, kFramesInFlight> buffers;
+
+            // Last drawn frame's world transforms, for motion vectors: each
+            // object's by entity, and the camera's view and projection. A
+            // new entity has none and moves nowhere on its first frame.
+            // Rebuilt each frame from the objects drawn (current_models is
+            // the one being filled), so destroyed entities drop out.
+            entt::storage<f64mat4> previous_models;
+            entt::storage<f64mat4> current_models;
+            optional<f64mat4>      previous_view;
+            f64mat4                previous_projection{1.0};
+
+            // TAA (shaders/taa.slang). Two history images, taken in turn:
+            // each frame resolves into one while reading the other, then
+            // exposure and tonemap read the one just written in HDR's
+            // place. The one read was left READ_ONLY_OPTIMAL by the frame
+            // that wrote it. `jitter_index` counts frames since the history
+            // was last discarded, so the jitter sequence restarts with it.
+            array<Image, 2> history;
+            array<u32, 2>   history_storage_handles{{BindlessSet::kInvalid, BindlessSet::kInvalid}};
+            array<u32, 2>   history_sampled_handles{{BindlessSet::kInvalid, BindlessSet::kInvalid}};
+            u32             history_write = 0;
+            bool            history_valid = false;
+            u32             jitter_index  = 0;
+
+            // Auto-exposure's state: a 1x1 EV100 that persists across
+            // frames, registered twice like HDR, because compute writes it
+            // in GENERAL and tonemap samples it in READ_ONLY_OPTIMAL.
+            Image exposure_image;
+            u32   exposure_storage_handle = BindlessSet::kInvalid;
+            u32   exposure_sampled_handle = BindlessSet::kInvalid;
+            bool  exposure_written        = false;   // image holds a value, in READ_ONLY_OPTIMAL
+
+            // How many indirect draws upload_view() wrote; read by record().
+            u32  gbuffer_draws  = 0;
+            u32  impostor_draws = 0;
+            bool sky_view_drawn = false;   // the camera is in the air
+        };
+
+        bool create_view(View& view, VkExtent2D extent);
+        bool resize_view(View& view, VkExtent2D extent);
+        void shutdown_view(View& view);
+
+        // What every pass of `view` reads, for this frame's slot.
+        gpu::Push view_push(View const& view, Scene const& scene) const;
+
+        // What the main view's frame needs to draw the view screens: a
+        // direction in the sensor's frame to its clip space. Each screen's
+        // own angles go with its object.
+        struct ScreenUpload
+        {
+            f64mat4 projection{1.0};
+        };
+
+        // Writes `view`'s buffers for this frame from render_list_ as
+        // `camera` sees it: frame, objects in view, lights, shadow lookups,
+        // the air. `screen` is the sensor every view screen shows, or null
+        // when it was not drawn.
+        void upload_view(View& view, CameraView const& camera, Scene const& scene, AssetManager const& assets,
+                         ScreenUpload const* screen);
+
+        // Records `view` from the G-buffer to exposure, after the shadow
+        // maps and LUTs, and returns its push with HDR and exposure where
+        // tonemap reads them. `timed` marks each pass's section.
+        gpu::Push record_view(VkCommandBuffer command, View& view, Scene const& scene, bool timed);
+
+        // After record_view: what tonemap samples -> READ_ONLY_OPTIMAL.
+        void handoff(VkCommandBuffer command, View& view);
+
+        // The full-screen tonemap of `view` into `target`, a colour
+        // attachment of the swapchain's format and the view's size.
+        void record_tonemap(VkCommandBuffer command, View const& view, gpu::Push push, VkImageView target);
+
+        // The main view's frame after record_view: debug views, tonemap,
+        // debug draw, overlay, capture, present.
+        bool finish_main(VkCommandBuffer command, VulkanSwapchain const& swapchain, u32 image_index,
+                         Overlay* overlay, gpu::Push push);
 
         // A texture asset on the GPU, streamed in once and read-only after,
         // so unlike the targets it needs no per-frame barriers. Materials
@@ -277,6 +402,7 @@ namespace encke
 
         bool create_targets(VkExtent2D extent);
         void register_targets(bool first_time);
+        bool create_sensor(VkFormat display_format);
         bool create_shadow_maps();
         bool create_material_resources();
 
@@ -316,20 +442,24 @@ namespace encke
 
         BindlessSet bindless_;
 
-        Image albedo_;
-        Image normal_;
-        Image material_;
-        Image motion_;
-        Image depth_;
-        Image hdr_;
+        View main_;
 
-        u32 albedo_handle_      = BindlessSet::kInvalid;
-        u32 normal_handle_      = BindlessSet::kInvalid;
-        u32 material_handle_    = BindlessSet::kInvalid;
-        u32 motion_handle_      = BindlessSet::kInvalid;
-        u32 depth_handle_       = BindlessSet::kInvalid;
-        u32 hdr_storage_handle_ = BindlessSet::kInvalid;
-        u32 hdr_sampled_handle_ = BindlessSet::kInvalid;
+        // The view screens' camera (Scene::sensor), one render for every
+        // screen, drawn in frames where any screen is in view and near
+        // (config::kSensorRange), before the main view, whose G-buffer then
+        // samples its display: tonemapped by its own exposure, in the
+        // swapchain's format, which tonemap writes.
+        // `sensor_drawn_` is this frame's, `sensor_was_drawn_` the last's: a
+        // view that skipped frames has no history worth reprojecting.
+        View  sensor_;
+        Image sensor_display_;
+        u32   sensor_display_handle_ = BindlessSet::kInvalid;
+        bool  sensor_drawn_          = false;
+        bool  sensor_was_drawn_      = false;
+
+        // Scratch for upload(): every view screen this frame, which the
+        // sensor is fitted to.
+        vector<ViewScreen> sensor_screens_;
 
         // Written by compute in GENERAL, sampled by the UI in
         // READ_ONLY_OPTIMAL, so each is registered twice like HDR.
@@ -360,43 +490,24 @@ namespace encke
         // nothing else of it.
         RenderList render_list_;
 
-        // Last drawn frame's world transforms, for motion vectors: each
-        // object's by entity, and the camera's view and projection. A new
-        // entity has none and moves nowhere on its first frame. Rebuilt each
-        // frame from the objects drawn (current_models_ is the one being
-        // filled), so destroyed entities drop out: terrain chunks come and go.
-        entt::storage<f64mat4> previous_models_;
-        entt::storage<f64mat4> current_models_;
-        optional<f64mat4>      previous_view_;
-        f64mat4                previous_projection_{1.0};
+        // This frame's shadow views, and how many casters upload() wrote for
+        // each. Planned from the main camera; the sensor view looks its
+        // pixels up in the same maps. Read by record().
+        ShadowPlan                           shadow_plan_;
+        array<u32, config::kShadowViewCount> shadow_draws_{};
 
-        // This frame's shadow views, and how many indirect draws upload()
-        // wrote for the G-buffer and for each view's casters. Read by record().
-        ShadowPlan                               shadow_plan_;
-        u32                                      gbuffer_draws_ = 0;
-
-        // The G-buffer's draws in view, each with its nearest distance, sorted
-        // front to back before they are written, so the depth test rejects
-        // hidden terrain before it is shaded.
+        // Scratch for upload_view(). The G-buffer's draws in view, each with
+        // its nearest distance, sorted front to back before they are written,
+        // so the depth test rejects hidden terrain before it is shaded; then
+        // impostors, drawn last, behind everything, by impostor_pipeline_.
         vector<std::pair<f64, VkDrawIndexedIndirectCommand>> gbuffer_order_;
-        array<u32, config::kShadowViewCount>     shadow_draws_{};
+        vector<VkDrawIndexedIndirectCommand>                 impostor_order_;
 
-        // Impostors in view, written after the G-buffer's draws; drawn last,
-        // behind everything, by impostor_pipeline_.
-        vector<VkDrawIndexedIndirectCommand> impostor_order_;
-        u32                                  impostor_draws_ = 0;
-
-        // Auto-exposure. The histogram is GPU-only and zeroed by the adapt
-        // pass after reading, so it starts each frame empty. The EV100 image
-        // persists across frames, which is the adaptation state; it is
-        // registered twice, like HDR, because compute writes it in GENERAL and
-        // tonemap samples it in READ_ONLY_OPTIMAL.
+        // Auto-exposure's histogram, GPU-only, shared by the views: each
+        // view's adapt pass zeroes it after reading, so it starts each view
+        // empty.
         Buffer exposure_histogram_;
         u32    exposure_histogram_handle_ = BindlessSet::kInvalid;
-        Image  exposure_image_;
-        u32    exposure_storage_handle_ = BindlessSet::kInvalid;
-        u32    exposure_sampled_handle_ = BindlessSet::kInvalid;
-        bool   exposure_written_        = false;   // image holds a value, in READ_ONLY_OPTIMAL
         f64    frame_seconds_           = 0.0;
         bool   exposure_jump_           = true;
         optional<f32> fixed_ev100_;
@@ -414,10 +525,9 @@ namespace encke
 
         Image     transmittance_lut_;
         Image     multiscatter_lut_;
-        Image     sky_view_lut_;   // rebuilt every frame the camera is in the air
+        Image     sky_view_lut_;   // rebuilt by every view in the air
         u32       sky_view_storage_handle_ = BindlessSet::kInvalid;
         u32       sky_view_sampled_handle_ = BindlessSet::kInvalid;
-        bool      sky_view_drawn_          = false;
         u32       transmittance_storage_handle_ = BindlessSet::kInvalid;
         u32       transmittance_sampled_handle_ = BindlessSet::kInvalid;
         u32       multiscatter_storage_handle_  = BindlessSet::kInvalid;
@@ -427,23 +537,11 @@ namespace encke
         Buffer    atmosphere_ambient_;
         u32       atmosphere_ambient_handle_ = BindlessSet::kInvalid;
 
+        bool taa_ = true;
+
         // What the LUTs were built for; nullopt until they first are.
         // `atmosphere_drawn_` is whether this frame has one; upload() sets
         // both flags and record() reads them.
-        // TAA (shaders/taa.slang). Two screen-sized history images, taken in
-        // turn: each frame resolves into one while reading the other, then
-        // exposure and tonemap read the one just written in HDR's place. The
-        // one read was left READ_ONLY_OPTIMAL by the frame that wrote it.
-        // `jitter_index_` counts frames since the history was last discarded,
-        // so the jitter sequence restarts with it.
-        array<Image, 2> history_;
-        array<u32, 2>   history_storage_handles_{{BindlessSet::kInvalid, BindlessSet::kInvalid}};
-        array<u32, 2>   history_sampled_handles_{{BindlessSet::kInvalid, BindlessSet::kInvalid}};
-        u32             history_write_ = 0;
-        bool            history_valid_ = false;
-        u32             jitter_index_  = 0;
-        bool            taa_           = true;
-
         optional<AtmosphereView> lut_atmosphere_;
         bool                     atmosphere_drawn_ = false;
         bool                     rebuild_luts_     = false;

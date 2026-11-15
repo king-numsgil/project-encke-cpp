@@ -98,9 +98,11 @@ parented as in the file under one root, and an entity per primitive with the
   fixing it needs `vkCmdSetFrontFace` and a separate draw.
 - `doubleSided` is ignored, correctly for Blender exports, which set it on
   every material with culling off by default.
-- Node extras read: `joint` (`ModelNode::moving`), and `physics`
-  (`"convex_hull"`, or `"box"` with `half_extents`) as `ModelNode::shape`. A
-  shape node is never drawn and is left out of the bounds.
+- Node extras read: `joint` (`ModelNode::moving`), `physics`
+  (`"convex_hull"`, or `"box"` with `half_extents`) as `ModelNode::shape`,
+  and `"screen": "dome"` with `fov_deg` and `el_deg` as `ModelNode::dome`,
+  whose parts get a `ViewScreen`. A shape node is never drawn and is left
+  out of the bounds.
 - `ModelSpawn` can fit the model to a size, rest it on its root, scale its
   emission to a luminance, attach further models at named nodes (the
   torchship's seats), and say how its parts collide and which ship its shape
@@ -128,6 +130,13 @@ pole in a valley of sand and gravel (`kSiteEye`, `kSiteHeading`).
   stands on its tail south of the field: its exterior and interior load at
   one root, the interior parented to it, the seats attached at their nodes.
   `assets/torchship/ENGINE.md` and `SCREENS.md` are the export's conventions.
+- `Scene::sensor` is the camera the view domes show, parented to the ship
+  10 cm past its bow spike, looking along the ship's +Y (the direction of
+  travel) with the ship's -Z its up: the pilot's view lying back for a
+  burn. The dome's middle, at 15 degrees elevation, is 15 degrees off the
+  bow. Its rotation is what the screens show as ahead, whatever the dome's
+  hinge does; the hinge is not driven yet. Both bridge domes show it, the
+  same picture the same way round. `scenarios/dome.json`.
 
 ## Known gaps
 

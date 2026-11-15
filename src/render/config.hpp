@@ -29,6 +29,25 @@ namespace encke::config
     // triangle, take a few hundred thousand.
     inline constexpr u32 kMaxDebugLines = 1u << 19;
 
+    // -- the sensor view ------------------------------------------------------------
+    // What a view screen shows (render/components.hpp ViewScreen): the
+    // scene's sensor camera through the whole pipeline a second time, into
+    // targets of this size, then tonemapped by its own exposure into a
+    // display image the screen samples. Fixed, so nothing is rebuilt as
+    // screens come and go; the projection is widened to the screen in
+    // whichever direction its shape does not fill. A view dome 120 by 60
+    // degrees needs about 1.85 to 1 through a flat projection.
+    inline constexpr u32 kSensorWidth  = 1920;
+    inline constexpr u32 kSensorHeight = 1024;
+
+    // Drawn only while its screen is in view and its bounds within this
+    // many metres of the camera: from the bridge, not from the field.
+    inline constexpr f64 kSensorRange = 12.0;
+
+    // A view screen's white, cd/m^2: a bright display, near the ship's other
+    // screens, which are exported at 2.7 times the ship's 500.
+    inline constexpr f32 kViewScreenLuminance = 1000.0f;
+
     // -- terrain -------------------------------------------------------------------
     // An implicit octree per body (terrain/planet). LOD n's voxels are
     // 0.25 m * 2^n and its chunks 32 voxels on an edge; the finest LOD is the

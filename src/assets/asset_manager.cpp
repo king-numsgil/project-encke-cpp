@@ -349,6 +349,7 @@ namespace encke
                 .mesh     = node.mesh,
                 .moving   = node.moving,
                 .shape    = node.shape,
+                .dome     = node.dome,
             });
         }
 

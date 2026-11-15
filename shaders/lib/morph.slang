@@ -62,10 +62,10 @@ float neighbour_weight(uint mask, float3 low, float3 high)
 }
 
 // Whether the object is a terrain chunk, which carries a TerrainVertex per
-// vertex.
+// vertex. Flag 8, a view screen, is not terrain.
 public bool is_terrain(GpuObject object)
 {
-    return object.morph_masks.z != 0u;
+    return (object.morph_masks.z & 7u) != 0u;
 }
 
 // The pool's TerrainVertex stream, whose handle the object carries.

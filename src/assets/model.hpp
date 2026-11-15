@@ -28,6 +28,19 @@ namespace encke
         f64vec3 half_extents{0.0};   // for a box, in the node's frame
     };
 
+    // A node whose mesh is a view dome: its glTF extras say `"screen":
+    // "dome"`, with `fov_deg` and `el_deg`. The mesh is a patch of a sphere
+    // about the viewer's eye, its UVs angular (assets/torchship/SCREENS.md):
+    // u runs from `azimuth` on the viewer's left to -`azimuth` on the right,
+    // v from `elevation_high` at the top to `elevation_low`. Radians, in the
+    // node's frame, +Z ahead, +Y up, +X the viewer's left.
+    struct DomeScreen
+    {
+        f64 azimuth        = 0.0;
+        f64 elevation_low  = 0.0;
+        f64 elevation_high = 0.0;
+    };
+
     // A loaded model: its node tree, and each node's mesh as parts that are
     // one mesh asset and one material asset each. The AssetManager makes it
     // from a glTF; Scene::spawn instances it.
@@ -70,6 +83,8 @@ namespace encke
         bool moving = false;
 
         NodeShape shape;
+
+        optional<DomeScreen> dome;
     };
 
     struct Model

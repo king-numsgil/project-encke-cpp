@@ -388,7 +388,37 @@ GBuffer fragment_main(VertexOut input)
 
     // Uniform across one draw of the indirect batch, but not across the
     // batch: hence NonUniformResourceIndex on every handle.
-    if ((object.morph_masks.z & 4u) != 0u)
+    if ((object.morph_masks.z & 8u) != 0u)
+    {
+        // A view screen: a patch of a sphere about the viewer's eye, its UVs
+        // angular, so each texel is one direction, taken in the sensor's
+        // frame (+Z ahead, +Y up, +X the viewer's left) whichever way the
+        // screen is turned. That direction through the sensor's projection
+        // is where its view shows what lies along it. Dark glass under the
+        // glow: the room's lights still reflect in it.
+        GpuFrame frame = load_frame();
+        float2   uv    = input.uv;
+        float    az    = object.screen.x * (1.0f - 2.0f * uv.x);
+        float    el    = object.screen.y - object.screen.z * uv.y;
+        float3   d     = float3(sin(az) * cos(el), sin(el), cos(az) * cos(el));
+        float4   clip  = mul(frame.screen_projection, float4(d, 0.0f));
+
+        float3 shown = 0.0f;
+        if (clip.w > 0.0f)
+        {
+            float2 at = ndc_to_uv(clip.xy / clip.w);
+            if (all(at >= 0.0f) && all(at <= 1.0f))
+            {
+                SamplerState filter = g_samplers[NonUniformResourceIndex(frame.screen_images.y)];
+                shown = g_textures[NonUniformResourceIndex(frame.screen_images.x)].SampleLevel(filter, at, 0.0f).rgb;
+            }
+        }
+
+        albedo   = float3(0.02f);
+        metallic = 0.0f;
+        emissive = shown * object.screen.w;
+    }
+    else if ((object.morph_masks.z & 4u) != 0u)
     {
         // A chunk coarser than the body's surface map's texels: shaded as
         // the impostor is, from the map at its body-space direction. Its
