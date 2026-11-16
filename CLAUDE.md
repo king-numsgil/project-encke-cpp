@@ -77,6 +77,7 @@ design changes: a new decision, a gap closed or found.
 | `docs/physics.md` | stepping, determinism, terrain collision, static colliders, ship spaces, the walking character, camera control |
 | `docs/scene-and-assets.md` | the registry and the extract, transforms, assets and streaming, textures and UVs, glTF, the test scene |
 | `docs/input.md` | joysticks and the HOTAS, the probe, the device monitor and its JSONL log, the action layer: controls, bindings, modifiers, triggers, contexts, layered binding files; the bindings editor |
+| `docs/profiling.md` | where a terrain cold start's time goes and how to measure it: the settle log, `--headless`, `--sweep`; job counts per LOD; what was done, what was ruled out, what is open |
 | `docs/dependencies.md` | mimalloc and why it is built as it is, Jolt's build, glaze, ImGui, volk, and the rest's traps |
 
 ```
