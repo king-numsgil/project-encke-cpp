@@ -229,8 +229,8 @@ namespace encke::terrain
         }
 
         // What FastNoise2 alone costs for one chunk at this LOD: the Perlin
-        // octaves over every sample, and the four field graphs over the macro
-        // lattice. The rest of a chunk's time is ours.
+        // octaves over every sample, and the field graphs its octaves read
+        // over the macro lattice. The rest of a chunk's time is ours.
         void measure_floors(BodyTerrain const& terrain, u32 lod, u32 detail_octaves, u32 reps, SweepResult& result)
         {
             u32 const    axis  = 36;
@@ -287,7 +287,7 @@ namespace encke::terrain
             result.macro_nodes = static_cast<u32>(nodes);
 
             vector<FastNoise::SmartNode<>> graphs;
-            for (size_t channel = 0; channel < kFieldChannelCount; ++channel)
+            for (size_t channel = 0; channel < channels_read(detail_octaves); ++channel)
             {
                 graphs.push_back(FastNoise::NewFromEncodedNodeTree(terrain.macro.channels[channel].graph.c_str(),
                                                                    kFeatureSet));

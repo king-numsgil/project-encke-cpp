@@ -28,6 +28,14 @@ namespace encke::terrain
         {
             return (static_cast<size_t>(k) * count.y + j) * count.x + i;
         }
+
+    }
+
+    static_assert(static_cast<u32>(MacroChannel::Height) == 0 && static_cast<u32>(MacroChannel::DetailAmplitude) == 1 &&
+                  static_cast<u32>(MacroChannel::Ridge) == 2 && static_cast<u32>(MacroChannel::Persistence) == 3);
+    size_t channels_read(u32 octaves)
+    {
+        return octaves == 0 ? 1 : (octaves == 1 ? 3 : kFieldChannelCount);
     }
 
     BodyTerrain example_planet(i32 seed)
@@ -250,7 +258,7 @@ namespace encke::terrain
         array<f32, 7>       values{};
 
         // Split about the point itself: it need not be a grid point.
-        auto const fill_macro  = [&] { macro_.sample(p, voxel_size, x, y, z, macro_values_); };
+        auto const fill_macro  = [&](size_t channels) { macro_.sample(p, voxel_size, x, y, z, macro_values_, 0, channels); };
         auto const fill_octave = [&](u32 octave) {
             detail_.octave(octave, p, x, y, z, octave_values_);
         };
@@ -271,7 +279,9 @@ namespace encke::terrain
         array<f32, 1> const zero{{0.0f}};
         array<f32, 1>       value{};
 
-        auto const fill_macro  = [&] { macro_.sample(p, voxel_size, zero, zero, zero, macro_values_); };
+        auto const fill_macro  = [&](size_t channels) {
+            macro_.sample(p, voxel_size, zero, zero, zero, macro_values_, 0, channels);
+        };
         auto const fill_octave = [&](u32 octave) {
             detail_.octave(octave, p, zero, zero, zero, octave_values_);
         };
@@ -336,7 +346,9 @@ namespace encke::terrain
         f64 const     voxel  = static_cast<f64>(box.stride) * terrain_.base_voxel_size;
 
         // The macro layer by axis, since the box is a grid.
-        auto const fill_macro  = [&] { macro_.sample_grid(origin, voxel, axis_x_, axis_y_, axis_z_, macro_values_); };
+        auto const fill_macro  = [&](size_t channels) {
+            macro_.sample_grid(origin, voxel, axis_x_, axis_y_, axis_z_, macro_values_, 0, channels);
+        };
         auto const fill_octave = [&](u32 octave) { box_octave(box, octave); };
         return combine(origin, offset_x_, offset_y_, offset_z_, fill_macro,
                        detail_octaves, fill_octave, snapshot_octaves, snapshot, out);
@@ -460,18 +472,22 @@ namespace encke::terrain
 
     LayerTiming TerrainSampler::combine(f64vec3 const& origin,
                                         span<f32 const> x, span<f32 const> y, span<f32 const> z,
-                                        function<void()> const& fill_macro,
+                                        function<void(size_t)> const& fill_macro,
                                         u32 detail_octaves, function<void(u32)> const& fill_octave,
                                         u32 snapshot_octaves, span<f32> snapshot,
                                         span<f32> out)
     {
-        size_t const count = out.size();
+        size_t const count       = out.size();
+        u32 const    octaves     = std::min(detail_octaves, static_cast<u32>(detail_.octaves().size()));
+        bool const   with_detail = octaves > 0;
 
         Clock::time_point const start = Clock::now();
-        fill_macro();
+        fill_macro(channels_read(octaves));
         Clock::time_point const macro_done = Clock::now();
         u64 const               evaluations = macro_.last_evaluations();
 
+        // Only the channels channels_read() counted were sampled; the rest
+        // hold whatever an earlier call left and are not read below.
         span<f32 const> const height      = macro_values_[MacroChannel::Height];
         span<f32 const> const amplitude   = macro_values_[MacroChannel::DetailAmplitude];
         span<f32 const> const ridge       = macro_values_[MacroChannel::Ridge];
@@ -509,7 +525,13 @@ namespace encke::terrain
                 // their difference is small enough for f32.
                 f64vec3 const point  = origin + f64vec3{x[i], y[i], z[i]};
                 f64 const     above  = glm::length(point) - terrain_.radius;
-                f64 const     ground = static_cast<f64>(height[i]) + static_cast<f64>(amplitude[i]) * static_cast<f64>(detail_sum_[i]);
+                // With no octaves the sum is zero and the height stands
+                // alone: the same value as adding amplitude * 0 to it, to
+                // the bit, since `above` is never a negative zero for a
+                // zero ground's sign to show through.
+                f64 const     ground = with_detail ? static_cast<f64>(height[i]) + static_cast<f64>(amplitude[i]) *
+                                                                                       static_cast<f64>(detail_sum_[i])
+                                                   : static_cast<f64>(height[i]);
                 f64           value  = above - ground;
                 for (Flatten const* const flatten : flattens_)
                 {
@@ -519,7 +541,6 @@ namespace encke::terrain
             }
         };
 
-        u32 const octaves     = std::min(detail_octaves, static_cast<u32>(detail_.octaves().size()));
         u32 const snapshot_at = std::min(snapshot_octaves, octaves);
         bool const snapshotting = !snapshot.empty();
 
@@ -541,7 +562,16 @@ namespace encke::terrain
                 f32 const shaped = n + r * ((1.0f - 2.0f * std::abs(n)) - n);
 
                 detail_sum_[i] += weight_[i] * shaped;
-                weight_[i]     *= std::clamp(persistence[i], 0.0f, 1.0f);
+            }
+
+            // The next octave's weights; after the last there is none, and
+            // with one octave the persistence was not sampled.
+            if (octave + 1 < octaves)
+            {
+                for (size_t i = 0; i < count; ++i)
+                {
+                    weight_[i] *= std::clamp(persistence[i], 0.0f, 1.0f);
+                }
             }
 
             // The sum so far is exactly what a coarser chunk, stopping here,

@@ -103,6 +103,13 @@ namespace encke::terrain
         f32vec3 gradient{0.0f};
     };
 
+    // How many of the field's macro channels a sum of `octaves` detail
+    // octaves reads, counted from Height; the sampler evaluates no others.
+    // With none, the amplitude would scale a sum of zero and the ridge
+    // shape nothing; with one, the persistence would weigh a second octave
+    // that never comes. From LOD 9 up that is most of a chunk's graphs.
+    size_t channels_read(u32 octaves);
+
     // Seconds spent by the last call: in each layer over the chunk's own
     // samples, and on the coarse output (the parent grid points past the
     // chunk's far faces, and the gradients). And how many graph evaluations
@@ -185,12 +192,13 @@ namespace encke::terrain
         void box_octave(GridBox const& box, u32 octave);
 
         // The macro layer, the detail octaves and the composition, over the
-        // points origin + (x[i], y[i], z[i]). fill_macro() leaves the field's
-        // macro channels at every point in macro_values_, and fill_octave(k)
-        // octave k's noise in octave_values_.
+        // points origin + (x[i], y[i], z[i]). fill_macro(n) leaves the field's
+        // first n macro channels at every point in macro_values_, n being as
+        // many as the octave count reads, and fill_octave(k) octave k's
+        // noise in octave_values_.
         LayerTiming combine(f64vec3 const& origin,
                             span<f32 const> x, span<f32 const> y, span<f32 const> z,
-                            function<void()> const& fill_macro,
+                            function<void(size_t)> const& fill_macro,
                             u32 detail_octaves, function<void(u32)> const& fill_octave,
                             u32 snapshot_octaves, span<f32> snapshot,
                             span<f32> out);

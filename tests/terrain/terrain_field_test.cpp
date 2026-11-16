@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <initializer_list>
 #include <random>
 
 namespace encke::terrain
@@ -342,6 +344,64 @@ namespace encke::terrain
             CAPTURE(lod, worst_value, worst_gradient);
             CHECK(worst_value < kMetres);
             CHECK(worst_gradient < 2.0 * kMetres);
+        }
+    }
+
+    TEST_CASE("a chunk samples only the macro channels its octaves read", "[terrain]")
+    {
+        // The example planet, the same with another persistence, and the
+        // same with every detail channel another.
+        BodyTerrain const plain = example_planet(kSeed);
+        auto const        with  = [&](std::initializer_list<MacroChannel> channels) {
+            BodyTerrain terrain = plain;
+            for (MacroChannel const channel : channels)
+            {
+                MacroChannelSpec& spec = terrain.macro.channels[static_cast<size_t>(channel)];
+                spec.scale *= 0.5f;
+                spec.bias  += 0.125f;
+            }
+            return terrain;
+        };
+        TerrainSampler sampler{plain};
+        TerrainSampler other_persistence{with({MacroChannel::Persistence})};
+        TerrainSampler other_detail{with({MacroChannel::DetailAmplitude, MacroChannel::Ridge, MacroChannel::Persistence})};
+
+        auto const same = [](Chunk const& a, Chunk const& b) {
+            auto const bits = [](auto const& x, auto const& y) {
+                return x.size() == y.size() && std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0;
+            };
+            return bits(a.samples, b.samples) && bits(a.coarse_values, b.coarse_values) &&
+                   bits(a.coarse_gradients, b.coarse_gradients);
+        };
+
+        // A chunk a voxel wide in lattice cells has 37^3 nodes, one a sample
+        // and one past.
+        u64 const nodes = 37 * 37 * 37;
+
+        struct Case
+        {
+            u32  lod;
+            u32  octaves;
+            u64  channels;
+            bool persistence_shows;
+            bool detail_shows;
+        };
+        for (Case const& c : {Case{8, 2, 4, true, true}, Case{9, 1, 3, false, true}, Case{10, 1, 3, false, true},
+                              Case{11, 0, 1, false, false}, Case{14, 0, 1, false, false}})
+        {
+            ChunkRequest const request = sampler.chunk(surface_chunk(plain, c.lod, f64vec3{0.53, 0.71, -0.46}), c.lod);
+            CAPTURE(c.lod);
+            REQUIRE(request.detail_octaves == c.octaves);
+
+            vector<f32> samples(request.sample_count());
+            sampler.sample_chunk(request, samples);
+            CHECK(sampler.last_timing().macro_evaluations == c.channels * nodes);
+
+            // What was not sampled does not show, in the chunk or in what it
+            // hands the geomorph; what was, does.
+            Chunk const chunk = sample(sampler, request, true);
+            CHECK(same(chunk, sample(other_persistence, request, true)) != c.persistence_shows);
+            CHECK(same(chunk, sample(other_detail, request, true)) != c.detail_shows);
         }
     }
 }

@@ -41,6 +41,12 @@ own lattice split, and floor(o * f * L) is not L * floor(o * f).
   four voxels apart, has a lattice four voxels apart from LOD 6 up, 11 nodes
   a side for its 10 points, where the chunk it probes has 37. Its points are
   nodes of the chunk's lattice too, so the values are the chunk's.
+- A sum samples only the macro channels its octave count reads
+  (`channels_read`): Height alone with no octaves, from LOD 11 up, where
+  the amplitude would scale a sum of zero; Height, DetailAmplitude and
+  Ridge with one, LODs 9 and 10, where the persistence would weigh a second
+  octave that never comes. The values are what all four gave, to the bit,
+  and `--sweep`'s hash did not move.
 - Boxes of grid points go through per-axis paths (`MacroField::sample_grid`
   interpolates separably, `box_octave` copies a block's row segments),
   because per-sample `i64` arithmetic and scatters kept the loops scalar.
@@ -339,7 +345,8 @@ until the camera nears one.
 - A cold start at the surface meshes thousands of chunks; it takes seconds.
   The probe proves only about a quarter of its jobs empty; more than a third
   are sampled in full and then mesh nothing. From LOD 8 up a chunk's time is
-  mostly the macro graphs, at 37^3 lattice nodes, one per sample.
+  mostly the macro graphs, at 37^3 lattice nodes, one per sample, and from
+  LOD 11 up that is the height graph alone, the costliest of the four.
 - The cull cache grows with where the camera has been; nothing prunes it.
 - `GeometryPool::release` and the renderer's side of mesh release are not
   driven by any test.
