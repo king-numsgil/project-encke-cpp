@@ -153,7 +153,7 @@ namespace encke::terrain
 
         LayerTiming const own = evaluate_box(box, request.detail_octaves, request.coarse_octaves,
                                              snapshot, out.first(box.size()));
-        timing_ = LayerTiming{.macro = own.macro, .detail = own.detail};
+        timing_ = own;
 
         if (coarse == nullptr)
         {
@@ -290,8 +290,15 @@ namespace encke::terrain
                                         span<f32 const> y, span<f32 const> z, span<f32> temperature,
                                         span<f32> moisture)
     {
-        auto const first = static_cast<size_t>(MacroChannel::Temperature);
+        auto const              first = static_cast<size_t>(MacroChannel::Temperature);
+        Clock::time_point const start = Clock::now();
         macro_.sample(origin, voxel_size, x, y, z, climate_values_, first, kMacroChannelCount);
+        timing_ = LayerTiming{
+            .macro             = seconds(start, Clock::now()),
+            .detail            = 0.0,
+            .coarse            = 0.0,
+            .macro_evaluations = macro_.last_evaluations(),
+        };
 
         span<f32 const> const t = climate_values_[MacroChannel::Temperature];
         span<f32 const> const m = climate_values_[MacroChannel::Moisture];
@@ -463,6 +470,7 @@ namespace encke::terrain
         Clock::time_point const start = Clock::now();
         fill_macro();
         Clock::time_point const macro_done = Clock::now();
+        u64 const               evaluations = macro_.last_evaluations();
 
         span<f32 const> const height      = macro_values_[MacroChannel::Height];
         span<f32 const> const amplitude   = macro_values_[MacroChannel::DetailAmplitude];
@@ -548,8 +556,10 @@ namespace encke::terrain
         Clock::time_point const detail_done = Clock::now();
 
         return LayerTiming{
-            .macro  = seconds(start, macro_done),
-            .detail = seconds(macro_done, detail_done),
+            .macro             = seconds(start, macro_done),
+            .detail            = seconds(macro_done, detail_done),
+            .coarse            = 0.0,
+            .macro_evaluations = evaluations,
         };
     }
 }

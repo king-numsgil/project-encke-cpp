@@ -116,6 +116,10 @@ namespace encke::terrain
         SurfaceMapLayout map_layout{};
         u32              map_lod             = 16;
         f64              impostor_hysteresis = 1.25;
+
+        // Where baked surface maps are kept between runs (surface_map.hpp);
+        // empty, every run bakes.
+        std::filesystem::path map_cache{};
     };
 
     // Past this distance from a body's centre no root node would split, so
@@ -240,15 +244,18 @@ namespace encke::terrain
         struct Body;
         struct Node;
         struct Bake;
+        struct JobStats;
 
         void submit(std::shared_ptr<Body> const& body, NodeKey const& key);
         void complete(std::shared_ptr<Body> const& body, NodeKey const& key,
-                      std::shared_ptr<MeshData> const& data, bool skipped);
+                      std::shared_ptr<MeshData> const& data, JobStats const& stats);
 
-        // The six faces of a body's surface map, one job each; the last to
-        // finish lays out the atlas, and finish_map takes it on the main
-        // thread.
+        // A body's surface map: from settings.map_cache if its file there
+        // holds, and otherwise the six faces, one job each; the last to
+        // finish lays out the atlas and writes the file, and finish_map
+        // takes the atlas on the main thread.
         void bake_map(std::shared_ptr<Body> const& body);
+        void bake_faces(std::shared_ptr<Body> const& body, std::shared_ptr<Bake> const& bake);
         void finish_map(Body& body, Bake& bake, entt::registry& registry);
 
         // Takes a node off screen: its entity destroyed, its mesh released.

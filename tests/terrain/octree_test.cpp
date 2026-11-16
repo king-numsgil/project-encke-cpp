@@ -35,6 +35,7 @@ namespace encke::terrain
             .map_layout = SurfaceMapLayout{.face = 32, .border = 4},
             .map_lod = 11,
             .impostor_hysteresis = 1.25,
+            .map_cache = {},
         };
 
         bool contains(NodeKey const& outer, NodeKey const& inner)

@@ -1,8 +1,12 @@
 #include "core/pch.hpp"
 
 #include "app.hpp"
+#include "core/log.hpp"
 #include "platform/input_probe.hpp"
 #include "terrain/benchmark.hpp"
+
+#include <filesystem>
+#include <system_error>
 
 int main(int argc, char** argv)
 {
@@ -20,6 +24,22 @@ int main(int argc, char** argv)
         if (string_view{argv[i]} == "--out" && i + 1 < argc)
         {
             options.output = std::filesystem::path{argv[++i]};
+            continue;
+        }
+        // Before anything reads it: every baked surface map goes, and this
+        // run bakes its own.
+        if (string_view{argv[i]} == "--clear-cache")
+        {
+            std::error_code  error;
+            std::uintmax_t const removed = std::filesystem::remove_all(ENCKE_CACHE_DIR, error);
+            if (error)
+            {
+                encke::log::error("could not clear %s: %s", ENCKE_CACHE_DIR, error.message().c_str());
+            }
+            else
+            {
+                encke::log::info("cleared %s, %llu entries", ENCKE_CACHE_DIR, static_cast<unsigned long long>(removed));
+            }
             continue;
         }
         if (string_view{argv[i]} == "--input-probe")

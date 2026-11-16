@@ -107,6 +107,7 @@ docs/                 subsystem design; see above
 ports/                vcpkg overlay ports: fastnoise2 (three patches), joltphysics
 assets/               textures/ (ambientCG), models/, torchship/, input/ (default bindings);
                       binaries in Git LFS
+cache/                baked surface maps, gitignored; `encke --clear-cache` empties it
 ```
 
 **Includes are always full paths from `src/`** — `#include "vulkan/device.hpp"`,
@@ -227,6 +228,17 @@ share a process, and an `interactive` one must come last.
   quits (`boxes.json` is one).
 - Clustered against brute force (`debug_views.json`) is the check for any
   lighting or clustering change.
+- Baked surface maps are kept in `cache/` at the root, gitignored, shared by
+  every preset, and scenarios read them. **Keep the cache from run to run**:
+  it is what spares each cold start the bake, and a file invalidates itself
+  when the terrain spec's hash or its canary rows differ
+  (`docs/terrain.md`), which covers a change of seed, graphs, layout, ground
+  textures or noise arithmetic. Do not clear it as routine, before a
+  scenario run or to chase an unrelated diff. The one case that warrants
+  `scenarios\run.ps1 -ClearCache` (`encke --clear-cache`) is a change to
+  `ground_materials` or to the bake's own code (`terrain/surface_map`) whose
+  captures show no diff: the canaries are a sample of rows and can miss it.
+  Clear once then, and keep the cache again after.
 - Under clang-sanitize the binary needs `F:\msys2\clang64\bin` on PATH for
   the ASan runtime, or it exits with `0xC0000135`.
 

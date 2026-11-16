@@ -5,6 +5,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <filesystem>
+#include <fstream>
+
 namespace encke::terrain
 {
     TEST_CASE("a surface map face's (s, t) and direction are inverses", "[terrain][surface_map]")
@@ -92,5 +95,140 @@ namespace encke::terrain
         CHECK(albedo.height == layout.height());
         // Face 5's last texel is the atlas's last.
         CHECK(std::equal(surface.rgba.end() - 4, surface.rgba.end(), tiles[5].surface.end() - 4));
+    }
+
+    namespace
+    {
+        // The example planet shrunk to a map that bakes in a moment.
+        SurfaceMapLayout const kSmall{.face = 24, .border = 2};
+
+        GroundLook small_look()
+        {
+            GroundLook look;
+            for (size_t set = 0; set < kGroundSetCount; ++set)
+            {
+                look.albedo[set]    = f32vec3{0.1f * static_cast<f32>(set + 1)};
+                look.roughness[set] = 0.5f + 0.1f * static_cast<f32>(set);
+            }
+            return look;
+        }
+
+        void bake_atlas(BodyTerrain const& terrain, GroundLook const& look, Pixels& albedo, Pixels& surface)
+        {
+            array<SurfaceTile, 6> tiles;
+            for (u32 face = 0; face < 6; ++face)
+            {
+                bake_face(terrain, look, kSmall, face, tiles[face]);
+            }
+            assemble_atlas(tiles, kSmall, albedo, surface);
+        }
+    }
+
+    TEST_CASE("surface map rows baked alone are the face's own rows", "[terrain][surface_map]")
+    {
+        BodyTerrain const terrain = example_planet(7);
+        GroundLook const  look    = small_look();
+        size_t const      row     = size_t{kSmall.tile()} * 4;
+
+        for (u32 face = 0; face < 6; ++face)
+        {
+            SurfaceTile whole;
+            bake_face(terrain, look, kSmall, face, whole);
+
+            SurfaceTile part;
+            bake_rows(terrain, look, kSmall, face, 5, 3, part);
+            REQUIRE(part.albedo.size() == 3 * row);
+            CAPTURE(face);
+            CHECK(std::equal(part.albedo.begin(), part.albedo.end(), whole.albedo.begin() + 5 * static_cast<std::ptrdiff_t>(row)));
+            CHECK(std::equal(part.surface.begin(), part.surface.end(), whole.surface.begin() + 5 * static_cast<std::ptrdiff_t>(row)));
+        }
+    }
+
+    TEST_CASE("a surface map's key and canaries follow what the bake is given", "[terrain][surface_map]")
+    {
+        BodyTerrain const terrain = example_planet(7);
+        GroundLook const  look    = small_look();
+        u64 const         key     = surface_map_key(terrain, look, kSmall);
+        vector<u8> const  canaries = bake_canaries(terrain, look, kSmall);
+
+        CHECK(key == surface_map_key(example_planet(7), small_look(), kSmall));
+        CHECK(canaries == bake_canaries(example_planet(7), small_look(), kSmall));
+
+        CHECK(key != surface_map_key(example_planet(8), look, kSmall));
+        CHECK(key != surface_map_key(terrain, look, SurfaceMapLayout{.face = 24, .border = 4}));
+
+        GroundLook other = look;
+        other.albedo[2].g += 0.01f;
+        CHECK(key != surface_map_key(terrain, other, kSmall));
+
+        BodyTerrain higher = terrain;
+        higher.macro.channels[static_cast<size_t>(MacroChannel::Height)].scale = 5'001.0f;
+        CHECK(key != surface_map_key(higher, look, kSmall));
+
+        // The detail layer's channels are not in the map, so not in its key.
+        BodyTerrain rougher = terrain;
+        rougher.macro.channels[static_cast<size_t>(MacroChannel::DetailAmplitude)].scale = 50.0f;
+        CHECK(key == surface_map_key(rougher, look, kSmall));
+
+        // The canaries hold values no byte of the map shows a metre's change
+        // in: a change to the arithmetic, which is what they are for.
+        BodyTerrain shifted = terrain;
+        shifted.macro.channels[static_cast<size_t>(MacroChannel::Height)].bias += 1.0f;
+        CHECK(canaries != bake_canaries(shifted, look, kSmall));
+    }
+
+    TEST_CASE("a cached surface map loads only as the map it was saved as", "[terrain][surface_map]")
+    {
+        BodyTerrain const terrain  = example_planet(7);
+        GroundLook const  look     = small_look();
+        u64 const         key      = surface_map_key(terrain, look, kSmall);
+        vector<u8> const  canaries = bake_canaries(terrain, look, kSmall);
+
+        Pixels albedo;
+        Pixels surface;
+        bake_atlas(terrain, look, albedo, surface);
+
+        std::filesystem::path const directory = std::filesystem::temp_directory_path() / "encke_surface_map_test";
+        std::filesystem::remove_all(directory);
+        std::filesystem::path const file = surface_map_file(directory, key);
+
+        Pixels loaded_albedo;
+        Pixels loaded_surface;
+        CHECK_FALSE(load_surface_map(file, key, canaries, kSmall, loaded_albedo, loaded_surface));
+
+        REQUIRE(save_surface_map(file, key, canaries, kSmall, albedo, surface));
+        REQUIRE(load_surface_map(file, key, canaries, kSmall, loaded_albedo, loaded_surface));
+        CHECK(loaded_albedo.width == albedo.width);
+        CHECK(loaded_albedo.height == albedo.height);
+        CHECK(loaded_albedo.rgba == albedo.rgba);
+        CHECK(loaded_surface.rgba == surface.rgba);
+
+        // Another key, another layout, and canaries one value off, as after
+        // a change to the terrain code.
+        Pixels none;
+        CHECK_FALSE(load_surface_map(file, key + 1, canaries, kSmall, none, none));
+        CHECK_FALSE(load_surface_map(file, key, canaries, SurfaceMapLayout{.face = 24, .border = 4}, none, none));
+        vector<u8> changed = canaries;
+        changed[changed.size() / 2] ^= 1;
+        CHECK_FALSE(load_surface_map(file, key, changed, kSmall, none, none));
+        CHECK(none.rgba.empty());
+
+        // A byte of the atlas flipped on disk, and a file cut short.
+        auto const size = std::filesystem::file_size(file);
+        {
+            std::fstream damage{file, std::ios::binary | std::ios::in | std::ios::out};
+            damage.seekg(static_cast<std::streamoff>(size) - 9);
+            char const byte = static_cast<char>(damage.get());
+            damage.seekp(static_cast<std::streamoff>(size) - 9);
+            damage.put(static_cast<char>(byte ^ 1));
+        }
+        CHECK_FALSE(load_surface_map(file, key, canaries, kSmall, none, none));
+
+        REQUIRE(save_surface_map(file, key, canaries, kSmall, albedo, surface));
+        REQUIRE(load_surface_map(file, key, canaries, kSmall, loaded_albedo, loaded_surface));
+        std::filesystem::resize_file(file, size - 16);
+        CHECK_FALSE(load_surface_map(file, key, canaries, kSmall, none, none));
+
+        std::filesystem::remove_all(directory);
     }
 }

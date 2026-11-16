@@ -129,6 +129,64 @@ namespace encke::terrain
             std::printf("  checksum %.6g\n", checksum);
         }
 
+        // Each macro graph alone over a lattice box like a coarse chunk's,
+        // 37^3 nodes a kilometre apart at the surface, against one Simplex
+        // over the same nodes: what each graph costs in noise evaluations.
+        void run_graphs(BodyTerrain const& terrain)
+        {
+            constexpr u32 kAxis = 37;
+            constexpr u32 kReps = 50;
+            size_t const  nodes = static_cast<size_t>(kAxis) * kAxis * kAxis;
+            vector<f32>   x(nodes), y(nodes), z(nodes), values(nodes);
+            size_t        n = 0;
+            for (u32 k = 0; k < kAxis; ++k)
+            {
+                for (u32 j = 0; j < kAxis; ++j)
+                {
+                    for (u32 i = 0; i < kAxis; ++i)
+                    {
+                        x[n] = static_cast<f32>(static_cast<f64>(i) * 1024.0);
+                        y[n] = static_cast<f32>(terrain.radius + static_cast<f64>(j) * 1024.0);
+                        z[n] = static_cast<f32>(static_cast<f64>(k) * 1024.0);
+                        ++n;
+                    }
+                }
+            }
+
+            f64        sink = 0.0;
+            auto const time = [&](string const& encoded) {
+                FastNoise::SmartNode<> const graph = FastNoise::NewFromEncodedNodeTree(encoded.c_str(), kFeatureSet);
+                graph->GenPositionArray3D(values.data(), static_cast<int>(nodes), x.data(), y.data(), z.data(),
+                                          0.0f, 0.0f, 0.0f, 1);
+                Clock::time_point const start = Clock::now();
+                for (u32 rep = 0; rep < kReps; ++rep)
+                {
+                    graph->GenPositionArray3D(values.data(), static_cast<int>(nodes), x.data(), y.data(), z.data(),
+                                              0.0f, 0.0f, 0.0f, static_cast<int>(rep));
+                    sink += static_cast<f64>(values[nodes / 2]);
+                }
+                return std::chrono::duration<f64, std::nano>(Clock::now() - start).count() /
+                       (static_cast<f64>(nodes) * kReps);
+            };
+
+            GraphBuilder  g;
+            f64 const     simplex = time(g.encode(g.simplex(60'000.0f, 0)));
+            std::printf("macro graphs, ns per node, and in Simplex evaluations (one is %.2f ns):\n", simplex);
+            array<char const*, kMacroChannelCount> const names{
+                {"height", "detail amplitude", "ridge", "persistence", "temperature", "moisture"}};
+            for (size_t channel = 0; channel < kMacroChannelCount; ++channel)
+            {
+                string const& encoded = terrain.macro.channels[channel].graph;
+                if (encoded.empty())
+                {
+                    continue;
+                }
+                f64 const ns = time(encoded);
+                std::printf("  %-17s %7.2f  %5.1f\n", names[channel], ns, ns / simplex);
+            }
+            std::printf("  checksum %.6g\n", sink);
+        }
+
         // LOD 20's chunk is wider than the Earth; the octree's roots are
         // below it.
         constexpr u32 kSweepLods = 21;
@@ -392,6 +450,7 @@ namespace encke::terrain
             TerrainSampler sampler{example_planet(1337)};
             std::printf("terrain noise, one thread\n");
             print_octaves(sampler);
+            run_graphs(sampler.terrain());
             run_lod(sampler, 0);
             run_lod(sampler, 4);
             return EXIT_SUCCESS;

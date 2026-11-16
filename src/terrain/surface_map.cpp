@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <system_error>
 
 namespace encke::terrain
 {
@@ -143,6 +146,12 @@ namespace encke::terrain
     void bake_face(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout, u32 face,
                    SurfaceTile& tile)
     {
+        bake_rows(terrain, look, layout, face, 0, layout.tile(), tile);
+    }
+
+    void bake_rows(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout, u32 face,
+                   u32 first_row, u32 row_count, SurfaceTile& tile, vector<f32>* raw)
+    {
         // Each texel averages kSub x kSub sub-samples: the macro layer has
         // spurs a few kilometres wide, under a texel, and one sample a texel
         // turns them into speckle wherever slope decides the ground. The
@@ -195,6 +204,10 @@ namespace encke::terrain
                 z[c]            = static_cast<f32>(p.z);
             }
             macro.sample_points(x, y, z, values, height, height + 1);
+            if (raw != nullptr)
+            {
+                raw->insert(raw->end(), values.channels[height].begin(), values.channels[height].end());
+            }
             for (u32 c = 0; c < grid; ++c)
             {
                 row.points[c] = directions[c] * (radius + static_cast<f64>(values.channels[height][c]));
@@ -202,8 +215,8 @@ namespace encke::terrain
             return row;
         };
 
-        tile.albedo.assign(size_t{side} * side * 4, 255);
-        tile.surface.assign(size_t{side} * side * 4, 255);
+        tile.albedo.assign(size_t{row_count} * side * 4, 255);
+        tile.surface.assign(size_t{row_count} * side * 4, 255);
 
         auto const temperature = static_cast<size_t>(MacroChannel::Temperature);
         auto const moisture    = static_cast<size_t>(MacroChannel::Moisture);
@@ -215,7 +228,7 @@ namespace encke::terrain
         vector<f64vec3>                     centres(side);
         vector<f32>                         cx(side), cy(side), cz(side);
 
-        for (u32 texel_row = 0; texel_row < side; ++texel_row)
+        for (u32 texel_row = first_row; texel_row < first_row + row_count; ++texel_row)
         {
             u32 const            first = texel_row * kSub;
             array<SubRow const*, kSub + 2> around{};
@@ -249,6 +262,11 @@ namespace encke::terrain
                 cz[column]      = static_cast<f32>(centres[column].z);
             }
             macro.sample_points(cx, cy, cz, values, temperature, moisture + 1);
+            if (raw != nullptr)
+            {
+                raw->insert(raw->end(), values.channels[temperature].begin(), values.channels[temperature].end());
+                raw->insert(raw->end(), values.channels[moisture].begin(), values.channels[moisture].end());
+            }
 
             for (u32 column = 0; column < side; ++column)
             {
@@ -282,7 +300,7 @@ namespace encke::terrain
                 f64vec3 const along_s   = face_tangent(face, direction);
                 f64vec3 const along_t   = glm::cross(direction, along_s);
 
-                size_t const texel = (size_t{texel_row} * side + column) * 4;
+                size_t const texel = (size_t{texel_row - first_row} * side + column) * 4;
                 tile.albedo[texel + 0]  = linear_to_srgb_byte(albedo.r);
                 tile.albedo[texel + 1]  = linear_to_srgb_byte(albedo.g);
                 tile.albedo[texel + 2]  = linear_to_srgb_byte(albedo.b);
@@ -314,5 +332,206 @@ namespace encke::terrain
                 std::memcpy(surface.rgba.data() + to, tiles[face].surface.data() + from, size_t{side} * 4);
             }
         }
+    }
+
+    namespace
+    {
+        constexpr array<char, 8> kCacheMagic{{'E', 'N', 'C', 'K', 'E', 'M', 'A', 'P'}};
+        constexpr u32            kCacheVersion = 1;
+
+        // The file: this, the canaries, the albedo atlas, the surface atlas.
+        struct CacheHeader
+        {
+            array<char, 8> magic{};
+            u32            version      = 0;
+            u32            face         = 0;
+            u32            border       = 0;
+            u32            canary_bytes = 0;
+            u64            key          = 0;
+            u64            payload_hash = 0;
+        };
+        static_assert(sizeof(CacheHeader) == 40);
+
+        constexpr u64 kFnvBasis = 0xcbf29ce484222325ull;
+        constexpr u64 kFnvPrime = 0x100000001b3ull;
+
+        // FNV-1a's mix, eight bytes at a step: a checksum over tens of
+        // megabytes, not a hash anyone attacks.
+        void hash_bytes(u64& hash, span<u8 const> bytes)
+        {
+            size_t at = 0;
+            for (; at + 8 <= bytes.size(); at += 8)
+            {
+                u64 word = 0;
+                std::memcpy(&word, bytes.data() + at, 8);
+                hash = (hash ^ word) * kFnvPrime;
+            }
+            for (; at < bytes.size(); ++at)
+            {
+                hash = (hash ^ bytes[at]) * kFnvPrime;
+            }
+        }
+
+        template <typename T>
+        void hash_value(u64& hash, T const& value)
+        {
+            hash_bytes(hash, span<u8 const>{reinterpret_cast<u8 const*>(&value), sizeof(T)});
+        }
+
+        u64 payload_hash(Pixels const& albedo, Pixels const& surface)
+        {
+            u64 hash = kFnvBasis;
+            hash_bytes(hash, albedo.rgba);
+            hash_bytes(hash, surface.rgba);
+            return hash;
+        }
+    }
+
+    u64 surface_map_key(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout)
+    {
+        u64 hash = kFnvBasis;
+        hash_value(hash, kCacheVersion);
+        hash_value(hash, terrain.radius);
+        hash_value(hash, terrain.seed);
+        // The channels bake_rows reads, and no other: a change to the detail
+        // layer's does not show in the map.
+        for (MacroChannel const which : {MacroChannel::Height, MacroChannel::Temperature, MacroChannel::Moisture})
+        {
+            MacroChannelSpec const& channel = terrain.macro.channels[static_cast<size_t>(which)];
+            hash_value(hash, channel.graph.size());
+            hash_bytes(hash, span<u8 const>{reinterpret_cast<u8 const*>(channel.graph.data()), channel.graph.size()});
+            hash_value(hash, channel.scale);
+            hash_value(hash, channel.bias);
+        }
+        hash_value(hash, layout.face);
+        hash_value(hash, layout.border);
+        for (size_t set = 0; set < kGroundSetCount; ++set)
+        {
+            hash_value(hash, look.albedo[set].r);
+            hash_value(hash, look.albedo[set].g);
+            hash_value(hash, look.albedo[set].b);
+            hash_value(hash, look.roughness[set]);
+        }
+        return hash;
+    }
+
+    vector<u8> bake_canaries(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout)
+    {
+        constexpr u32 kRows = 4;
+
+        vector<u8>  canaries;
+        vector<f32> raw;
+        SurfaceTile row;
+        for (u32 face = 0; face < 6; ++face)
+        {
+            for (u32 k = 0; k < kRows; ++k)
+            {
+                raw.clear();
+                bake_rows(terrain, look, layout, face, layout.tile() * (2 * k + 1) / (2 * kRows), 1, row, &raw);
+
+                u8 const* const raw_bytes = reinterpret_cast<u8 const*>(raw.data());
+                canaries.insert(canaries.end(), row.albedo.begin(), row.albedo.end());
+                canaries.insert(canaries.end(), row.surface.begin(), row.surface.end());
+                canaries.insert(canaries.end(), raw_bytes, raw_bytes + raw.size() * sizeof(f32));
+            }
+        }
+        return canaries;
+    }
+
+    std::filesystem::path surface_map_file(std::filesystem::path const& directory, u64 key)
+    {
+        array<char, 40> name{};
+        std::snprintf(name.data(), name.size(), "surface_map_%016llx.bin", static_cast<unsigned long long>(key));
+        return directory / name.data();
+    }
+
+    bool load_surface_map(std::filesystem::path const& file, u64 key, span<u8 const> canaries,
+                          SurfaceMapLayout const& layout, Pixels& albedo, Pixels& surface)
+    {
+        string const  name = file.filename().string();
+        std::ifstream in{file, std::ios::binary};
+        if (!in)
+        {
+            log::info("surface map: no cache at %s", file.string().c_str());
+            return false;
+        }
+
+        CacheHeader header{};
+        in.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!in || header.magic != kCacheMagic || header.version != kCacheVersion || header.key != key ||
+            header.face != layout.face || header.border != layout.border)
+        {
+            log::info("surface map: %s is not this map's cache", name.c_str());
+            return false;
+        }
+
+        // The same rows by the code as it is now. A difference means the
+        // terrain behind the file is not the terrain this build would bake.
+        vector<u8> stored(header.canary_bytes);
+        in.read(reinterpret_cast<char*>(stored.data()), static_cast<std::streamsize>(stored.size()));
+        if (!in || stored.size() != canaries.size() || !std::equal(stored.begin(), stored.end(), canaries.begin()))
+        {
+            log::info("surface map: %s was baked by other terrain code; its canaries differ", name.c_str());
+            return false;
+        }
+
+        size_t const bytes = size_t{layout.width()} * layout.height() * 4;
+        Pixels       cached_albedo{.width = layout.width(), .height = layout.height(), .rgba = vector<u8>(bytes)};
+        Pixels       cached_surface{.width = layout.width(), .height = layout.height(), .rgba = vector<u8>(bytes)};
+        in.read(reinterpret_cast<char*>(cached_albedo.rgba.data()), static_cast<std::streamsize>(bytes));
+        in.read(reinterpret_cast<char*>(cached_surface.rgba.data()), static_cast<std::streamsize>(bytes));
+        if (!in || in.peek() != std::ifstream::traits_type::eof() ||
+            payload_hash(cached_albedo, cached_surface) != header.payload_hash)
+        {
+            log::error("surface map: %s is damaged", name.c_str());
+            return false;
+        }
+
+        albedo  = std::move(cached_albedo);
+        surface = std::move(cached_surface);
+        return true;
+    }
+
+    bool save_surface_map(std::filesystem::path const& file, u64 key, span<u8 const> canaries,
+                          SurfaceMapLayout const& layout, Pixels const& albedo, Pixels const& surface)
+    {
+        CacheHeader const header{
+            .magic        = kCacheMagic,
+            .version      = kCacheVersion,
+            .face         = layout.face,
+            .border       = layout.border,
+            .canary_bytes = static_cast<u32>(canaries.size()),
+            .key          = key,
+            .payload_hash = payload_hash(albedo, surface),
+        };
+
+        // Written beside it and renamed over it, so a run that dies midway
+        // leaves the old file or none.
+        std::error_code       error;
+        std::filesystem::path partial = file;
+        partial += ".tmp";
+        std::filesystem::create_directories(file.parent_path(), error);
+        {
+            std::ofstream out{partial, std::ios::binary | std::ios::trunc};
+            out.write(reinterpret_cast<char const*>(&header), sizeof(header));
+            out.write(reinterpret_cast<char const*>(canaries.data()), static_cast<std::streamsize>(canaries.size()));
+            out.write(reinterpret_cast<char const*>(albedo.rgba.data()), static_cast<std::streamsize>(albedo.rgba.size()));
+            out.write(reinterpret_cast<char const*>(surface.rgba.data()), static_cast<std::streamsize>(surface.rgba.size()));
+            out.flush();
+            if (!out)
+            {
+                log::error("surface map: could not write %s", partial.string().c_str());
+                std::filesystem::remove(partial, error);
+                return false;
+            }
+        }
+        std::filesystem::rename(partial, file, error);
+        if (error)
+        {
+            log::error("surface map: could not move the cache to %s: %s", file.string().c_str(), error.message().c_str());
+            std::filesystem::remove(partial, error);
+            return false;
+        }
+        return true;
     }
 }

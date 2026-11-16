@@ -4,6 +4,8 @@
 #include "terrain/ground.hpp"
 #include "terrain/terrain_field.hpp"
 
+#include <filesystem>
+
 namespace encke::terrain
 {
     // A body's look from far off, baked once: its ground's colour, its
@@ -90,6 +92,14 @@ namespace encke::terrain
     void bake_face(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout, u32 face,
                    SurfaceTile& tile);
 
+    // Texel rows `first_row` to `first_row + row_count` - 1 of a face's tile,
+    // alone: the same bytes bake_face gives those rows. With `raw`, the
+    // macro values behind them are appended to it as the graphs gave them,
+    // before any rounding to bytes: each sub-sample row's heights, then each
+    // texel row's temperatures and moistures.
+    void bake_rows(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout, u32 face,
+                   u32 first_row, u32 row_count, SurfaceTile& tile, vector<f32>* raw = nullptr);
+
     // The lowest height the macro layer can reach, and the span from it to
     // the highest: its bias less and plus its scale, since the graphs stay
     // within [-1, 1]. The surface map's alpha runs across it.
@@ -98,4 +108,30 @@ namespace encke::terrain
     // The six tiles laid out as one atlas each.
     void assemble_atlas(span<SurfaceTile const> tiles, SurfaceMapLayout const& layout, Pixels& albedo,
                         Pixels& surface);
+
+    // The atlases on disk, so a bake is paid once per terrain and not once
+    // per run. A file is trusted on two counts.
+    //
+    // Its key, a hash of everything the bake is given: the radius, the seed,
+    // the three macro channels it reads, the layout, the ground sets' looks.
+    // The file is named by it, so each body has its own, and one whose spec
+    // has changed is not found.
+    //
+    // Its canaries, which catch what the key cannot: the code. They are four
+    // texel rows of every face baked by bake_rows, with the macro values
+    // under them unrounded, so a change to the graphs' arithmetic shows even
+    // where it moves no byte. A load bakes them again and compares; a file
+    // from before a change to FastNoise2, the graph builder, the ground
+    // rules or the bake itself differs and is baked over.
+    u64                   surface_map_key(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout);
+    vector<u8>            bake_canaries(BodyTerrain const& terrain, GroundLook const& look, SurfaceMapLayout const& layout);
+    std::filesystem::path surface_map_file(std::filesystem::path const& directory, u64 key);
+
+    // False, with the reason logged, if the file is missing, is another
+    // key's or layout's, has other canaries, or fails its checksum; the
+    // atlases are then untouched.
+    bool load_surface_map(std::filesystem::path const& file, u64 key, span<u8 const> canaries,
+                          SurfaceMapLayout const& layout, Pixels& albedo, Pixels& surface);
+    bool save_surface_map(std::filesystem::path const& file, u64 key, span<u8 const> canaries,
+                          SurfaceMapLayout const& layout, Pixels const& albedo, Pixels const& surface);
 }

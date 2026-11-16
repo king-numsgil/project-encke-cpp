@@ -552,6 +552,45 @@ namespace encke::terrain
         std::shared_ptr<std::atomic<f64>> priority;
     };
 
+    // What one meshing job did and where its time went, for the settle log.
+    struct TerrainOctree::JobStats
+    {
+        enum class Outcome : u32
+        {
+            Skipped,        // unwanted before it started
+            ProbedEmpty,    // certainly_empty said so
+            SampledEmpty,   // sampled in full, and no surface
+            Meshed,
+        };
+
+        Outcome     outcome = Outcome::Skipped;
+        LayerTiming probe{};
+        LayerTiming chunk{};
+        LayerTiming climate{};
+        f64         total = 0.0;
+    };
+
+    namespace
+    {
+        // Jobs at one LOD since the body last settled.
+        struct LodStats
+        {
+            array<u32, 4> jobs{};
+            LayerTiming   probe{};
+            LayerTiming   chunk{};
+            LayerTiming   climate{};
+            f64           total = 0.0;
+        };
+
+        void add(LayerTiming& sum, LayerTiming const& one)
+        {
+            sum.macro             += one.macro;
+            sum.detail            += one.detail;
+            sum.coarse            += one.coarse;
+            sum.macro_evaluations += one.macro_evaluations;
+        }
+    }
+
     struct TerrainOctree::Body
     {
         entt::entity                       entity = entt::null;
@@ -578,6 +617,7 @@ namespace encke::terrain
 
         bool              settled = false;
         Clock::time_point busy_since;
+        array<LodStats, 32> stats{};
 
         TerrainSampler& sampler(u32 worker)
         {
@@ -592,9 +632,18 @@ namespace encke::terrain
     struct TerrainOctree::Bake
     {
         array<SurfaceTile, 6> tiles;
+        // Each face's own seconds, written by its job.
+        array<f64, 6>         seconds{};
         std::atomic<u32>      left{6};
         Pixels                albedo;
         Pixels                surface;
+
+        // With a cache directory: the map's file, key and canaries, and
+        // whether the atlases came from the file.
+        std::filesystem::path file;
+        u64                   key = 0;
+        vector<u8>            canaries;
+        bool                  cached = false;
     };
 
     f64 impostor_distance(BodyTerrain const& terrain, OctreeSettings const& settings)
@@ -621,18 +670,24 @@ namespace encke::terrain
         std::shared_ptr<std::atomic<bool>> const wanted = node.wanted;
 
         pool_->submit([this, body, key, wanted](u32 worker) -> WorkerPool::Completion {
+            JobStats stats{};
             if (!wanted->load())
             {
-                return [this, body, key] { complete(body, key, nullptr, true); };
+                return [this, body, key, stats] { complete(body, key, nullptr, stats); };
             }
 
-            TerrainSampler&    sampler = body->sampler(worker);
-            ChunkRequest const request = sampler.chunk(key.origin, key.lod);
+            Clock::time_point const start   = Clock::now();
+            TerrainSampler&         sampler = body->sampler(worker);
+            ChunkRequest const      request = sampler.chunk(key.origin, key.lod);
 
             vector<f32> probe;
-            if (certainly_empty(sampler, request, probe))
+            bool const  empty = certainly_empty(sampler, request, probe);
+            stats.probe       = sampler.last_timing();
+            if (empty)
             {
-                return [this, body, key] { complete(body, key, std::make_shared<MeshData>(), false); };
+                stats.outcome = JobStats::Outcome::ProbedEmpty;
+                stats.total   = std::chrono::duration<f64>(Clock::now() - start).count();
+                return [this, body, key, stats] { complete(body, key, std::make_shared<MeshData>(), stats); };
             }
 
             // The parent LOD's field too, for the morph targets.
@@ -641,6 +696,7 @@ namespace encke::terrain
             vector<f32vec3>     coarse_gradients(request.coarse_count());
             CoarseSamples const coarse{coarse_values, coarse_gradients};
             sampler.sample_chunk(request, samples, &coarse);
+            stats.chunk = sampler.last_timing();
 
             SurfaceMesh mesh;
             surface_nets(samples, request.cells, body->terrain->voxel_size(key.lod), mesh, &coarse);
@@ -658,18 +714,30 @@ namespace encke::terrain
                 z[i] = mesh.positions[i].z;
             }
             sampler.sample_climate(corner, body->terrain->voxel_size(key.lod), x, y, z, temperature, moisture);
+            stats.climate = sampler.last_timing();
 
             auto data = std::make_shared<MeshData>();
             to_vertices(mesh, corner, body->terrain->radius, temperature, moisture, *data);
 
-            return [this, body, key, data] { complete(body, key, data, false); };
+            stats.outcome = data->indices.empty() ? JobStats::Outcome::SampledEmpty : JobStats::Outcome::Meshed;
+            stats.total   = std::chrono::duration<f64>(Clock::now() - start).count();
+            return [this, body, key, data, stats] { complete(body, key, data, stats); };
         }, node.priority);
     }
 
     void TerrainOctree::complete(std::shared_ptr<Body> const& body, NodeKey const& key,
-                                 std::shared_ptr<MeshData> const& data, bool skipped)
+                                 std::shared_ptr<MeshData> const& data, JobStats const& stats)
     {
         --body->in_flight;
+
+        LodStats& lod = body->stats[std::min<size_t>(key.lod, body->stats.size() - 1)];
+        ++lod.jobs[static_cast<size_t>(stats.outcome)];
+        add(lod.probe, stats.probe);
+        add(lod.chunk, stats.chunk);
+        add(lod.climate, stats.climate);
+        lod.total += stats.total;
+
+        bool const skipped = stats.outcome == JobStats::Outcome::Skipped;
 
         auto const found = body->nodes.find(key);
         if (found == body->nodes.end())
@@ -713,14 +781,44 @@ namespace encke::terrain
         body->map_started = true;
         body->map_since   = Clock::now();
 
-        auto const                        bake     = std::make_shared<Bake>();
+        auto const bake = std::make_shared<Bake>();
+        if (settings_.map_cache.empty())
+        {
+            bake_faces(body, bake);
+            return;
+        }
+
+        // From the cache if its file is this terrain's by this code; the
+        // canaries are a few rows' bake, and stay with the bake to head the
+        // file it writes otherwise. Ahead of every chunk: it is a few
+        // rows and a read, and behind the chunks underfoot a map already on
+        // disk would wait as long as a bake.
+        std::shared_ptr<GroundLook const> look   = ground_look_;
+        SurfaceMapLayout const            layout = settings_.map_layout;
+        pool_->submit([this, body, bake, look, layout, directory = settings_.map_cache](u32) -> WorkerPool::Completion {
+            bake->key      = surface_map_key(*body->terrain, *look, layout);
+            bake->canaries = bake_canaries(*body->terrain, *look, layout);
+            bake->file     = surface_map_file(directory, bake->key);
+            if (load_surface_map(bake->file, bake->key, bake->canaries, layout, bake->albedo, bake->surface))
+            {
+                bake->cached = true;
+                return [this, body, bake] { finish_map(*body, *bake, *registry_); };
+            }
+            return [this, body, bake] { bake_faces(body, bake); };
+        }, std::make_shared<std::atomic<f64>>(0.0));
+    }
+
+    void TerrainOctree::bake_faces(std::shared_ptr<Body> const& body, std::shared_ptr<Bake> const& bake)
+    {
         std::shared_ptr<GroundLook const> look     = ground_look_;
         SurfaceMapLayout const            layout   = settings_.map_layout;
         auto const                        priority = std::make_shared<std::atomic<f64>>(map_priority(*body->terrain, settings_));
         for (u32 face = 0; face < 6; ++face)
         {
             pool_->submit([this, body, bake, look, layout, face](u32) -> WorkerPool::Completion {
+                Clock::time_point const start = Clock::now();
                 bake_face(*body->terrain, *look, layout, face, bake->tiles[face]);
+                bake->seconds[face] = std::chrono::duration<f64>(Clock::now() - start).count();
                 // The last face lays out the atlas, off the main thread; the
                 // decrement orders every other face's writes before it.
                 if (bake->left.fetch_sub(1, std::memory_order_acq_rel) != 1)
@@ -729,6 +827,10 @@ namespace encke::terrain
                 }
                 assemble_atlas(bake->tiles, layout, bake->albedo, bake->surface);
                 bake->tiles = {};
+                if (!bake->file.empty())
+                {
+                    save_surface_map(bake->file, bake->key, bake->canaries, layout, bake->albedo, bake->surface);
+                }
                 return [this, body, bake] { finish_map(*body, *bake, *registry_); };
             }, priority);
         }
@@ -753,8 +855,22 @@ namespace encke::terrain
         };
         body.map = assets_->add_material(std::move(material));
 
-        log::info("terrain: surface map baked, %ux%u, %.1f ms", width, height,
-                  std::chrono::duration<f64, std::milli>(Clock::now() - body.map_since).count());
+        f64 faces = 0.0;
+        for (f64 const seconds : bake.seconds)
+        {
+            faces += seconds;
+        }
+        f64 const since = std::chrono::duration<f64, std::milli>(Clock::now() - body.map_since).count();
+        if (bake.cached)
+        {
+            log::info("terrain: surface map from %s, %ux%u, %.1f ms since asked", bake.file.filename().string().c_str(),
+                      width, height, since);
+        }
+        else
+        {
+            log::info("terrain: surface map baked, %ux%u, %.1f ms since asked, %.1f ms over its six faces", width,
+                      height, since, faces * 1000.0);
+        }
 
         // The coarse chunks already on screen take it now.
         for (auto const& [key, node] : body.nodes)
@@ -1287,6 +1403,28 @@ namespace encke::terrain
                           "last change",
                           leaves.size(), drawn, lods.c_str(), static_cast<unsigned long long>(vertices),
                           std::chrono::duration<f64, std::milli>(Clock::now() - body->busy_since).count());
+
+                // Where the jobs behind it went, per LOD: how each ended, and
+                // the workers' milliseconds in each layer, with the macro
+                // graphs' evaluations in thousands.
+                for (size_t lod = 0; lod < body->stats.size(); ++lod)
+                {
+                    LodStats const& s = body->stats[lod];
+                    if (std::ranges::all_of(s.jobs, [](u32 count) { return count == 0; }))
+                    {
+                        continue;
+                    }
+                    auto const ms = [](f64 seconds) { return seconds * 1000.0; };
+                    auto const k  = [](u64 count) { return static_cast<f64>(count) / 1000.0; };
+                    log::info("terrain: jobs L%zu: %u skipped, %u probed empty, %u sampled empty, %u meshed; %.1f ms: "
+                              "probe macro %.1f (%.0fk) detail %.1f; chunk macro %.1f (%.0fk) detail %.1f coarse %.1f; "
+                              "climate %.1f (%.0fk)",
+                              lod, s.jobs[0], s.jobs[1], s.jobs[2], s.jobs[3], ms(s.total),
+                              ms(s.probe.macro), k(s.probe.macro_evaluations), ms(s.probe.detail),
+                              ms(s.chunk.macro), k(s.chunk.macro_evaluations), ms(s.chunk.detail), ms(s.chunk.coarse),
+                              ms(s.climate.macro), k(s.climate.macro_evaluations));
+                }
+                body->stats = {};
             }
             body->settled = settled;
         }

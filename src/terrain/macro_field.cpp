@@ -77,6 +77,7 @@ namespace encke::terrain
 
     bool MacroField::fill_constants(size_t count, MacroValues& out, size_t first, size_t last)
     {
+        evaluations_ = 0;
         for (size_t channel = first; channel < last; ++channel)
         {
             out.channels[channel].resize(count);
@@ -190,6 +191,7 @@ namespace encke::terrain
             graph->GenPositionArray3D(node_values_.data(), static_cast<int>(nodes),
                                       node_x_.data(), node_y_.data(), node_z_.data(),
                                       0.0f, 0.0f, 0.0f, seed_);
+            evaluations_ += nodes;
 
             // sample() lerps along x on the four node rows around a point,
             // then y, then z. Separably: along x on every node row, then
@@ -263,6 +265,7 @@ namespace encke::terrain
 
             graph->GenPositionArray3D(node_values_.data(), static_cast<int>(count), x.data(), y.data(), z.data(),
                                       0.0f, 0.0f, 0.0f, seed_);
+            evaluations_ += count;
 
             MacroChannelSpec const& mapping = spec_.channels[channel];
             span<f32> const         values  = out.channels[channel];
@@ -322,6 +325,7 @@ namespace encke::terrain
             graph->GenPositionArray3D(node_values_.data(), static_cast<int>(nodes),
                                       node_x_.data(), node_y_.data(), node_z_.data(),
                                       0.0f, 0.0f, 0.0f, seed_);
+            evaluations_ += nodes;
 
             MacroChannelSpec const& mapping = spec_.channels[channel];
             span<f32> const         values  = out.channels[channel];

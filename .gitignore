@@ -23,5 +23,8 @@ CMakeUserPresets.json
 /scenarios/out/
 /scenarios/reference/
 
+# Baked surface maps, rebuilt when missing; `encke --clear-cache` empties it
+/cache/
+
 # Misc
 *.log

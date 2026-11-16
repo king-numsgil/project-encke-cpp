@@ -105,12 +105,14 @@ namespace encke::terrain
 
     // Seconds spent by the last call: in each layer over the chunk's own
     // samples, and on the coarse output (the parent grid points past the
-    // chunk's far faces, and the gradients).
+    // chunk's far faces, and the gradients). And how many graph evaluations
+    // the macro seconds went on: lattice nodes times graphs.
     struct LayerTiming
     {
         f64 macro  = 0.0;
         f64 detail = 0.0;
         f64 coarse = 0.0;
+        u64 macro_evaluations = 0;
     };
 
     // Samples one body's terrain. One instance per thread: it owns
@@ -148,7 +150,7 @@ namespace encke::terrain
         // The climate channels at origin + (x[i], y[i], z[i]): temperature
         // and moisture as the macro graphs map them, before altitude and
         // latitude. On the same lattice as the field, so continuous across
-        // chunks.
+        // chunks. last_timing() is then its macro time alone.
         void sample_climate(f64vec3 const& origin, f64 voxel_size, span<f32 const> x, span<f32 const> y,
                             span<f32 const> z, span<f32> temperature, span<f32> moisture);
 

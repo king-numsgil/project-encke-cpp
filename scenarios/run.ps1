@@ -22,11 +22,17 @@
     scenarios\run.ps1 walk, torchship       # these, in this order
     scenarios\run.ps1 -Preset release       # another build
     scenarios\run.ps1 -Separate             # one process per file
+    scenarios\run.ps1 -ClearCache           # bake the surface map afresh; rarely needed
 #>
 param(
     [string[]] $Name,
     [string]   $Preset = "clang-sanitize",
-    [switch]   $Separate
+    [switch]   $Separate,
+    # Empty cache/ first, so the surface map is baked by this build and not
+    # read from disk. Not for routine use: the cache is kept between runs
+    # and retires stale files itself. Only for a change to the bake or the
+    # ground rules whose captures show no diff.
+    [switch]   $ClearCache
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,12 +62,16 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $files  = $Name | ForEach-Object { Join-Path $root "$_.json" }
 $failed = $false
 
+# Once, by the first process; later ones read what it baked.
+$clear = if ($ClearCache) { @("--clear-cache") } else { @() }
+
 if ($Separate)
 {
     foreach ($file in $files)
     {
         $base = [IO.Path]::GetFileNameWithoutExtension($file)
-        & $exe --scenario $file *> (Join-Path $out "$base.log")
+        & $exe @clear --scenario $file *> (Join-Path $out "$base.log")
+        $clear = @()
         if ($LASTEXITCODE -ne 0)
         {
             Write-Host "$base failed (exit $LASTEXITCODE); see out\$base.log" -ForegroundColor Red
@@ -72,7 +82,7 @@ if ($Separate)
 else
 {
     $arguments = $files | ForEach-Object { "--scenario"; $_ }
-    & $exe @arguments *> (Join-Path $out "run.log")
+    & $exe @clear @arguments *> (Join-Path $out "run.log")
     if ($LASTEXITCODE -ne 0)
     {
         Write-Host "the run failed (exit $LASTEXITCODE); see out\run.log" -ForegroundColor Red

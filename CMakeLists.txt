@@ -260,6 +260,14 @@ target_compile_definitions(encke_core PUBLIC
     ENCKE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
 )
 
+# What a run computes once and keeps: baked surface maps. In the source tree,
+# gitignored, so every preset shares it: the GCC and clang builds bake the
+# same bytes, and a file from a build that did not would fail its canaries
+# and be baked over. `encke --clear-cache` empties it.
+target_compile_definitions(encke_core PUBLIC
+    ENCKE_CACHE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cache"
+)
+
 # --- shaders -----------------------------------------------------------------
 
 # Lands beside the executable; the runtime resolves SPIR-V against

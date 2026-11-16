@@ -36,6 +36,11 @@ own lattice split, and floor(o * f * L) is not L * floor(o * f).
   voxel where voxels are larger. **Voxel sizes and the spacing must be powers
   of two**, so a coarse LOD's samples are nodes of the finer lattice, and
   grid positions are exact in f32 and f64.
+- A box sampled at a stride is on that stride's lattice: its spacing is
+  `max(lattice_spacing, stride * base voxel)`. So `certainly_empty`'s probe,
+  four voxels apart, has a lattice four voxels apart from LOD 6 up, 11 nodes
+  a side for its 10 points, where the chunk it probes has 37. Its points are
+  nodes of the chunk's lattice too, so the values are the chunk's.
 - Boxes of grid points go through per-axis paths (`MacroField::sample_grid`
   interpolates separably, `box_octave` copies a block's row segments),
   because per-sample `i64` arithmetic and scatters kept the loops scalar.
@@ -137,6 +142,12 @@ a node is a LOD and a grid corner (`NodeKey`).
   on one side of the surface by 5 half-diagonals, the chunk is empty. Most
   jobs mesh nothing. `TerrainOctree::update` runs after the pool's drain and
   before `Scene::update`.
+- Each settle logs, per LOD, how its jobs ended (skipped, probed empty,
+  sampled in full and empty, meshed) and the workers' time in each layer of
+  the probe, the chunk and the climate, with the macro graphs' evaluations
+  (`LayerTiming::macro_evaluations`). `--headless` prints what each macro
+  graph costs against one Simplex. Measure with these before reasoning from
+  the code about where a cold start goes.
 - Swaps leave no holes: a node on screen stays until what replaces it is
   ready (its ancestor when merging, every leaf inside it when splitting),
   and then goes in the same frame. Nodes on screen never overlap.
@@ -276,6 +287,31 @@ until the camera nears one.
   what the G-buffer shows once its maps mip to a texel (`measure_ground`).
 - Six jobs on the pool, one per face; the last lays out the atlas. Priority
   is the nearest a chunk shaded from the map can be (`map_priority`).
+- The atlases are cached on disk in `OctreeSettings::map_cache`, which `App`
+  sets to `ENCKE_CACHE_DIR`, `cache/` at the repository's root, gitignored;
+  empty, as in the tests, every run bakes. The file is named by `surface_map_key`, a hash
+  of what the bake is given: radius, seed, the Height, Temperature and
+  Moisture channels, the layout, the ground looks. What the key cannot see is
+  the code, so the header carries canaries: four texel rows of each face from
+  `bake_rows`, with the macro values under them unrounded. A load bakes those
+  rows again, ahead of every chunk, and takes the file only if they match to
+  the byte and the atlases pass their checksum; otherwise the faces are baked
+  and the file written over. A cached map is the baked map byte for byte, so
+  captures do not depend on which a run got.
+- A file is 40 bytes of header, the canaries, and the two atlases raw, 53 MB
+  at 1024 a face. A spec that changes leaves its old file behind;
+  `encke --clear-cache` empties the directory before the run reads it, and
+  `scenarios\run.ps1 -ClearCache` passes it.
+- Every preset shares the directory. The release GCC build and clang-sanitize
+  bake the example planet's map to the same bytes, canaries included; a
+  build that did not would fail the other's canaries and bake over the file,
+  a bake per switch and never a wrong map.
+- The canaries are 24 rows of 6336. A change to the graphs' arithmetic shows
+  in their unrounded values wherever it lands, but a change to
+  `ground_materials` or to the bake that touches only texels off those rows
+  passes, and the old map loads. That is the one change to clear the cache
+  for, once, if its captures show no diff. Otherwise leave it from run to
+  run: the key and the canaries retire a stale file without help.
 - Chunks from `kSurfaceMapLod` (16) up are shaded from the map once it has
   landed, so the root chunks and the impostor show the same colour, normal
   and roughness, and the handover changes only geometry.
@@ -301,6 +337,9 @@ until the camera nears one.
 - While meshing lags the camera, a node kept past its time is morphed for the
   distance it is drawn at and can pop when it goes.
 - A cold start at the surface meshes thousands of chunks; it takes seconds.
+  The probe proves only about a quarter of its jobs empty; more than a third
+  are sampled in full and then mesh nothing. From LOD 8 up a chunk's time is
+  mostly the macro graphs, at 37^3 lattice nodes, one per sample.
 - The cull cache grows with where the camera has been; nothing prunes it.
 - `GeometryPool::release` and the renderer's side of mesh release are not
   driven by any test.
@@ -310,7 +349,8 @@ until the camera nears one.
 - Ground blending is linear between the two heaviest materials, no height
   blend; only rock is triplanar; one palette for every body.
 - The surface map is magnified where map-shaded chunks are near, and texels
-  show; it is baked every run and never cached.
+  show.
+- Nothing prunes the surface map cache.
 - Impostors are traced at one height per pixel: no parallax, no limb relief,
   no mountain shadows. An impostor waits for its textures; if the upload
   budget is full when the octree switches, a frame can show neither.

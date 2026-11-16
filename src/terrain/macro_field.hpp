@@ -94,6 +94,10 @@ namespace encke::terrain
         void sample_points(span<f32 const> x, span<f32 const> y, span<f32 const> z,
                            MacroValues& out, size_t first = 0, size_t last = kFieldChannelCount);
 
+        // Graph evaluations the last sample call made: lattice nodes, or
+        // points, times the channels that have a graph.
+        u64 last_evaluations() const { return evaluations_; }
+
     private:
         struct Nodes;
 
@@ -126,6 +130,7 @@ namespace encke::terrain
         array<Axis, 3>         axes_;
         vector<f64>            along_x_;
         vector<f64>            along_y_;
+        u64                    evaluations_ = 0;
     };
 
     // An FBm-over-Simplex graph, encoded as the Node Editor would: for

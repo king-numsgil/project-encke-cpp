@@ -238,6 +238,7 @@ namespace encke
             .map_layout   = terrain::SurfaceMapLayout{.face = config::kSurfaceMapFace, .border = config::kSurfaceMapBorder},
             .map_lod      = config::kSurfaceMapLod,
             .impostor_hysteresis = config::kImpostorHysteresis,
+            .map_cache           = ENCKE_CACHE_DIR,
         }};
 
         // Before the pool, so the pool's workers, whose collision jobs use
